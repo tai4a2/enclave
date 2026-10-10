@@ -69,6 +69,38 @@ impl Default for ToolsSettings {
     }
 }
 
+/// What the privacy guard does when sensitive data is detected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum GuardMode {
+    /// Show a preview and ask the user (send / placeholders / refuse).
+    #[serde(rename = "ask")]
+    Ask,
+    /// Automatically replace findings with placeholders (no prompt).
+    #[serde(rename = "redact")]
+    Redact,
+    /// Automatically refuse to send when findings are detected.
+    #[serde(rename = "block")]
+    Block,
+}
+
+/// Privacy-guard settings (see `src/privacy/guard.rs`).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct GuardSettings {
+    /// Master switch: when false, messages are sent unmodified.
+    pub enabled: bool,
+    /// Behaviour when sensitive data is detected.
+    pub mode: GuardMode,
+}
+
+impl Default for GuardSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            mode: GuardMode::Ask,
+        }
+    }
+}
+
 /// Persisted, non-sensitive application settings.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Settings {
@@ -85,6 +117,9 @@ pub struct Settings {
     /// Shell-tool settings.
     #[serde(default)]
     pub tools: ToolsSettings,
+    /// Privacy-guard settings.
+    #[serde(default)]
+    pub guard: GuardSettings,
 }
 
 impl Settings {
@@ -95,6 +130,15 @@ impl Settings {
             t.enabled = false;
         }
         t
+    }
+
+    /// Resolve the effective guard configuration given the `--no-guard` flag.
+    pub fn effective_guard(&self, no_guard_flag: bool) -> GuardSettings {
+        let mut g = self.guard.clone();
+        if no_guard_flag {
+            g.enabled = false;
+        }
+        g
     }
 }
 
@@ -107,6 +151,7 @@ impl Default for Settings {
             system_prompt: None,
             ollama_base_url: "http://localhost:11434".to_string(),
             tools: ToolsSettings::default(),
+            guard: GuardSettings::default(),
         }
     }
 }

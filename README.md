@@ -89,6 +89,39 @@ Built-in guardrails:
 - command output is stored in the encrypted history and will be sent to the
   provider on the next turn — use `--provider ollama` to keep it local
 
+## Privacy Guard (sensitive-data interception)
+
+Before any message reaches a **cloud** provider, Enclave scans it for
+sensitive data. Detected categories: emails, phone numbers, IBANs, Italian
+tax IDs, card numbers (Luhn-validated), API secrets (`sk-…`, `ghp_…`, AWS,
+JWT…) and IP addresses.
+
+```text
+⚠ privacy guard — 2 sensitive item(s) detected:
+  · email: mario.rossi@gmail.com
+  · phone: +39 333 1234567
+send [s]as-is / [p]laceholders / [r]efuse >
+```
+
+- **as-is**: you explicitly approve this session's content for the network
+- **placeholders**: every occurrence is replaced with a stable token
+  (`[EMAIL_1]`, `[IBAN_1]`, …) in **every outgoing request**, while the
+  original text stays only in the encrypted local history
+- **refuse**: the message is not sent; in the TUI it returns to the input
+  box for editing
+
+Configuration (`config.toml`):
+
+```toml
+[guard]
+enabled = true
+mode = "ask"   # ask | redact (auto-placeholder) | block (auto-refuse)
+```
+
+`--no-guard` disables the scan (not recommended). Detection runs on every
+turn — including the whole history that is re-sent — with stable placeholder
+numbering, so the model never sees inconsistent tokens.
+
 ## TUI keybindings
 
 | Key | Action |
@@ -99,6 +132,7 @@ Built-in guardrails:
 | `Ctrl-L` | Clear the session (wipes encrypted history, starts fresh) |
 | `Ctrl-W` / `Ctrl-U` | Delete word / clear input |
 | `PgUp` / `PgDn` (or ↑/↓) | Scroll transcript |
+| `?` (empty input) | Toggle the shortcuts overlay |
 | Mouse wheel | Scroll transcript |
 | `Tab` | Toggle focus between chat and the sessions sidebar |
 | `↑`/`↓` + `Enter` (sidebar) | Switch to another encrypted session |
@@ -106,6 +140,7 @@ Built-in guardrails:
 | `r` (sidebar) | Rename the selected session |
 | `d` (sidebar) | Delete the selected session (the active one is protected) |
 | `y` / `n` / `a` / `q` | Approve / deny / approve-all / skip shell proposals |
+| `s` / `p` / `r` / `Esc` (guard overlay) | Send as-is / placeholders / refuse sensitive data |
 
 Slash commands (typed in the message box, executed locally, never sent to the provider):
 
@@ -166,6 +201,24 @@ cargo build       # debug build
 ```
 
 Architecture and design details live in [`docs/`](docs/).
+
+### macOS keychain prompts on every launch
+
+The binary touches the keychain twice per launch (API key + master key). If
+`dist/enclave` is **unsigned**, macOS cannot remember an "Always Allow" grant
+(the code signature changes on every rebuild) and re-asks the keychain
+password for each item at every launch. Fix:
+
+```bash
+codesign --force --sign - dist/enclave   # ad-hoc sign (included below)
+```
+
+then on the next launch choose **Always Allow** (not just *Allow*) for both
+items. The grant persists until the binary is rebuilt; re-sign after every
+rebuild. For a grant that also survives rebuilds, create a self-signed
+code-signing certificate (Keychain Access → Certificate Assistant → Create a
+Certificate → type *Code Signing*, e.g. name `enclave-local`) and sign with
+`codesign --force --sign enclave-local dist/enclave` instead.
 
 ## License
 

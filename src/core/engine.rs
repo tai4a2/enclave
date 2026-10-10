@@ -3,6 +3,7 @@
 use crate::core::message::Message;
 use crate::core::session::Session;
 use crate::error::Result;
+use crate::privacy::guard::{Redactor, redact_messages};
 use crate::privacy::memory::EncryptedMemory;
 use crate::providers::{ChunkStream, Provider};
 
@@ -13,6 +14,10 @@ pub struct ChatEngine {
     pub memory: EncryptedMemory,
     pub session: Session,
     pub system_prompt: Option<String>,
+    /// When set, every outgoing message (except the system prompt) is
+    /// redacted with stable placeholders before reaching the provider.
+    /// The stored history keeps the original (encrypted at rest).
+    pub redactor: Option<Redactor>,
 }
 
 impl ChatEngine {
@@ -29,6 +34,7 @@ impl ChatEngine {
             memory,
             session,
             system_prompt,
+            redactor: None,
         }
     }
 
@@ -47,10 +53,20 @@ impl ChatEngine {
         msgs
     }
 
+    /// Build the outgoing request, applying privacy-guard redaction when active.
+    pub fn outgoing_messages(&mut self) -> Vec<Message> {
+        let skip_system = self.system_prompt.is_some();
+        let mut msgs = self.request_messages();
+        if let Some(r) = &mut self.redactor {
+            redact_messages(&mut msgs, r, skip_system);
+        }
+        msgs
+    }
+
     /// Persist the user's input and start streaming the assistant reply.
     pub async fn stream_reply(&mut self, input: &str) -> Result<ChunkStream> {
         self.session.add_user(&self.memory, input)?;
-        let messages = self.request_messages();
+        let messages = self.outgoing_messages();
         self.provider.chat_stream(messages, &self.model).await
     }
 

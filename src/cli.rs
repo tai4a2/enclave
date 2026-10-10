@@ -36,6 +36,9 @@ pub enum Command {
         /// Ignore shell commands proposed by the assistant (no execution prompts).
         #[arg(long)]
         no_tools: bool,
+        /// Send messages without the privacy-guard scan (not recommended).
+        #[arg(long)]
+        no_guard: bool,
     },
     /// Launch the full-screen terminal UI.
     Tui {
@@ -50,6 +53,9 @@ pub enum Command {
         /// Ignore shell commands proposed by the assistant (no execution prompts).
         #[arg(long)]
         no_tools: bool,
+        /// Send messages without the privacy-guard scan (not recommended).
+        #[arg(long)]
+        no_guard: bool,
     },
     /// Manage API keys in the OS keychain.
     Keys {
@@ -161,6 +167,7 @@ pub fn run(cli: Cli) -> Result<()> {
             session,
             no_keychain,
             no_tools,
+            no_guard,
         } => {
             let engine = build_engine(
                 &paths,
@@ -171,9 +178,10 @@ pub fn run(cli: Cli) -> Result<()> {
                 no_keychain,
             )?;
             let tools = settings.effective_tools(no_tools);
+            let guard = settings.effective_guard(no_guard);
             let runtime = tokio::runtime::Runtime::new()
                 .map_err(|e| EnclaveError::other(e.to_string()))?;
-            runtime.block_on(chat_loop(engine, tools))
+            runtime.block_on(chat_loop(engine, tools, guard))
         }
         Command::Tui {
             model,
@@ -181,6 +189,7 @@ pub fn run(cli: Cli) -> Result<()> {
             session,
             no_keychain,
             no_tools,
+            no_guard,
         } => {
             let engine = build_engine(
                 &paths,
@@ -191,9 +200,10 @@ pub fn run(cli: Cli) -> Result<()> {
                 no_keychain,
             )?;
             let tools = settings.effective_tools(no_tools);
+            let guard = settings.effective_guard(no_guard);
             let runtime = tokio::runtime::Runtime::new()
                 .map_err(|e| EnclaveError::other(e.to_string()))?;
-            runtime.block_on(crate::tui::run(engine, tools))
+            runtime.block_on(crate::tui::run(engine, tools, guard))
         }
     }
 }
@@ -236,7 +246,21 @@ fn build_engine(
     ))
 }
 
-async fn chat_loop(mut engine: ChatEngine, tools: crate::config::ToolsSettings) -> Result<()> {
+/// Session-scoped privacy-guard decision (never persisted).
+enum GuardDecision {
+    /// No sensitive data seen yet.
+    Undecided,
+    /// User chose "send as-is" for this session.
+    Approved,
+    /// Placeholders are active (redactor lives in the engine).
+    Redacted,
+}
+
+async fn chat_loop(
+    mut engine: ChatEngine,
+    tools: crate::config::ToolsSettings,
+    guard: crate::config::GuardSettings,
+) -> Result<()> {
     use futures::StreamExt;
 
     println!(
@@ -248,7 +272,19 @@ async fn chat_loop(mut engine: ChatEngine, tools: crate::config::ToolsSettings) 
     if tools.enabled {
         println!("Tools: ON — the assistant may propose shell commands; nothing runs without your approval.");
     }
+    if guard.enabled {
+        println!(
+            "Privacy guard: ON ({}) — sensitive data is detected before anything leaves the machine.",
+            match guard.mode {
+                crate::config::GuardMode::Ask => "ask",
+                crate::config::GuardMode::Redact => "auto-placeholder",
+                crate::config::GuardMode::Block => "block",
+            }
+        );
+    }
     println!("Type 'exit' to quit, 'clear' to start a fresh session.\n");
+
+    let mut decision = GuardDecision::Undecided;
 
     loop {
         print!("you> ");
@@ -272,6 +308,11 @@ async fn chat_loop(mut engine: ChatEngine, tools: crate::config::ToolsSettings) 
             continue;
         }
 
+        if !guard_gate(&mut engine, &mut decision, input, &guard)? {
+            println!("message not sent\n");
+            continue;
+        }
+
         print!("ai> ");
         std::io::stdout().flush().ok();
         let mut stream = engine.stream_reply(input).await?;
@@ -288,6 +329,91 @@ async fn chat_loop(mut engine: ChatEngine, tools: crate::config::ToolsSettings) 
     }
 
     Ok(())
+}
+
+/// Privacy-guard gate: scan the input and enforce the configured behaviour.
+///
+/// Returns `true` when the message may be sent.
+fn guard_gate(
+    engine: &mut ChatEngine,
+    decision: &mut GuardDecision,
+    input: &str,
+    guard: &crate::config::GuardSettings,
+) -> Result<bool> {
+    use crate::config::GuardMode;
+    use crate::privacy::guard::{self, Redactor};
+
+    if !guard.enabled {
+        return Ok(true);
+    }
+    let findings = guard::scan(input);
+
+    match decision {
+        GuardDecision::Approved => return Ok(true),
+        GuardDecision::Redacted => return Ok(true), // engine.redactor handles everything
+        GuardDecision::Undecided => {}
+    }
+
+    if findings.is_empty() {
+        return Ok(true);
+    }
+
+    match guard.mode {
+        GuardMode::Redact => {
+            engine.redactor = Some(Redactor::new());
+            *decision = GuardDecision::Redacted;
+            println!(
+                "privacy guard: {} sensitive item(s) replaced with placeholders",
+                findings.len()
+            );
+            Ok(true)
+        }
+        GuardMode::Block => {
+            print_findings(&findings);
+            println!("blocked by privacy guard (mode: block) — message not sent");
+            Ok(false)
+        }
+        GuardMode::Ask => {
+            print_findings(&findings);
+            let answer = prompt_guard_choice()?;
+            match answer.as_str() {
+                "s" => {
+                    *decision = GuardDecision::Approved;
+                    println!("privacy guard: off for this session");
+                    Ok(true)
+                }
+                "p" => {
+                    engine.redactor = Some(Redactor::new());
+                    *decision = GuardDecision::Redacted;
+                    println!("privacy guard: placeholders active for this session");
+                    Ok(true)
+                }
+                _ => Ok(false),
+            }
+        }
+    }
+}
+
+fn print_findings(findings: &[crate::privacy::guard::Finding]) {
+    println!(
+        "⚠ privacy guard — {} sensitive item(s) detected:",
+        findings.len()
+    );
+    for f in findings {
+        println!("  · {}: {}", f.kind.label(), f.text);
+    }
+}
+
+fn prompt_guard_choice() -> Result<String> {
+    print!("send [s]as-is / [p]laceholders / [r]efuse > ");
+    std::io::stdout().flush().ok();
+    let mut line = String::new();
+    let n = std::io::stdin().read_line(&mut line)?;
+    if n == 0 {
+        // EOF: refuse (privacy-first).
+        return Ok("r".to_string());
+    }
+    Ok(line.trim().to_lowercase())
 }
 
 /// Offer the assistant's shell proposals for execution (ask-always).

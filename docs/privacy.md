@@ -54,6 +54,18 @@ requires your explicit approval and nothing auto-runs. Approved command output
 is encrypted at rest but travels to the provider on the next turn — see
 [tools.md](tools.md) for the full security model.
 
+### Privacy guard
+
+`src/privacy/guard.rs` scans every outgoing request for sensitive data
+(emails, phones, IBANs, tax IDs, card numbers, API secrets, IPs). With the
+default `guard.mode = "ask"` you see a preview and choose: send as-is,
+replace each finding with a stable placeholder (`[EMAIL_1]`…), or refuse.
+Redaction is applied to the whole history on every turn — placeholders stay
+consistent while the original text never leaves the encrypted database.
+Note: the scan is deterministic (regex + Luhn), not an AI model; sophisticated
+identifiers (e.g. free-text names without structure) are out of scope.
+Remote providers still receive whatever you explicitly approved.
+
 ## 5. Telemetry
 
 Zero. No analytics, no crash reporting, no update pings, no logging of message content.

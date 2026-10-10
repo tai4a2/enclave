@@ -1,0 +1,17 @@
+# Build artifacts
+/target
+/dist
+
+# Local databases and secrets (never commit the vault or salt)
+*.db
+*.db-journal
+salt.bin
+
+# Environment
+.env
+.env.*
+
+# Editor / OS
+.idea/
+.vscode/
+.DS_Store

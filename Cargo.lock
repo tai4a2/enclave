@@ -741,6 +741,7 @@ dependencies = [
  "pbkdf2",
  "rand 0.8.8",
  "ratatui",
+ "regex",
  "reqwest",
  "rpassword",
  "rusqlite",

@@ -9,12 +9,29 @@ pub struct Session {
     pub id: String,
     pub name: String,
     pub messages: Vec<Message>,
+    /// Ephemeral sessions never touch the encrypted store (sub-agents).
+    pub ephemeral: bool,
 }
 
 impl Session {
-    /// Stub constructor.
+    /// Build a session from already-loaded messages.
     pub fn from_messages(id: String, name: String, messages: Vec<Message>) -> Self {
-        Session { id, name, messages }
+        Session {
+            id,
+            name,
+            messages,
+            ephemeral: false,
+        }
+    }
+
+    /// A RAM-only session for sub-agents: nothing is persisted.
+    pub fn ephemeral(name: &str) -> Self {
+        Session {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: name.to_string(),
+            messages: Vec::new(),
+            ephemeral: true,
+        }
     }
 
     /// Create a brand new session and persist it.
@@ -24,6 +41,7 @@ impl Session {
             id,
             name: name.to_string(),
             messages: Vec::new(),
+            ephemeral: false,
         })
     }
 
@@ -43,20 +61,26 @@ impl Session {
             id: id.to_string(),
             name,
             messages,
+            ephemeral: false,
         })
     }
 
     /// Append a user message (RAM + encrypted store).
     pub fn add_user(&mut self, memory: &EncryptedMemory, content: &str) -> Result<()> {
-        memory.save_message(&self.id, "user", content)?;
-        self.messages.push(Message::user(content));
-        Ok(())
+        self.push(Message::user(content), memory)
     }
 
     /// Append an assistant message (RAM + encrypted store).
     pub fn add_assistant(&mut self, memory: &EncryptedMemory, content: &str) -> Result<()> {
-        memory.save_message(&self.id, "assistant", content)?;
-        self.messages.push(Message::assistant(content));
+        self.push(Message::assistant(content), memory)
+    }
+
+    /// Append any message (including tool calls/results), persisting metadata.
+    pub fn push(&mut self, message: Message, memory: &EncryptedMemory) -> Result<()> {
+        if !self.ephemeral {
+            memory.save_message_full(&self.id, &message)?;
+        }
+        self.messages.push(message);
         Ok(())
     }
 

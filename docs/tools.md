@@ -3,6 +3,20 @@
 Enclave lets the assistant *propose* shell commands but never lets it *run*
 anything on its own. This document describes the exact security properties.
 
+Enclave has two tool mechanisms:
+
+1. **Proposals mode** (default) — markdown ` ```bash ` blocks reviewed by the
+   human, executed via `sh -c` (below).
+2. **Agentic mode** (`enclave chat --agent` or `tools.mode = "agent"`) — real
+   function calling: the model returns structured tool calls
+   (`read_file`, `write_file`, `list_dir`, `run_shell`), Enclave executes
+   them only after the same ask-always approval, and feeds results back
+   (max 8 iterations). File paths are canonicalized and must resolve inside
+   the current workspace (`..` and outside-absolute paths are rejected).
+   The privacy guard redacts tool arguments and results like any other
+   outgoing text. Multi-agent `delegate` runs sub-agents with **ephemeral,
+   RAM-only sessions** and cannot recurse further (depth limit 1).
+
 ## Design: proposals, not function calling
 
 The assistant emits fenced ` ```bash ` blocks in its reply. Enclave parses

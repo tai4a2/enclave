@@ -5,9 +5,42 @@
 
 use std::path::Path;
 
-use crate::core::message::{Message, Role};
+use serde::{Deserialize, Serialize};
+
+use crate::core::message::{Message, Role, ToolCall};
 use crate::error::{EnclaveError, Result};
 use crate::privacy::vault::MasterKey;
+
+/// Tool-call metadata persisted alongside a message.
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct MessageMeta {
+    #[serde(default)]
+    tool_calls: Vec<ToolCall>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tool_call_id: Option<String>,
+}
+
+fn encode_meta(message: &Message) -> Result<String> {
+    if message.tool_calls.is_empty() && message.tool_call_id.is_none() {
+        return Ok(String::new());
+    }
+    let meta = MessageMeta {
+        tool_calls: message.tool_calls.clone(),
+        tool_call_id: message.tool_call_id.clone(),
+    };
+    serde_json::to_string(&meta).map_err(EnclaveError::from)
+}
+
+fn decode_meta(role: Role, content: String, meta: &str) -> Message {
+    let mut message = Message::new(role, content);
+    if !meta.is_empty() {
+        if let Ok(parsed) = serde_json::from_str::<MessageMeta>(meta) {
+            message.tool_calls = parsed.tool_calls;
+            message.tool_call_id = parsed.tool_call_id;
+        }
+    }
+    message
+}
 
 /// Summary row describing a stored session.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,6 +73,17 @@ impl EncryptedMemory {
     pub fn open(db_path: &Path, key: &MasterKey) -> Result<Self> {
         let conn = rusqlite::Connection::open(db_path)?;
         conn.execute_batch(&format!("PRAGMA key = \"x'{}'\";", key.to_hex()))?;
+        Self::configure(conn)
+    }
+
+    /// An encrypted in-memory database (sub-agents: nothing touches disk).
+    pub fn open_ephemeral(key: &MasterKey) -> Result<Self> {
+        let conn = rusqlite::Connection::open_in_memory()?;
+        conn.execute_batch(&format!("PRAGMA key = \"x'{}'\";", key.to_hex()))?;
+        Self::configure(conn)
+    }
+
+    fn configure(conn: rusqlite::Connection) -> Result<Self> {
         conn.execute_batch(
             "PRAGMA cipher_page_size = 4096; \
              PRAGMA kdf_iter = 256000; \
@@ -63,6 +107,17 @@ impl EncryptedMemory {
              );\
              CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, id);",
         )?;
+        // Migration: tool-call metadata column (added in 0.2).
+        let has_meta: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('messages') WHERE name = 'meta'",
+            [],
+            |r| r.get(0),
+        )?;
+        if has_meta == 0 {
+            conn.execute_batch(
+                "ALTER TABLE messages ADD COLUMN meta TEXT NOT NULL DEFAULT '';",
+            )?;
+        }
         Ok(Self { conn })
     }
 
@@ -114,18 +169,35 @@ impl EncryptedMemory {
         Ok(())
     }
 
+    /// Persist a full [`Message`], including tool-call metadata.
+    pub fn save_message_full(&self, session_id: &str, message: &Message) -> Result<()> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let meta = encode_meta(message)?;
+        self.conn.execute(
+            "INSERT INTO messages (session_id, role, content, timestamp, meta) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![session_id, message.role.as_str(), message.content, now, meta],
+        )?;
+        self.conn.execute(
+            "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
+            rusqlite::params![now, session_id],
+        )?;
+        Ok(())
+    }
+
     /// Fetch the most recent `limit` messages in chronological order.
     pub fn get_history(&self, session_id: &str, limit: usize) -> Result<Vec<Message>> {
         let mut stmt = self.conn.prepare(
-            "SELECT role, content FROM (\
-                SELECT id, role, content FROM messages \
+            "SELECT role, content, meta FROM (\
+                SELECT id, role, content, meta FROM messages \
                 WHERE session_id = ?1 ORDER BY id DESC LIMIT ?2\
-             ) ORDER BY id ASC",
+              ) ORDER BY id ASC",
         )?;
         let rows = stmt.query_map(rusqlite::params![session_id, limit as i64], |row| {
             let role: String = row.get(0)?;
             let content: String = row.get(1)?;
-            Ok(Message::new(Role::parse(&role), content))
+            let meta: String = row.get(2)?;
+            Ok(decode_meta(Role::parse(&role), content, &meta))
         })?;
         let mut history = Vec::new();
         for row in rows {

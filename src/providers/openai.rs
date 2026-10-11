@@ -6,7 +6,8 @@ use futures::StreamExt;
 
 use crate::core::message::Message;
 use crate::error::{EnclaveError, Result};
-use crate::providers::{ChunkStream, Provider};
+use crate::providers::openai_compat;
+use crate::providers::{ChunkStream, Provider, ToolDef, ToolResponse};
 
 pub struct OpenAIProvider {
     client: reqwest::Client,
@@ -85,5 +86,39 @@ impl Provider for OpenAIProvider {
         };
 
         Ok(Box::pin(stream))
+    }
+
+    async fn chat_with_tools(
+        &self,
+        messages: Vec<Message>,
+        model: &str,
+        tools: &[ToolDef],
+    ) -> Result<ToolResponse> {
+        let body = serde_json::json!({
+            "model": model,
+            "messages": openai_compat::wire_messages(&messages),
+            "stream": false,
+            "tools": openai_compat::tools_json(tools),
+            "tool_choice": "auto",
+        });
+
+        let response = self
+            .client
+            .post("https://api.openai.com/v1/chat/completions")
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            return Err(EnclaveError::provider(format!("openai {status}: {text}")));
+        }
+
+        let value: serde_json::Value = response.json().await?;
+        let (text, tool_calls) = openai_compat::parse_response(&value);
+        Ok(ToolResponse { text, tool_calls })
     }
 }

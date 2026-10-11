@@ -1,11 +1,34 @@
 //! The chat engine: ties a provider, the encrypted memory and a session together.
 
-use crate::core::message::Message;
+use async_trait::async_trait;
+
+use crate::core::builtin_tools::{self, ToolContext};
+use crate::core::message::{Message, ToolCall};
 use crate::core::session::Session;
-use crate::error::Result;
+use crate::error::{EnclaveError, Result};
 use crate::privacy::guard::{Redactor, redact_messages};
 use crate::privacy::memory::EncryptedMemory;
-use crate::providers::{ChunkStream, Provider};
+use crate::providers::{ChunkStream, Provider, ToolDef};
+
+/// What the approval UI decided for a proposed tool call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolDecision {
+    Approve,
+    Deny,
+    /// Approve this one and all remaining calls of the current turn.
+    ApproveAll,
+    /// Abort the whole turn (no further calls, no further requests).
+    Stop,
+}
+
+/// UI callback surface used while the agentic loop runs.
+#[async_trait]
+pub trait ToolGate: Send {
+    /// Show the call and ask for a decision (ask-always by default).
+    async fn decide(&mut self, call: &ToolCall) -> ToolDecision;
+    /// Show the executed result.
+    async fn observe(&mut self, call: &ToolCall, output: &str);
+}
 
 /// Orchestrates a conversation turn by turn.
 pub struct ChatEngine {
@@ -73,5 +96,78 @@ impl ChatEngine {
     /// Persist a completed assistant reply.
     pub fn commit_assistant(&mut self, content: String) -> Result<()> {
         self.session.add_assistant(&self.memory, &content)
+    }
+
+    /// Run one full agentic turn: request → tool calls → approval → results
+    /// → repeat, until the assistant produces a final text answer.
+    ///
+    /// Every tool call passes through `gate` (nothing auto-runs). Tool
+    /// results are capped by the context, encrypted at rest and redacted
+    /// on the way out like any other message.
+    pub async fn turn_agentic(
+        &mut self,
+        input: &str,
+        defs: &[ToolDef],
+        ctx: &ToolContext,
+        gate: &mut dyn ToolGate,
+        max_iterations: usize,
+    ) -> Result<String> {
+        self.session.push(Message::user(input), &self.memory)?;
+        let mut approve_all = false;
+
+        for _ in 0..max_iterations.max(1) {
+            let messages = self.outgoing_messages();
+            let response = self
+                .provider
+                .chat_with_tools(messages, &self.model, defs)
+                .await?;
+
+            if response.tool_calls.is_empty() {
+                self.session
+                    .push(Message::assistant(response.text.clone()), &self.memory)?;
+                return Ok(response.text);
+            }
+
+            self.session.push(
+                Message::assistant_with_tool_calls(response.text.clone(), response.tool_calls.clone()),
+                &self.memory,
+            )?;
+
+            for call in &response.tool_calls {
+                let decision = if approve_all {
+                    ToolDecision::Approve
+                } else {
+                    match gate.decide(call).await {
+                        ToolDecision::ApproveAll => {
+                            approve_all = true;
+                            ToolDecision::Approve
+                        }
+                        other => other,
+                    }
+                };
+
+                let output = match decision {
+                    ToolDecision::Stop => {
+                        self.session
+                            .push(Message::tool_result(&call.id, "[stopped by user]"), &self.memory)?;
+                        return Ok(String::new());
+                    }
+                    ToolDecision::Deny => "[denied by user]".to_string(),
+                    ToolDecision::Approve => match builtin_tools::execute(call, ctx, gate).await {
+                        Ok(out) => out,
+                        Err(e) => format!("[tool error] {e}"),
+                    },
+                    ToolDecision::ApproveAll => unreachable!("converted above"),
+                };
+
+                gate.observe(call, &output).await;
+                self.session
+                    .push(Message::tool_result(&call.id, output), &self.memory)?;
+            }
+        }
+
+        Err(EnclaveError::other(format!(
+            "tool loop did not converge within {max_iterations} iterations"
+        )))
     }
 }

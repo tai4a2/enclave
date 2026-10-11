@@ -82,6 +82,9 @@ password can never derive the key again). Accepted risk, documented.
 2. Consider Argon2id for new vaults (keep PBKDF2 for backward compat).
 3. Consider a "sensitive session" flag that refuses remote providers.
 4. Optional: OS file-permission check on config dir (0700) at startup.
+5. Second-line guard with a decision model (Jev / TypeSafe AI) — see
+   [jev-idea.md](jev-idea.md) for the recorded design and the privacy
+   paradox to solve first.
 
 ## How to verify the audit claims
 

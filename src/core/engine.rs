@@ -151,6 +151,12 @@ pub struct ChatEngine {
     pub mode: AgentMode,
     /// Workspace root: file tools cannot escape it.
     pub workspace: PathBuf,
+    /// Task list the model maintains via the `todo` tool (shown in the UI).
+    pub todos: std::sync::Arc<std::sync::Mutex<Vec<builtin_tools::TodoItem>>>,
+    /// Connected MCP servers and their tools, if configured.
+    pub mcp: Option<std::sync::Arc<crate::core::mcp::McpRegistry>>,
+    /// Persistent memories injected into the system prompt (never `local_only`).
+    pub memories: Vec<crate::privacy::Memory>,
 }
 
 impl ChatEngine {
@@ -175,6 +181,10 @@ impl ChatEngine {
             permissions: Permissions::default(),
             mode: AgentMode::Build,
             workspace: std::env::current_dir().unwrap_or_default(),
+
+            todos: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            mcp: None,
+            memories: Vec::new(),
         }
     }
 
@@ -219,12 +229,59 @@ impl ChatEngine {
             permissions: Permissions::default(),
             mode: AgentMode::Build,
             workspace: std::env::current_dir().unwrap_or_default(),
+
+            todos: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            mcp: None,
+            memories: Vec::new(),
         })
     }
 
     /// Provider name.
     pub fn provider_name(&self) -> &'static str {
         self.provider_name
+    }
+
+    /// Reload the persistent memories that get injected into the system prompt.
+    pub fn reload_memories(&mut self) -> Result<()> {
+        self.memories = self.memory.injectable_memories(50)?;
+        Ok(())
+    }
+
+    /// Execute a tool call that needs engine state (currently `remember`),
+    /// returning `Some(result)` when handled. Callers fall through to
+    /// `builtin_tools::execute` when this returns `None`.
+    pub fn execute_stateful(&mut self, call: &ToolCall) -> Option<Result<String>> {
+        match call.name.as_str() {
+            "remember" => {
+                let args: serde_json::Value = serde_json::from_str(&call.arguments)
+                    .unwrap_or_else(|_| serde_json::json!({}));
+                let text = args["text"].as_str().unwrap_or("").trim().to_string();
+                if text.is_empty() {
+                    return Some(Err(EnclaveError::other("remember: 'text' is required")));
+                }
+                let tags = args["tags"].as_str().unwrap_or("").to_string();
+                let local_only = args["local_only"].as_bool().unwrap_or(false);
+                let sid = self.session.id.clone();
+                let out = (|| -> Result<String> {
+                    let id = self
+                        .memory
+                        .add_memory(&text, &tags, "note", Some(&sid), local_only)?;
+                    self.reload_memories()?;
+                    Ok(format!("remembered [{}] {}", &id[..8.min(id.len())], text))
+                })();
+                Some(out)
+            }
+            _ => None,
+        }
+    }
+
+    /// Built-in tool definitions plus any dynamically discovered MCP tools.
+    pub fn tool_defs(&self, with_delegate: bool) -> Vec<ToolDef> {
+        let mut defs = builtin_tools::defs(with_delegate);
+        if let Some(mcp) = &self.mcp {
+            defs.extend(mcp.defs());
+        }
+        defs
     }
 
     /// Combine the configured system prompt, local rules and the Plan-mode
@@ -243,6 +300,22 @@ impl ChatEngine {
                  step-by-step plan. Do not modify files or run mutating commands."
                     .to_string(),
             );
+        }
+        if !self.memories.is_empty() {
+            let mut block =
+                String::from("# Memory (persistent facts and preferences to remember)\n");
+            for m in &self.memories {
+                block.push_str("- ");
+                block.push_str(&m.text);
+                let tags = m.tags.trim();
+                if !tags.is_empty() {
+                    block.push_str(" (tags: ");
+                    block.push_str(tags);
+                    block.push(')');
+                }
+                block.push('\n');
+            }
+            parts.push(block.trim_end().to_string());
         }
         if parts.is_empty() {
             None
@@ -410,9 +483,13 @@ impl ChatEngine {
                             "[denied by user]".to_string()
                         }
                     }
-                    ToolDecision::Approve => match builtin_tools::execute(call, ctx, gate).await {
-                        Ok(out) => out,
-                        Err(e) => format!("[tool error] {e}"),
+                    ToolDecision::Approve => match self.execute_stateful(call) {
+                        Some(Ok(out)) => out,
+                        Some(Err(e)) => format!("[tool error] {e}"),
+                        None => match builtin_tools::execute(call, ctx, gate).await {
+                            Ok(out) => out,
+                            Err(e) => format!("[tool error] {e}"),
+                        },
                     },
                     ToolDecision::ApproveAll => unreachable!("converted above"),
                 };
@@ -529,5 +606,34 @@ impl ChatEngine {
         };
         self.session.compact_with(&self.memory, &summary)?;
         Ok(summary)
+    }
+
+    /// Send a single prompt without touching the session history and return the
+    /// model's text reply. Used for utility tasks such as `/init`.
+    pub async fn one_shot(&mut self, prompt: &str) -> Result<String> {
+        let messages = vec![Message::user(prompt)];
+        let model = self.model.clone();
+        let effort = self.reasoning_effort.clone();
+        let response = {
+            let provider = self.provider.get().await?;
+            provider
+                .chat_with_tools(messages, &model, &[], effort.as_deref())
+                .await?
+        };
+        Ok(response.text)
+    }
+
+    /// Send the current conversation plus an instruction and return the model's
+    /// text reply, without persisting anything. Used by `/checkpoint`.
+    pub async fn summarize(&mut self, instruction: &str) -> Result<String> {
+        let mut msgs = self.request_messages();
+        msgs.push(Message::user(instruction));
+        let model = self.model.clone();
+        let effort = self.reasoning_effort.clone();
+        let text = {
+            let provider = self.provider.get().await?;
+            provider.chat(msgs, &model, effort.as_deref()).await?
+        };
+        Ok(text)
     }
 }

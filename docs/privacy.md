@@ -95,6 +95,32 @@ nearest project `AGENTS.md` up to the git root, and the local paths listed in
 evaluated in-process before any tool call — a `deny` rule means the command
 never executes and is reported back to the model as `[denied by policy]`.
 
+### MCP servers
+
+MCP servers are **external processes you explicitly configure** in
+`config.toml`; Enclave only connects to them over stdio and never to a remote
+endpoint on its own. Tool arguments and results pass through the privacy guard
+like any other text, but they are produced and consumed by third-party code —
+only connect servers you trust, and keep them behind the permission model
+(default `ask`).
+
+### Long-term memory
+
+Memories (`/remember`, the `remember` tool, `/checkpoint`, periodic autosave)
+are stored **encrypted** in the same SQLCipher `vault.db` as your sessions —
+never in an external service. When a memory is injected into the system prompt
+it becomes outgoing context, so the **privacy guard scans it** before it reaches
+a cloud provider, exactly like typed text. Memories marked `local_only`
+(`/remember … --local`) are stored but **never injected**, so they cannot leave
+the machine.
+
+### Notifications
+
+The TUI can ring the terminal bell and post a macOS notification when a reply
+or a tool approval is ready (`[tui] notify`, default `true`). This is entirely
+local: the bell writes to the terminal and the macOS path shells out to
+`osascript`; no data is transmitted.
+
 ## 5. Telemetry
 
 Zero. No analytics, no crash reporting, no update pings, no logging of message content.

@@ -6,6 +6,8 @@ pub mod builtin_tools;
 pub mod commands;
 pub mod diff;
 pub mod engine;
+pub mod export;
+pub mod mcp;
 pub mod message;
 pub mod permissions;
 pub mod rules;

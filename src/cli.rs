@@ -114,6 +114,11 @@ pub enum Command {
         #[command(subcommand)]
         action: SessionsAction,
     },
+    /// Manage the encrypted local memory (facts remembered across sessions).
+    Memory {
+        #[command(subcommand)]
+        action: MemoryAction,
+    },
     /// Show the resolved configuration (no secrets).
     Config,
     /// Securely delete the encrypted database, salt and stored keys.
@@ -174,6 +179,52 @@ pub enum SessionsAction {
     Vacuum,
 }
 
+#[derive(Subcommand, Debug)]
+pub enum MemoryAction {
+    /// Remember a new fact or preference.
+    Add {
+        text: String,
+        /// Comma-separated tags (e.g. "prefs,editor").
+        #[arg(short, long, default_value = "")]
+        tags: String,
+        /// Never send this memory to a remote provider.
+        #[arg(long)]
+        local_only: bool,
+    },
+    /// List stored memories (pinned first).
+    List {
+        #[arg(short, long, default_value = "50")]
+        limit: usize,
+    },
+    /// Search memories by substring (text or tags).
+    Search { query: String },
+    /// Pin or unpin a memory so it is always injected.
+    Pin {
+        id: String,
+        /// Unpin instead of pinning.
+        #[arg(long)]
+        off: bool,
+    },
+    /// Edit a memory's text and/or tags.
+    Edit {
+        id: String,
+        #[arg(short, long)]
+        text: Option<String>,
+        #[arg(short, long)]
+        tags: Option<String>,
+    },
+    /// Delete a memory by id, or all memories matching a query.
+    Forget {
+        /// A memory id (or the full text of the memory to delete).
+        what: String,
+    },
+    /// Delete every stored memory.
+    Clear {
+        #[arg(long)]
+        force: bool,
+    },
+}
+
 /// Entry point invoked by the binary.
 pub fn run(cli: Cli) -> Result<()> {
     let paths = Paths::resolve()?;
@@ -188,6 +239,7 @@ pub fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Command::Keys { action } => keys_cmd(action),
         Command::Sessions { action } => sessions_cmd(&paths, &settings, action),
+        Command::Memory { action } => memory_cmd(&paths, &settings, action),
         Command::Models {
             search,
             set,
@@ -318,16 +370,27 @@ fn build_engine(
     let memory = EncryptedMemory::open(&paths.db_path, &key)?;
     let session = match session_id {
         Some(id) => Session::load(&memory, &id)?,
-        // Reopen the most recently used session that actually has messages, so
-        // past conversations come back and empty throwaway sessions are skipped.
-        None => match memory
-            .list_sessions()?
-            .into_iter()
-            .find(|info| info.message_count > 0)
-        {
-            Some(info) => Session::load(&memory, &info.id)?,
-            None => Session::create(&memory, "chat")?,
-        },
+        // Prefer the explicitly remembered working session, then the most
+        // recently used session that actually has messages (so empty throwaway
+        // sessions are skipped and past conversations come back).
+        None => {
+            let resumed = settings
+                .working_session
+                .as_ref()
+                .filter(|id| memory.session_exists(id).unwrap_or(false))
+                .cloned();
+            match resumed {
+                Some(id) => Session::load(&memory, &id)?,
+                None => match memory
+                    .list_sessions()?
+                    .into_iter()
+                    .find(|info| info.message_count > 0)
+                {
+                    Some(info) => Session::load(&memory, &info.id)?,
+                    None => Session::create(&memory, "chat")?,
+                },
+            }
+        }
     };
 
     // Honour the saved default model when the provider matches; an explicit
@@ -364,7 +427,21 @@ fn build_engine(
     if plan {
         engine.mode = crate::core::engine::AgentMode::Plan;
     }
+    engine.mcp = crate::core::mcp::McpRegistry::connect_all(&settings.mcp)
+        .map(std::sync::Arc::new);
+    engine.reload_memories()?;
+    persist_working_session(paths, &engine.session.id);
     Ok(engine)
+}
+
+/// Remember the session that is "in work" so the next launch resumes it.
+fn persist_working_session(paths: &Paths, id: &str) {
+    if let Ok(mut s) = Settings::load(&paths.config_file) {
+        if s.working_session.as_deref() != Some(id) {
+            s.working_session = Some(id.to_string());
+            let _ = s.save(&paths.config_file);
+        }
+    }
 }
 
 /// Session-scoped privacy-guard decision (never persisted).
@@ -717,6 +794,26 @@ fn prompt_run_choice() -> Result<String> {
     Ok(line.trim().to_lowercase())
 }
 
+/// Ask the user a free-form question on behalf of the model (`question` tool).
+pub fn prompt_question(question: &str, options: &[String]) -> Result<String> {
+    println!("\n? {question}");
+    for (i, o) in options.iter().enumerate() {
+        println!("  {}. {o}", i + 1);
+    }
+    print!("your answer: ");
+    std::io::stdout().flush().ok();
+    let mut line = String::new();
+    let n = std::io::stdin().read_line(&mut line)?;
+    if n == 0 {
+        return Ok("[no answer given]".to_string());
+    }
+    let answer = line.trim().to_string();
+    if answer.is_empty() {
+        return Ok("[no answer given]".to_string());
+    }
+    Ok(answer)
+}
+
 fn keys_cmd(action: KeysAction) -> Result<()> {
     match action {
         KeysAction::Set {
@@ -909,6 +1006,125 @@ fn db_cmd(paths: &Paths, settings: &Settings) -> Result<()> {
         }
     );
     Ok(())
+}
+
+fn memory_cmd(paths: &Paths, settings: &Settings, action: MemoryAction) -> Result<()> {
+    use crate::privacy::EncryptedMemory;
+
+    let vault = Vault::new(&paths.config_dir);
+    let key = unlock_master_key(&vault, settings, false)?;
+    let memory = EncryptedMemory::open(&paths.db_path, &key)?;
+
+    let short = |id: &str| id[..8.min(id.len())].to_string();
+
+    match action {
+        MemoryAction::Add {
+            text,
+            tags,
+            local_only,
+        } => {
+            let text = text.trim();
+            if text.is_empty() {
+                return Err(EnclaveError::other("memory text cannot be empty"));
+            }
+            let id = memory.add_memory(text, tags.trim(), "note", None, local_only)?;
+            println!(
+                "remembered [{}]{}{}",
+                short(&id),
+                if local_only { " (local-only)" } else { "" },
+                text
+            );
+        }
+        MemoryAction::List { limit } => {
+            let mems = memory.list_memories(limit)?;
+            if mems.is_empty() {
+                println!("no memories stored (add one with: enclave memory add \"...\")");
+            } else {
+                for m in mems {
+                    println!("{}  {}{}{}", short(&m.id), m.text, tags_suffix(&m.tags), flags_suffix(m.pinned, m.local_only));
+                }
+                println!("\n{} memories", memory.memory_count()?);
+            }
+        }
+        MemoryAction::Search { query } => {
+            let mems = memory.search_memories(&query, 100)?;
+            if mems.is_empty() {
+                println!("no memories match '{query}'");
+            } else {
+                for m in mems {
+                    println!("{}  {}{}{}", short(&m.id), m.text, tags_suffix(&m.tags), flags_suffix(m.pinned, m.local_only));
+                }
+            }
+        }
+        MemoryAction::Pin { id, off } => {
+            if memory.set_memory_pinned(&id, !off)? {
+                println!("{} [{}]", if off { "unpinned" } else { "pinned" }, short(&id));
+            } else {
+                println!("no memory with id '{id}'");
+            }
+        }
+        MemoryAction::Edit { id, text, tags } => {
+            let cur = memory
+                .get_memory(&id)?
+                .ok_or_else(|| EnclaveError::other(format!("no memory with id '{id}'")))?;
+            let new_text = text.unwrap_or(cur.text);
+            let new_tags = tags.unwrap_or(cur.tags);
+            if memory.update_memory(&id, &new_text, &new_tags)? {
+                println!("updated [{}]", short(&id));
+            }
+        }
+        MemoryAction::Forget { what } => {
+            if memory.delete_memory(&what)? {
+                println!("forgot [{}]", short(&what));
+            } else {
+                let n = memory.delete_memories_matching(&what)?;
+                if n == 0 {
+                    println!("no memory matched '{what}'");
+                } else {
+                    println!("forgot {n} memor{} matching '{what}'", if n == 1 { "y" } else { "ies" });
+                }
+            }
+        }
+        MemoryAction::Clear { force } => {
+            if !force {
+                print!("delete ALL memories? [y/N] ");
+                use std::io::Write;
+                std::io::stdout().flush().ok();
+                let mut line = String::new();
+                std::io::stdin().read_line(&mut line).ok();
+                if !line.trim().eq_ignore_ascii_case("y") {
+                    println!("aborted");
+                    return Ok(());
+                }
+            }
+            let n = memory.delete_memories_matching("")?;
+            println!("deleted {n} memor{}", if n == 1 { "y" } else { "ies" });
+        }
+    }
+    Ok(())
+}
+
+fn tags_suffix(tags: &str) -> String {
+    if tags.trim().is_empty() {
+        String::new()
+    } else {
+        format!("  #{}", tags.trim().replace(',', " #"))
+    }
+}
+
+fn flags_suffix(pinned: bool, local_only: bool) -> String {
+    let mut marks = Vec::new();
+    if pinned {
+        marks.push("pinned");
+    }
+    if local_only {
+        marks.push("local-only");
+    }
+    if marks.is_empty() {
+        String::new()
+    } else {
+        format!("  [{}]", marks.join(","))
+    }
 }
 
 fn sessions_cmd(paths: &Paths, settings: &Settings, action: SessionsAction) -> Result<()> {

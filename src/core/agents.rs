@@ -126,7 +126,7 @@ impl AgentRunner {
         })?;
 
         let api_key = if requires_api_key(&persona.provider) {
-            Some(SecureCredentials::get(&persona.provider)?)
+            Some(SecureCredentials::resolve_key(&persona.provider)?)
         } else {
             None
         };

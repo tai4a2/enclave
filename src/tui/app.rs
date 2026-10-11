@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use crossterm::event::{
     DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyCode, KeyEvent, KeyEventKind,
-    KeyModifiers, MouseEventKind,
+    KeyModifiers, MouseButton, MouseEventKind,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -38,7 +38,7 @@ const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧
 
 /// Text shown by `/help`.
 const SLASH_HELP: &str =
-    "commands: /help · /new · /switch · /clear · /model <id> (empty = current) · /quit";
+    "commands: /help · /new · /switch · /clear · /model <id> (empty = current) · /quit   (Ctrl-S = session picker)";
 
 /// One rendered transcript entry.
 struct ChatLine {
@@ -88,9 +88,10 @@ enum Phase {
         text: String,
         findings: Vec<Finding>,
     },
-    /// Renaming a session: the message input collects the new name.
+    /// Renaming a session (`Some(id)`) or naming a brand-new one (`None`).
+    /// The message input collects the name.
     Renaming {
-        id: String,
+        id: Option<String>,
     },
 }
 
@@ -123,6 +124,8 @@ enum KeyAction {
     Newline,
     /// '?' with empty input: toggle the shortcuts overlay.
     Help,
+    /// Ctrl+S: open the session picker overlay.
+    SessionPicker,
 }
 
 /// What a key press asks the app to do (proposal-confirmation phase).
@@ -198,6 +201,7 @@ async fn run_app(
     let mut events = EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_millis(120));
     let mut help = false;
+    let mut picker = false;
     let mut guard_decision = GuardDecision::Undecided;
 
     loop {
@@ -226,6 +230,7 @@ async fn run_app(
                 tools_cfg.enabled,
                 guard_state,
                 help,
+                picker,
             )
         })?;
 
@@ -362,6 +367,74 @@ async fn run_app(
             Phase::Idle => {
                 match events.next().await {
                     Some(Ok(Event::Key(key))) => {
+                        if picker {
+                            match key.code {
+                                KeyCode::Up => sel = sel.saturating_sub(1),
+                                KeyCode::Down => {
+                                    if !sessions.is_empty() {
+                                        sel = (sel + 1).min(sessions.len() - 1);
+                                    }
+                                }
+                                KeyCode::Enter => {
+                                    switch_session(
+                                        engine,
+                                        &sessions,
+                                        sel,
+                                        &mut transcript,
+                                        &mut status,
+                                    )?;
+                                    picker = false;
+                                }
+                                KeyCode::Char('c')
+                                    if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                                {
+                                    return Ok(());
+                                }
+                                KeyCode::Char('n') => {
+                                    picker = false;
+                                    phase = Phase::Renaming { id: None };
+                                    input.clear();
+                                    status = "new session — type a name (empty = 'chat')".into();
+                                }
+                                KeyCode::Char('r') => {
+                                    if let Some(info) = sessions.get(sel) {
+                                        picker = false;
+                                        phase =
+                                            Phase::Renaming { id: Some(info.id.clone()) };
+                                        input.clear();
+                                        status = format!("renaming '{}'", info.name);
+                                    }
+                                }
+                                KeyCode::Char('d') => {
+                                    match sessions
+                                        .get(sel)
+                                        .map(|s| (s.id.clone(), s.name.clone()))
+                                    {
+                                        Some((id, _)) if id == engine.session.id => {
+                                            status = "cannot delete the active session".into();
+                                        }
+                                        Some((id, name)) => {
+                                            let _ = engine.memory.delete_session(&id);
+                                            sessions = engine
+                                                .memory
+                                                .list_sessions()
+                                                .unwrap_or_default();
+                                            sel = sel.min(sessions.len().saturating_sub(1));
+                                            status = format!("deleted '{name}'");
+                                        }
+                                        None => {}
+                                    }
+                                }
+                                KeyCode::Esc
+                                | KeyCode::Char('s')
+                                | KeyCode::Char('q') => {
+                                    picker = false;
+                                    status = "ready".into();
+                                }
+                                _ => {}
+                            }
+                            continue;
+                        }
                         if focus == Focus::Sidebar {
                             match key.code {
                                 KeyCode::Up => sel = sel.saturating_sub(1),
@@ -380,25 +453,17 @@ async fn run_app(
                                     )?;
                                 }
                                 KeyCode::Char('n') => {
-                                    match crate::core::session::Session::create(
-                                        &engine.memory,
-                                        "chat",
-                                    ) {
-                                        Ok(s) => {
-                                            engine.session = s;
-                                            transcript.clear();
-                                            sessions =
-                                                engine.memory.list_sessions().unwrap_or_default();
-                                            sel = 0;
-                                            scroll = 0;
-                                            status = "new session created".into();
-                                        }
-                                        Err(e) => status = format!("error: {e}"),
-                                    }
+                                    phase = Phase::Renaming { id: None };
+                                    input.clear();
+                                    status =
+                                        "new session — type a name (empty = 'chat'), Enter confirms, Esc cancels"
+                                            .into();
                                 }
                                 KeyCode::Char('r') => match sessions.get(sel) {
                                     Some(info) => {
-                                        phase = Phase::Renaming { id: info.id.clone() };
+                                        phase = Phase::Renaming {
+                                            id: Some(info.id.clone()),
+                                        };
                                         input.clear();
                                         status = format!(
                                             "renaming '{}' — type name, Enter confirms, Esc cancels",
@@ -457,6 +522,11 @@ async fn run_app(
                                 status =
                                     "sessions — ↑/↓ select, Enter open, n new, r rename, d delete, Tab back".into();
                             }
+                            KeyAction::SessionPicker => {
+                                sessions = engine.memory.list_sessions().unwrap_or_default();
+                                picker = true;
+                                status = "session picker — ↑/↓ select, Enter open, n new, r rename, d delete, Esc close".into();
+                            }
                             KeyAction::None => {}
                         }
 
@@ -477,29 +547,17 @@ async fn run_app(
                                         status = "ready".into();
                                     }
                                     "new" => {
-                                        match crate::core::session::Session::create(
-                                            &engine.memory,
-                                            "chat",
-                                        ) {
-                                            Ok(s) => {
-                                                engine.session = s;
-                                                transcript.clear();
-                                                sessions = engine
-                                                    .memory
-                                                    .list_sessions()
-                                                    .unwrap_or_default();
-                                                sel = 0;
-                                                scroll = 0;
-                                                status = "new session created".into();
-                                            }
-                                            Err(e) => status = format!("error: {e}"),
-                                        }
+                                        phase = Phase::Renaming { id: None };
+                                        input.clear();
+                                        status =
+                                            "new session — type a name (empty = 'chat'), Enter confirms, Esc cancels"
+                                                .into();
                                     }
                                     "switch" => {
                                         sessions =
                                             engine.memory.list_sessions().unwrap_or_default();
-                                        focus = Focus::Sidebar;
-                                        status = "sessions — ↑/↓ select, Enter open, n new, r rename, d delete, Tab back".into();
+                                        picker = true;
+                                        status = "session picker — ↑/↓ select, Enter open, n new, r rename, d delete, Esc close".into();
                                     }
                                     "clear" => match engine.session.clear(&engine.memory) {
                                         Ok(()) => {
@@ -581,6 +639,24 @@ async fn run_app(
                     Some(Ok(Event::Mouse(m))) => match m.kind {
                         MouseEventKind::ScrollUp => scroll = scroll.saturating_add(1),
                         MouseEventKind::ScrollDown => scroll = scroll.saturating_sub(1),
+                        MouseEventKind::Down(MouseButton::Left) => {
+                            let width = terminal.size().map(|r| r.width).unwrap_or(0);
+                            let show_sidebar = width >= 70 && !sessions.is_empty();
+                            if show_sidebar && m.column < SIDEBAR_WIDTH && m.row >= 2 {
+                                let idx = (m.row - 2) as usize;
+                                if idx < sessions.len() {
+                                    sel = idx;
+                                    focus = Focus::Sidebar;
+                                    switch_session(
+                                        engine,
+                                        &sessions,
+                                        sel,
+                                        &mut transcript,
+                                        &mut status,
+                                    )?;
+                                }
+                            }
+                        }
                         _ => {}
                     },
                     _ => {}
@@ -655,27 +731,58 @@ async fn run_app(
                     match key.code {
                         KeyCode::Enter => {
                             let name = input.trim().to_string();
-                            if name.is_empty() {
-                                status = "name cannot be empty (Esc to cancel)".into();
-                            } else {
-                                match engine.memory.rename_session(&id, &name) {
-                                    Ok(()) => {
-                                        sessions =
-                                            engine.memory.list_sessions().unwrap_or_default();
-                                        status = format!("renamed to '{name}'");
-                                        phase = Phase::Idle;
-                                        input.clear();
-                                        focus = Focus::Sidebar;
+                            match &id {
+                                Some(id) => {
+                                    if name.is_empty() {
+                                        status = "name cannot be empty (Esc to cancel)".into();
+                                    } else {
+                                        match engine.memory.rename_session(id, &name) {
+                                            Ok(()) => {
+                                                sessions = engine
+                                                    .memory
+                                                    .list_sessions()
+                                                    .unwrap_or_default();
+                                                status = format!("renamed to '{name}'");
+                                                phase = Phase::Idle;
+                                                input.clear();
+                                                focus = Focus::Sidebar;
+                                            }
+                                            Err(e) => status = format!("error: {e}"),
+                                        }
                                     }
-                                    Err(e) => status = format!("error: {e}"),
+                                }
+                                None => {
+                                    let name = if name.is_empty() {
+                                        "chat".to_string()
+                                    } else {
+                                        name
+                                    };
+                                    match crate::core::session::Session::create(
+                                        &engine.memory,
+                                        &name,
+                                    ) {
+                                        Ok(s) => {
+                                            engine.session = s;
+                                            transcript.clear();
+                                            sessions = engine
+                                                .memory
+                                                .list_sessions()
+                                                .unwrap_or_default();
+                                            sel = 0;
+                                            scroll = 0;
+                                            status = format!("created session '{name}'");
+                                            phase = Phase::Idle;
+                                            input.clear();
+                                        }
+                                        Err(e) => status = format!("error: {e}"),
+                                    }
                                 }
                             }
                         }
                         KeyCode::Esc => {
                             phase = Phase::Idle;
                             input.clear();
-                            status = "rename cancelled".into();
-                            focus = Focus::Sidebar;
+                            status = "cancelled".into();
                         }
                         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             return Ok(());
@@ -846,6 +953,7 @@ fn handle_key(key: KeyEvent, input: &mut String) -> KeyAction {
             input.clear();
             KeyAction::None
         }
+        (KeyCode::Char('s'), KeyModifiers::CONTROL) => KeyAction::SessionPicker,
         (KeyCode::Tab, _) => KeyAction::ToggleSidebar,
         (KeyCode::Enter, KeyModifiers::ALT) => KeyAction::Newline,
         (KeyCode::Enter, _) => KeyAction::Send,
@@ -902,6 +1010,7 @@ fn draw_ui(
     tools_enabled: bool,
     guard_state: &str,
     help: bool,
+    picker: bool,
 ) {
     let area = f.area();
 
@@ -1038,6 +1147,7 @@ fn draw_ui(
         }
         _ => {
             let renaming = matches!(phase, Phase::Renaming { .. });
+            let is_new = matches!(phase, Phase::Renaming { id: None });
             let border_color = if renaming {
                 Color::Yellow
             } else if focus == Focus::Chat {
@@ -1045,9 +1155,17 @@ fn draw_ui(
             } else {
                 Color::DarkGray
             };
-            let (body, body_style) = if input.is_empty() && !renaming {
+            let title = if renaming { " name " } else { " ❯ " };
+            let placeholder = if is_new {
+                "session name  (empty = 'chat')"
+            } else if renaming {
+                "new name"
+            } else {
+                "send a message…  ( /help commands · ? shortcuts )"
+            };
+            let (body, body_style) = if input.is_empty() {
                 (
-                    "send a message…  ( /help commands · ? shortcuts )".to_string(),
+                    placeholder.to_string(),
                     Style::default().fg(Color::DarkGray),
                 )
             } else {
@@ -1059,7 +1177,7 @@ fn draw_ui(
                     Block::default()
                         .borders(Borders::ALL)
                         .border_type(BorderType::Rounded)
-                        .title(" ❯ ")
+                        .title(title)
                         .border_style(Style::default().fg(border_color)),
                 );
             f.render_widget(input_widget, main[2]);
@@ -1126,7 +1244,8 @@ fn draw_ui(
     let mut right = vec![];
     if focus != Focus::Sidebar {
         right.extend(chip("?", "shortcuts"));
-        right.extend(chip("Tab", "sessions"));
+        right.extend(chip("Ctrl-S", "sessions"));
+        right.extend(chip("Tab", "sidebar"));
         right.extend(chip("Esc", "quit"));
     }
     f.render_widget(
@@ -1156,7 +1275,70 @@ fn draw_ui(
         f.render_widget(overlay, box_area);
     }
 
-    // Privacy-guard overlay: preview + decision (highest priority).
+    // Session picker overlay (Ctrl+S or /switch) — works at any terminal size.
+    if picker {
+        let w = 54.min(area.width.saturating_sub(4));
+        let h = ((sessions.len() as u16) + 6).min(area.height.saturating_sub(4));
+        let box_area = Rect {
+            x: area.width.saturating_sub(w) / 2,
+            y: area.height.saturating_sub(h) / 2,
+            width: w,
+            height: h,
+        };
+        f.render_widget(Clear, box_area);
+        let mut lines: Vec<Line> = Vec::new();
+        if sessions.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "  no sessions yet — press n to create one",
+                Style::default().fg(Color::DarkGray),
+            )));
+        } else {
+            for (i, s) in sessions.iter().enumerate() {
+                let current = s.id == engine.session.id;
+                let marker = if i == sel { "› " } else { "  " };
+                let bullet = if current { "●" } else { "○" };
+                let name: String = s.name.chars().take(26).collect();
+                let style = if i == sel {
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD)
+                } else if current {
+                    Style::default().fg(Color::Green)
+                } else {
+                    Style::default().fg(Color::White)
+                };
+                lines.push(Line::from(Span::styled(
+                    format!("{marker}{bullet} {name:<26} {} msg", s.message_count),
+                    style,
+                )));
+            }
+        }
+        lines.push(plain_line(""));
+        lines.push(Line::from(
+            [
+                chip("↑↓", "select"),
+                chip("Enter", "open"),
+                chip("n", "new"),
+                chip("r", "rename"),
+                chip("d", "delete"),
+                chip("Esc", "close"),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<Span>>(),
+        ));
+        let overlay = Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .title(" sessions ")
+                    .border_style(Style::default().fg(Color::Cyan)),
+            )
+            .wrap(Wrap { trim: false });
+        f.render_widget(overlay, box_area);
+    }
     if let Phase::Guard { text, findings } = phase {
         let box_area = overlay_rect(area);
         f.render_widget(Clear, box_area);
@@ -1285,8 +1467,8 @@ fn welcome_lines(tools_enabled: bool) -> Vec<Line<'static>> {
             Style::default().add_modifier(Modifier::BOLD),
         )),
         key("/help", "show this help"),
-        key("/new", "start a new session"),
-        key("/switch", "open the session sidebar (also Tab)"),
+        key("/new", "start a new session (asks for a name)"),
+        key("/switch", "open the session picker (also Ctrl-S)"),
         key("/clear", "wipe the current session"),
         key("/model", "show or change the model (this run)"),
         key("/quit", "leave"),
@@ -1295,7 +1477,8 @@ fn welcome_lines(tools_enabled: bool) -> Vec<Line<'static>> {
             "KEYS",
             Style::default().add_modifier(Modifier::BOLD),
         )),
-        key("Tab", "sessions sidebar (↑/↓ select · Enter open)"),
+        key("Ctrl-S", "session picker: new · rename · delete · open"),
+        key("Tab", "sessions sidebar (↑/↓ select · Enter open · r rename · d delete)"),
         key("Alt+Enter", "newline in the message box"),
         key("Ctrl-L", "clear the current session"),
         key("PgUp/PgDn", "scroll history (mouse wheel works too)"),
@@ -1412,6 +1595,31 @@ mod tests {
         let mut typed = String::from("why");
         assert!(matches!(handle_key(q, &mut typed), KeyAction::None));
         assert_eq!(typed, "why?");
+    }
+
+    #[test]
+    fn ctrl_s_opens_session_picker_and_tab_toggles_sidebar() {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        let ctrl_s = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL);
+        assert!(matches!(
+            handle_key(ctrl_s, &mut String::new()),
+            KeyAction::SessionPicker
+        ));
+        let tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
+        assert!(matches!(
+            handle_key(tab, &mut String::new()),
+            KeyAction::ToggleSidebar
+        ));
+    }
+
+    #[test]
+    fn renaming_phase_distinguishes_new_from_existing() {
+        let new_session = Phase::Renaming { id: None };
+        let existing = Phase::Renaming {
+            id: Some("abc".into()),
+        };
+        assert!(matches!(new_session, Phase::Renaming { id: None }));
+        assert!(matches!(existing, Phase::Renaming { id: Some(_) }));
     }
 
     #[test]

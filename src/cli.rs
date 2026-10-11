@@ -9,7 +9,7 @@ use crate::core::engine::ChatEngine;
 use crate::core::session::Session;
 use crate::error::{EnclaveError, Result};
 use crate::privacy::{EncryptedMemory, SecureCredentials, Vault};
-use crate::providers::{create_provider, known_providers, requires_api_key};
+use crate::providers::known_providers;
 
 /// Top-level CLI.
 #[derive(Parser, Debug)]
@@ -229,14 +229,6 @@ fn build_engine(
 ) -> Result<ChatEngine> {
     let provider_name = provider_name.unwrap_or_else(|| settings.default_provider.clone());
 
-    let api_key = if requires_api_key(&provider_name) {
-        Some(SecureCredentials::get(&provider_name)?)
-    } else {
-        None
-    };
-    let provider = create_provider(&provider_name, api_key, &settings.ollama_base_url)?;
-    let model = model.unwrap_or_else(|| provider.default_model().to_string());
-
     let password = rpassword::prompt_password("Master password: ")
         .map_err(|e| EnclaveError::other(e.to_string()))?;
     let vault = Vault::new(&paths.config_dir);
@@ -248,13 +240,16 @@ fn build_engine(
         None => Session::create(&memory, "chat")?,
     };
 
-    Ok(ChatEngine::new(
-        provider,
+    // The provider (and therefore the API key in the keychain) is created
+    // lazily on the first message — no keychain dialog at startup.
+    ChatEngine::lazy(
+        &provider_name,
+        settings.ollama_base_url.clone(),
         model,
         memory,
         session,
         settings.system_prompt.clone(),
-    ))
+    )
 }
 
 /// Session-scoped privacy-guard decision (never persisted).
@@ -579,17 +574,23 @@ fn keys_cmd(action: KeysAction) -> Result<()> {
             println!("stored API key for '{provider}' in the OS keychain");
             Ok(())
         }
-        KeysAction::Get { provider } => match SecureCredentials::get(&provider) {
-            Ok(k) => {
-                let preview: String = k.chars().take(8).collect();
-                println!("key for '{provider}' present (starts with {preview}…)");
-                Ok(())
+        KeysAction::Get { provider } => {
+            if let Some(var) = SecureCredentials::env_var_name(&provider) {
+                println!("key for '{provider}' provided by environment variable {var}");
+                return Ok(());
             }
-            Err(_) => {
-                println!("no key stored for '{provider}'");
-                Ok(())
+            match SecureCredentials::get(&provider) {
+                Ok(k) => {
+                    let preview: String = k.chars().take(8).collect();
+                    println!("key for '{provider}' present (starts with {preview}…)");
+                    Ok(())
+                }
+                Err(_) => {
+                    println!("no key stored for '{provider}'");
+                    Ok(())
+                }
             }
-        },
+        }
         KeysAction::Delete { provider } => {
             SecureCredentials::delete(&provider)?;
             println!("deleted key for '{provider}'");

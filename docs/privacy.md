@@ -28,6 +28,12 @@ API keys are stored via the `keyring` crate in the native key store:
 
 Keys are never written to a file, never logged, and only displayed as an 8-character prefix on `keys get`.
 
+Alternatively a key can be supplied through the environment
+(`ENCLAVE_<PROVIDER>_API_KEY` or the provider's standard `<PROVIDER>_API_KEY`,
+e.g. `OPENROUTER_API_KEY`). Environment variables take precedence over the
+keychain, letting you avoid the macOS keychain prompt entirely; the key then
+lives only in your shell environment, not on disk.
+
 ## 3. Master key
 
 - Derived with **PBKDF2-HMAC-SHA256, 600,000 iterations**, random 32-byte salt (`~/.config/enclave/salt.bin`)

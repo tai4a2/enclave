@@ -100,6 +100,17 @@ pub fn requires_api_key(name: &str) -> bool {
     name != "ollama"
 }
 
+/// Suggested default model for a provider name, without building it.
+pub fn default_model_for(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "openrouter" => "mistralai/mistral-large-4-0",
+        "openai" => "gpt-4o-mini",
+        "anthropic" => "claude-3-5-sonnet-latest",
+        "ollama" => "llama3.1",
+        _ => return None,
+    })
+}
+
 /// Build a provider from its registry name.
 ///
 /// `api_key` may be `None` for local providers such as Ollama.

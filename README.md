@@ -35,6 +35,10 @@ cargo install --path .
 # Store an API key (goes to the OS keychain)
 enclave keys set openrouter
 
+# ...or provide it via an environment variable (no keychain prompt at all)
+export ENCLAVE_OPENROUTER_API_KEY=sk-or-...
+# also recognized: OPENROUTER_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY
+
 # Start an encrypted chat
 enclave chat --provider openrouter --model mistralai/mistral-large-4-0
 
@@ -186,10 +190,12 @@ you> use the researcher agent to summarize the state of encrypted messaging, the
 | `?` (empty input) | Toggle the shortcuts overlay |
 | Mouse wheel | Scroll transcript |
 | `Tab` | Toggle focus between chat and the sessions sidebar |
-| `↑`/`↓` + `Enter` (sidebar) | Switch to another encrypted session |
-| `n` (sidebar) | Create a new encrypted session |
-| `r` (sidebar) | Rename the selected session |
-| `d` (sidebar) | Delete the selected session (the active one is protected) |
+| `Ctrl-S` | Open the session picker overlay (works at any terminal size) |
+| `↑`/`↓` + `Enter` (sidebar or picker) | Switch to another encrypted session |
+| `n` (sidebar or picker) | Create a new session — asks for a name first |
+| `r` (sidebar or picker) | Rename the selected session (inline prompt) |
+| `d` (sidebar or picker) | Delete the selected session (the active one is protected) |
+| Mouse click (sidebar row) | Open that session |
 | `y` / `n` / `a` / `q` | Approve / deny / approve-all / skip shell proposals |
 | `s` / `p` / `r` / `Esc` (guard overlay) | Send as-is / placeholders / refuse sensitive data |
 
@@ -198,18 +204,22 @@ Slash commands (typed in the message box, executed locally, never sent to the pr
 | Command | Action |
 |---------|--------|
 | `/help` | Command list |
-| `/new` | Create a new session |
-| `/switch` | Open the sessions sidebar |
+| `/new` | Create a new session (asks for a name) |
+| `/switch` | Open the session picker overlay (also `Ctrl-S`) |
 | `/clear` | Wipe the current session history |
 | `/model <id>` | Switch model for this run (`/model` alone shows the current one) |
 | `/quit` | Exit Enclave |
 
 The TUI renders an opencode-style layout: a header bar, a sessions sidebar
-(28 columns, hidden on narrow terminals), a styled transcript with markdown
-rendering for assistant replies (headings, bold, inline code, code blocks
-with gutter, lists, quotes), a spinner while streaming, and a yellow panel
-for shell proposals — same ask-always security model as the CLI.
-The sidebar shows ● for the active session and ○ for the others.
+(28 columns, hidden on narrow terminals — use `Ctrl-S` there), a styled
+transcript with markdown rendering for assistant replies (headings, bold,
+inline code, code blocks with gutter, lists, quotes), a spinner while
+streaming, and a yellow panel for shell proposals — same ask-always security
+model as the CLI. The sidebar shows ● for the active session and ○ for the
+others. Sessions are named when you create them (an empty name becomes
+`chat`). By default the master key is **not** cached in the OS keychain, so
+macOS does not prompt on every launch (set `use_keychain = true` in
+`config.toml` to re-enable caching).
 
 ## Useful commands
 
@@ -255,21 +265,26 @@ Architecture and design details live in [`docs/`](docs/).
 
 ### macOS keychain prompts on every launch
 
-The binary touches the keychain twice per launch (API key + master key). If
-`dist/enclave` is **unsigned**, macOS cannot remember an "Always Allow" grant
-(the code signature changes on every rebuild) and re-asks the keychain
-password for each item at every launch. Fix:
+The API key is read lazily (on the first message, not at startup) and the
+master key is **not** cached by default, so a normal launch touches the
+keychain at most once. If `dist/enclave` is **unsigned**, macOS cannot
+remember an "Always Allow" grant (the code signature changes on every
+rebuild) and re-asks the keychain password. Fix:
 
 ```bash
 codesign --force --sign - dist/enclave   # ad-hoc sign (included below)
 ```
 
-then on the next launch choose **Always Allow** (not just *Allow*) for both
-items. The grant persists until the binary is rebuilt; re-sign after every
-rebuild. For a grant that also survives rebuilds, create a self-signed
-code-signing certificate (Keychain Access → Certificate Assistant → Create a
-Certificate → type *Code Signing*, e.g. name `enclave-local`) and sign with
+then on the next launch choose **Always Allow** (not just *Allow*). The grant
+persists until the binary is rebuilt; re-sign after every rebuild. For a grant
+that also survives rebuilds, create a self-signed code-signing certificate
+(Keychain Access → Certificate Assistant → Create a Certificate → type *Code
+Signing*, e.g. name `enclave-local`) and sign with
 `codesign --force --sign enclave-local dist/enclave` instead.
+
+To avoid the keychain entirely, export the key as an environment variable
+(`ENCLAVE_OPENROUTER_API_KEY` or the provider's standard `*_API_KEY`); Enclave
+prefers it over the keychain.
 
 ## License
 

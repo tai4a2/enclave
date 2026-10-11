@@ -118,6 +118,64 @@ impl Default for GuardSettings {
     }
 }
 
+/// What the engine may do with a tool call without asking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Action {
+    /// Run without prompting.
+    Allow,
+    /// Prompt the user each time (default for mutating tools).
+    Ask,
+    /// Refuse the call.
+    Deny,
+}
+
+/// Per-tool permission policy (`[permissions]`).
+///
+/// Every field is optional; a missing field falls back to `default` and then to
+/// the built-in default (read-only tools: allow; mutating tools: ask). Rules in
+/// `bash_rules` are matched against the shell command: the **longest** matching
+/// pattern wins, ties break towards the most restrictive action.
+///
+/// This is a local safeguard for the agentic loop; the human is still the final
+/// gate whenever an action resolves to `ask`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Permissions {
+    /// Auto-approve everything that would otherwise `ask` (denied tools stay
+    /// denied). Equivalent to opencode's `--auto`.
+    #[serde(default)]
+    pub auto: bool,
+    /// Fallback for tools that have no specific rule.
+    #[serde(default)]
+    pub default: Option<Action>,
+    #[serde(default)]
+    pub read: Option<Action>,
+    #[serde(default)]
+    pub write: Option<Action>,
+    #[serde(default)]
+    pub edit: Option<Action>,
+    #[serde(default)]
+    pub list: Option<Action>,
+    #[serde(default)]
+    pub glob: Option<Action>,
+    #[serde(default)]
+    pub grep: Option<Action>,
+    /// Shell command execution (`run_shell`).
+    #[serde(default)]
+    pub bash: Option<Action>,
+    #[serde(default)]
+    pub delegate: Option<Action>,
+    /// Any path outside the workspace.
+    #[serde(default)]
+    pub external_directory: Option<Action>,
+    /// Fires when the same tool call repeats several times in one turn.
+    #[serde(default)]
+    pub doom_loop: Option<Action>,
+    /// Command-pattern rules for `run_shell` (e.g. `"git status*" = "allow"`).
+    #[serde(default)]
+    pub bash_rules: std::collections::BTreeMap<String, Action>,
+}
+
 /// One sub-agent persona (`[agent.personas.<name>]`).
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct PersonaSettings {
@@ -135,6 +193,22 @@ pub struct AgentSettings {
     /// Named personas the top-level agent can delegate to.
     #[serde(default)]
     pub personas: std::collections::BTreeMap<String, PersonaSettings>,
+}
+
+/// Terminal-UI appearance and key bindings (`[tui]`).
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct TuiSettings {
+    /// Colour theme name (`default`, `nord`, `gruvbox`, `solarized`, `mono`).
+    #[serde(default)]
+    pub theme: Option<String>,
+    /// Key overrides: action name → key spec (e.g. `"quit" = "ctrl+q"`).
+    ///
+    /// Recognized actions: `quit, clear, copy_mode, session_picker,
+    /// toggle_sidebar, toggle_mode, newline, history_prev, history_next,
+    /// delete_word, clear_input, send`. Key specs look like `ctrl+y`, `alt+x`,
+    /// `shift+tab`, `f5`, `esc`, `enter`, `tab`, or a single character.
+    #[serde(default)]
+    pub keybinds: std::collections::BTreeMap<String, String>,
 }
 
 /// Persisted, non-sensitive application settings.
@@ -171,6 +245,16 @@ pub struct Settings {
     /// Multi-agent settings.
     #[serde(default)]
     pub agent: AgentSettings,
+    /// Permission policy for the agentic tool loop.
+    #[serde(default)]
+    pub permissions: Permissions,
+    /// Extra local rule files (paths or globs, relative to the working dir).
+    /// Remote URLs are ignored (local-only by design).
+    #[serde(default)]
+    pub instructions: Vec<String>,
+    /// Terminal-UI theme and key bindings.
+    #[serde(default)]
+    pub tui: TuiSettings,
 }
 
 fn default_true() -> bool {
@@ -209,6 +293,9 @@ impl Default for Settings {
             tools: ToolsSettings::default(),
             guard: GuardSettings::default(),
             agent: AgentSettings::default(),
+            permissions: Permissions::default(),
+            instructions: Vec::new(),
+            tui: TuiSettings::default(),
         }
     }
 }

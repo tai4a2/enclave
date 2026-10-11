@@ -14,9 +14,11 @@ use std::pin::Pin;
 use crate::core::diff;
 use crate::core::engine::ToolGate;
 use crate::core::message::ToolCall;
+use crate::core::permissions::wildcard_match;
 use crate::core::tools as shell;
 use crate::error::{EnclaveError, Result};
 use crate::providers::ToolDef;
+use regex::Regex;
 
 /// Closure that runs a sub-agent (multi-agent `delegate` tool).
 pub type DelegateFn = Box<
@@ -59,11 +61,13 @@ pub fn defs(with_delegate: bool) -> Vec<ToolDef> {
     let mut tools = vec![
         ToolDef::new(
             "read_file",
-            "Read a text file inside the workspace.",
+            "Read a text file inside the workspace. Use offset/limit to read a line range.",
             serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "relative or workspace-absolute path"}
+                    "path": {"type": "string", "description": "relative or workspace-absolute path"},
+                    "offset": {"type": "integer", "description": "1-based first line to read (optional)"},
+                    "limit": {"type": "integer", "description": "number of lines to read (optional)"}
                 },
                 "required": ["path"]
             }),
@@ -102,6 +106,31 @@ pub fn defs(with_delegate: bool) -> Vec<ToolDef> {
                     "path": {"type": "string", "description": "defaults to the workspace root"}
                 },
                 "required": []
+            }),
+        ),
+        ToolDef::new(
+            "glob",
+            "Find files by glob pattern (e.g. **/*.rs, src/*.ts). Read-only.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "pattern": {"type": "string"},
+                    "path": {"type": "string", "description": "directory to search (default: workspace root)"}
+                },
+                "required": ["pattern"]
+            }),
+        ),
+        ToolDef::new(
+            "grep",
+            "Search file contents with a regular expression. Read-only.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "pattern": {"type": "string", "description": "regex"},
+                    "glob": {"type": "string", "description": "file filter glob (optional)"},
+                    "path": {"type": "string", "description": "directory to search (default: workspace root)"}
+                },
+                "required": ["pattern"]
             }),
         ),
         ToolDef::new(
@@ -176,6 +205,60 @@ fn cap(data: &[u8], max: usize) -> (String, bool) {
     }
 }
 
+/// Directories skipped by `glob`/`grep` (build/VCS noise).
+fn should_skip_dir(name: &str) -> bool {
+    matches!(
+        name,
+        ".git" | "target" | "node_modules" | ".venv" | "venv" | "__pycache__"
+    )
+}
+
+/// Recursively collect files under `root` (bounded, symlinks not followed).
+fn walk_files(root: &Path, out: &mut Vec<PathBuf>) {
+    const MAX_ENTRIES: usize = 20_000;
+    let mut stack = vec![root.to_path_buf()];
+    let mut seen = 0usize;
+    while let Some(dir) = stack.pop() {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            seen += 1;
+            if seen > MAX_ENTRIES {
+                return;
+            }
+            let file_type = match entry.file_type() {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+            let path = entry.path();
+            if file_type.is_dir() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if !should_skip_dir(&name) {
+                    stack.push(path);
+                }
+            } else if file_type.is_file() {
+                out.push(path);
+            }
+        }
+    }
+}
+
+fn relative_label(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
+/// Public helper: all files under `root` (bounded, skipping build/VCS dirs).
+pub fn list_files(root: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    walk_files(root, &mut out);
+    out
+}
+
 /// Execute one tool call, returning rendered text and any file change.
 /// Unknown tools are reported, not guessed.
 pub async fn execute_detailed(
@@ -191,12 +274,124 @@ pub async fn execute_detailed(
         "read_file" => {
             let path = resolve_in_workspace(&ctx.workspace, &arg_str("path"))?;
             let data = std::fs::read(&path)?;
-            let (text, truncated) = cap(&data, ctx.max_output_bytes);
+            let offset = args["offset"].as_u64().map(|v| v as usize);
+            let limit = args["limit"].as_u64().map(|v| v as usize);
+            let (text, truncated) = if offset.is_some() || limit.is_some() {
+                let full = String::from_utf8_lossy(&data);
+                let lines: Vec<&str> = full.lines().collect();
+                let start = offset.unwrap_or(1).max(1) - 1;
+                let end = match limit {
+                    Some(l) => (start + l).min(lines.len()),
+                    None => lines.len(),
+                };
+                let body = lines
+                    .get(start..end)
+                    .unwrap_or(&[])
+                    .iter()
+                    .enumerate()
+                    .map(|(i, line)| format!("{:>5}  {}", start + i + 1, line))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                cap(body.as_bytes(), ctx.max_output_bytes)
+            } else {
+                cap(&data, ctx.max_output_bytes)
+            };
             let text = if truncated {
                 format!("{text}\n[truncated at {} bytes]", ctx.max_output_bytes)
             } else {
                 text
             };
+            Ok(ToolOutcome { text, change: None })
+        }
+        "glob" => {
+            let pattern = arg_str("pattern");
+            if pattern.is_empty() {
+                return Err(EnclaveError::other("glob requires a 'pattern'"));
+            }
+            let raw = arg_str("path");
+            let root = if raw.is_empty() {
+                ctx.workspace.clone()
+            } else {
+                resolve_in_workspace(&ctx.workspace, &raw)?
+            };
+            let mut files = Vec::new();
+            walk_files(&root, &mut files);
+            let mut matches: Vec<String> = files
+                .iter()
+                .filter_map(|p| {
+                    let rel = relative_label(&root, p);
+                    let name = p.file_name().map(|n| n.to_string_lossy().into_owned());
+                    let hit = wildcard_match(&pattern, &rel)
+                        || name.map(|n| wildcard_match(&pattern, &n)).unwrap_or(false);
+                    if hit {
+                        Some(rel)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            matches.sort();
+            let text = if matches.is_empty() {
+                format!("no files match '{pattern}'")
+            } else {
+                let total = matches.len();
+                matches.truncate(200);
+                let mut body = matches.join("\n");
+                if total > 200 {
+                    body.push_str(&format!("\n… {} more matches (narrow the pattern)", total - 200));
+                }
+                body
+            };
+            Ok(ToolOutcome { text, change: None })
+        }
+        "grep" => {
+            let pattern = arg_str("pattern");
+            if pattern.is_empty() {
+                return Err(EnclaveError::other("grep requires a 'pattern'"));
+            }
+            let re = Regex::new(&pattern)
+                .map_err(|e| EnclaveError::other(format!("invalid regex: {e}")))?;
+            let raw = arg_str("path");
+            let root = if raw.is_empty() {
+                ctx.workspace.clone()
+            } else {
+                resolve_in_workspace(&ctx.workspace, &raw)?
+            };
+            let file_glob = arg_str("glob");
+            let mut files = Vec::new();
+            walk_files(&root, &mut files);
+            let mut out: Vec<String> = Vec::new();
+            'files: for p in &files {
+                let rel = relative_label(&root, p);
+                if !file_glob.is_empty() && !wildcard_match(&file_glob, &rel) {
+                    continue;
+                }
+                let data = match std::fs::read(p) {
+                    Ok(d) => d,
+                    Err(_) => continue,
+                };
+                if data.contains(&0) {
+                    continue; // skip binary files
+                }
+                let text = match std::str::from_utf8(&data) {
+                    Ok(t) => t,
+                    Err(_) => continue,
+                };
+                for (i, line) in text.lines().enumerate() {
+                    if re.is_match(line) {
+                        out.push(format!("{rel}:{}: {}", i + 1, line.trim_end()));
+                        if out.len() >= 200 {
+                            break 'files;
+                        }
+                    }
+                }
+            }
+            let text = if out.is_empty() {
+                format!("no matches for /{pattern}/")
+            } else {
+                out.join("\n")
+            };
+            let (text, _) = cap(text.as_bytes(), ctx.max_output_bytes);
             Ok(ToolOutcome { text, change: None })
         }
         "write_file" => {
@@ -358,12 +553,14 @@ mod tests {
     #[test]
     fn defs_shape_and_delegate_flag() {
         let base = defs(false);
-        assert_eq!(base.len(), 5);
+        assert_eq!(base.len(), 7);
         assert!(base.iter().all(|d| !d.name.is_empty()));
         assert!(base.iter().any(|d| d.name == "edit_file"));
+        assert!(base.iter().any(|d| d.name == "glob"));
+        assert!(base.iter().any(|d| d.name == "grep"));
         let with = defs(true);
-        assert_eq!(with.len(), 6);
-        assert_eq!(with[5].name, "delegate");
+        assert_eq!(with.len(), 8);
+        assert_eq!(with[7].name, "delegate");
     }
 
     fn ctx_at(ws: &Path) -> ToolContext {

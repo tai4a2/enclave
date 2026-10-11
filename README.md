@@ -50,6 +50,8 @@ enclave tui
 enclave tui --no-tools   # TUI without shell-proposal prompts
 enclave tui --agent      # agentic tool loop (read/write/edit files, shell)
 enclave tui --effort high  # reasoning effort hint (low|medium|high)
+enclave tui --plan       # start in Plan mode (read-only, proposes steps)
+enclave chat --agent --auto  # auto-approve tools not explicitly denied
 
 # Attach a file to the first message (image for multimodal models, or text)
 enclave chat --attach ./diagram.png --attach ./notes.md
@@ -145,16 +147,75 @@ Built-in tools (workspace-restricted, human-approved):
 
 | Tool | What it does |
 |------|--------------|
-| `read_file` | Read a file inside the workspace (output capped) |
+| `read_file` | Read a file inside the workspace (optional `offset`/`limit` line range, output capped) |
 | `write_file` | Write a file inside the workspace (path traversal rejected) |
+| `edit_file` | Replace an exact `old_string` with `new_string` (fails if missing or ambiguous) |
 | `list_dir` | List a directory inside the workspace |
+| `glob` | Find files by glob pattern (`**/*.rs`, `src/*.toml`, …) |
+| `grep` | Search file contents by regular expression (optional `glob` filter) |
 | `run_shell` | Run a shell command (same timeout + output cap as proposals) |
+
+File writes/edits return an inline diff (green `+` / red `−`) which is also
+recorded in the info panel **CHANGES** list.
 
 Guardrails: every call needs explicit approval (`[y]es/[n]o/[a]ll/[q]uit`,
 ask-always), paths are canonicalized and confined to the current directory,
 `..` and absolute paths outside the workspace are rejected, max 8 tool
 iterations per turn. The privacy guard redacts tool arguments/results the
 same way as chat text.
+
+### Rules (`AGENTS.md`)
+
+Enclave automatically loads local rule files into the system prompt — all
+resolved **locally**, never fetched from the network:
+
+| Location | Scope |
+|----------|-------|
+| `<config_dir>/AGENTS.md` | Global instructions (e.g. `~/.config/enclave/AGENTS.md`) |
+| nearest `AGENTS.md` walking up from the cwd to the git root | Project instructions |
+| `instructions = ["docs/STYLE.md", ...]` in `config.toml` | Extra local files (relative to the cwd; `http(s)://` entries are ignored) |
+
+The nearest project file wins per category; global and project rules are
+concatenated, then any `instructions` entries. Remote URLs are never fetched.
+
+### Permissions
+
+Tool calls are gated by a `[permissions]` table in `config.toml`. Each rule
+is `allow`, `ask` or `deny`:
+
+```toml
+[permissions]
+read = "allow"        # read_file
+write = "ask"         # write_file / edit_file
+bash = "ask"          # run_shell
+default = "ask"       # fallback for tools without a specific rule
+external_directory = "ask"  # any path outside the workspace
+
+[permissions.bash_rules]
+"git status *" = "allow"
+"rm *" = "deny"
+```
+
+Defaults are read-only friendly: `read_file`/`list_dir`/`glob`/`grep` are
+`allow`, mutations (`write_file`/`edit_file`/`run_shell`/`delegate`) are
+`ask`, and `external_directory` is `ask`. `bash_rules` entries are matched
+against the parsed command; the **longest** matching pattern wins (ties go
+to the most restrictive). `--auto` (CLI) auto-approves anything not
+explicitly denied; a repeated identical tool call (`doom_loop`) can be gated
+to break loops.
+
+### Plan / Build mode
+
+Like opencode, Enclave has two modes:
+
+- **build** (default): all tools available.
+- **plan**: read-only — `write_file`, `edit_file`, `run_shell` and `delegate`
+  are refused, and a planning note is added to the system prompt so the model
+  analyses and proposes steps instead of changing anything.
+
+Switch with `Shift+Tab` in the TUI, the `/plan` and `/build` slash commands,
+or the `--plan` flag on `enclave chat` / `enclave tui`. The current mode is
+shown in the info panel.
 
 ### Multi-agent (delegate)
 
@@ -189,12 +250,15 @@ you> use the researcher agent to summarize the state of encrypted messaging, the
 | `Enter` | Send message |
 | `Alt+Enter` | New line in the input box (multiline) |
 | `Esc` / `Ctrl-C` | Quit |
+| `Ctrl-Y` | Copy mode: select transcript lines (↑/↓, PgUp/PgDn, Home/End) and press `y` to copy to the clipboard — `a` selects all, `e` copies the last reply |
+| `Ctrl-P` / `Ctrl-N` | Recall previous / next message from the input history |
 | `Ctrl-L` | Clear the session (wipes encrypted history, starts fresh) |
 | `Ctrl-W` / `Ctrl-U` | Delete word / clear input |
 | `PgUp` / `PgDn` (or ↑/↓) | Scroll transcript |
 | `?` (empty input) | Toggle the shortcuts overlay |
 | Mouse wheel | Scroll transcript |
 | `Tab` | Toggle focus between chat and the sessions sidebar |
+| `Shift+Tab` | Toggle Plan / Build mode |
 | `Ctrl-S` | Open the session picker overlay (works at any terminal size) |
 | `↑`/`↓` + `Enter` (sidebar or picker) | Switch to another encrypted session |
 | `n` (sidebar or picker) | Create a new session — asks for a name first |
@@ -218,6 +282,15 @@ Slash commands (typed in the message box, executed locally, never sent to the pr
 | `/effort` | Set reasoning effort: `off` · `low` · `medium` · `high` (saved) |
 | `/attach <path>` | Attach an image or text file to your next message |
 | `/detach` | Clear pending attachments |
+| `/plan` / `/build` | Switch to Plan (read-only) / Build mode |
+| `/copy [n]` | Copy the last reply (or the last `n` replies) to the clipboard |
+| `/save [path]` | Save this conversation as a Markdown file (plaintext, not encrypted) |
+| `/undo` | Remove the last user turn and put it back in the input box |
+| `/redo` | Restore the text removed by the last `/undo` |
+| `/retry` | Undo the last turn and resend the same message |
+| `/compact` | Summarise the conversation and replace the history with the summary |
+| `/commands` | List your custom commands (see below) |
+| `/theme [name]` | Show or switch the colour theme (`default` · `nord` · `gruvbox` · `solarized` · `mono`) — saved |
 | `/credits` | Show OpenRouter credit / usage / limits (also `/usage`) |
 | `/quit` | Exit Enclave |
 
@@ -236,6 +309,60 @@ When the terminal is at least **110 columns** an **info panel** appears on the
 right with live details: session name/id, model and provider, a context
 estimate, OpenRouter credits, tools/guard state, the encrypted database size,
 message/session counts, and a **CHANGES** list (`+added −removed` per file).
+
+### In-chat helpers
+
+Beyond slash commands the message box understands two shorthands, both resolved
+locally and never sent to the provider as raw code:
+
+- **`@file`** — mention a file by path (`@src/main.rs`, `@README.md`) and its
+  content is attached to your message. If the token is not a real path, Enclave
+  matches it against the workspace file list (by relative path, filename, or
+  suffix) and attaches the best hit; an unmatched `@token` is left untouched.
+- **`!command`** — a message starting with `!` runs as a **local shell command**
+  (same ask-always sandbox, timeout and output cap as tools) and prints the
+  output into the transcript. It is never forwarded to the model, so the output
+  stays on your machine.
+
+### Custom commands
+
+Drop Markdown files in `.enclave/commands/` (project) or
+`<config_dir>/commands/` (global) — project commands override global ones of
+the same name. The filename is the command name; an optional front-matter block
+sets its metadata:
+
+```markdown
+---
+description: Review a file for issues
+agent: reviewer
+---
+Review $1 for bugs and style problems. Focus on $ARGUMENTS.
+```
+
+Invoke it as `/your-command some arguments` in the TUI or CLI. `$ARGUMENTS`
+expands to everything after the command name, and `$1`…`$9` to individual
+whitespace-separated arguments. Custom commands are **local files only** —
+remote URLs are ignored, exactly like `AGENTS.md` rules.
+
+### Themes and keybindings
+
+```toml
+# config.toml
+[tui]
+theme = "nord"            # default | nord | gruvbox | solarized | mono
+
+[tui.keybinds]            # override built-in keys (action = key spec)
+quit          = "ctrl+q"
+copy          = "ctrl+y"
+session_picker = "ctrl+s"
+toggle_mode   = "ctrl+t"
+```
+
+Recognised actions: `quit`, `clear`, `copy`, `session_picker`, `toggle_sidebar`,
+`toggle_mode`, `newline`, `history_prev`, `history_next`, `delete_word`,
+`clear_input`, `send`. Key specs accept `ctrl`/`alt`/`shift` modifiers plus key
+names (`enter`, `esc`, `tab`, `space`, `backspace`, `up`, `down`, `f1`…`f12`, a
+single character, …). `/theme` also switches the palette at runtime.
 
 ### Attachments
 

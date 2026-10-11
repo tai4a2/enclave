@@ -91,4 +91,26 @@ impl Session {
         self.messages.clear();
         Ok(())
     }
+
+    /// Drop all messages after the first `keep` (RAM + encrypted store).
+    /// Used by undo/retry.
+    pub fn truncate_to(&mut self, memory: &EncryptedMemory, keep: usize) -> Result<()> {
+        if keep >= self.messages.len() {
+            return Ok(());
+        }
+        let remove = self.messages.len() - keep;
+        memory.delete_last_messages(&self.id, remove)?;
+        self.messages.truncate(keep);
+        Ok(())
+    }
+
+    /// Replace the whole conversation with a single system summary (compaction).
+    pub fn compact_with(&mut self, memory: &EncryptedMemory, summary: &str) -> Result<()> {
+        memory.clear_session_messages(&self.id)?;
+        self.messages.clear();
+        let message = Message::system(format!(
+            "Conversation summary so far (earlier turns were compacted):\n\n{summary}"
+        ));
+        self.push(message, memory)
+    }
 }

@@ -5,6 +5,7 @@
 //! AES-256 encrypted SQLCipher database and API keys live in the OS keychain.
 
 pub mod cli;
+pub mod clipboard;
 pub mod config;
 pub mod core;
 pub mod error;

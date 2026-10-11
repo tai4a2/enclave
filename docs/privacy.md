@@ -86,6 +86,15 @@ the guard (they are opaque bytes): treat them as you would a photo you are
 about to upload to a cloud provider, and prefer a local `ollama` vision model
 for anything sensitive. Images are capped at 8 MB each.
 
+### Rules and permissions
+
+Project rules (`AGENTS.md`) and the `[permissions]` table are resolved
+**locally only**. Rule files are read from disk (`<config_dir>/AGENTS.md`, the
+nearest project `AGENTS.md` up to the git root, and the local paths listed in
+`instructions`); remote URLs are ignored and never fetched. Permissions are
+evaluated in-process before any tool call — a `deny` rule means the command
+never executes and is reported back to the model as `[denied by policy]`.
+
 ## 5. Telemetry
 
 Zero. No analytics, no crash reporting, no update pings, no logging of message content.

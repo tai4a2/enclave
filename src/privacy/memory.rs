@@ -266,8 +266,7 @@ impl EncryptedMemory {
     }
 
     /// Delete a session and all of its messages.
-    pub fn delete_session(&self, id: &str) -> Result<()> {
-        self.conn.execute(
+    pub fn delete_session(&self, id: &str) -> Result<()> {        self.conn.execute(
             "DELETE FROM messages WHERE session_id = ?1",
             rusqlite::params![id],
         )?;
@@ -278,10 +277,38 @@ impl EncryptedMemory {
         Ok(())
     }
 
+    /// Delete the most recent `n` messages of a session (used by undo/retry).
+    /// Returns the number of rows removed.
+    pub fn delete_last_messages(&self, session_id: &str, n: usize) -> Result<usize> {
+        if n == 0 {
+            return Ok(0);
+        }
+        let removed = self.conn.execute(
+            "DELETE FROM messages WHERE id IN (\
+                SELECT id FROM messages WHERE session_id = ?1 ORDER BY id DESC LIMIT ?2\
+             )",
+            rusqlite::params![session_id, n as i64],
+        )?;
+        self.conn.execute(
+            "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
+            rusqlite::params![chrono::Utc::now().to_rfc3339(), session_id],
+        )?;
+        Ok(removed)
+    }
+
+    /// Delete all messages of a session, keeping the session itself.
+    /// Returns the number of rows removed.
+    pub fn clear_session_messages(&self, session_id: &str) -> Result<usize> {
+        let removed = self.conn.execute(
+            "DELETE FROM messages WHERE session_id = ?1",
+            rusqlite::params![session_id],
+        )?;
+        Ok(removed)
+    }
+
     /// Delete every session (and, by cascade/loop, all messages).
     /// Returns the number of deleted sessions.
-    pub fn delete_all_sessions(&self) -> Result<usize> {
-        let sessions = self.list_sessions()?;
+    pub fn delete_all_sessions(&self) -> Result<usize> {        let sessions = self.list_sessions()?;
         for s in &sessions {
             self.delete_session(&s.id)?;
         }

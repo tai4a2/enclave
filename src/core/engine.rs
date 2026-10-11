@@ -1,7 +1,11 @@
 //! The chat engine: ties a provider, the encrypted memory and a session together.
 
+use std::collections::HashMap;
+use std::path::PathBuf;
+
 use async_trait::async_trait;
 
+use crate::config::{Action, Permissions};
 use crate::core::attachment::Attachment;
 use crate::core::builtin_tools::{self, ToolContext};
 use crate::core::message::{Message, ToolCall};
@@ -98,6 +102,33 @@ pub enum AgentStep {
     },
 }
 
+/// Operating mode of the engine (opencode-style Plan/Build).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AgentMode {
+    /// Full access (subject to the permission policy).
+    #[default]
+    Build,
+    /// Read-only: mutating tools are refused and the model is told to plan.
+    Plan,
+}
+
+impl AgentMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            AgentMode::Build => "build",
+            AgentMode::Plan => "plan",
+        }
+    }
+
+    pub fn is_plan(self) -> bool {
+        matches!(self, AgentMode::Plan)
+    }
+}
+
+fn is_mutating_tool(name: &str) -> bool {
+    matches!(name, "write_file" | "edit_file" | "run_shell" | "delegate")
+}
+
 /// Orchestrates a conversation turn by turn.
 pub struct ChatEngine {
     provider: ProviderSlot,
@@ -112,6 +143,14 @@ pub struct ChatEngine {
     pub redactor: Option<Redactor>,
     /// Optional reasoning effort hint (`low`/`medium`/`high`).
     pub reasoning_effort: Option<String>,
+    /// Local rules text (AGENTS.md-style) appended to the system prompt.
+    pub rules: Option<String>,
+    /// Permission policy for tool calls.
+    pub permissions: Permissions,
+    /// Plan (read-only) or Build mode.
+    pub mode: AgentMode,
+    /// Workspace root: file tools cannot escape it.
+    pub workspace: PathBuf,
 }
 
 impl ChatEngine {
@@ -132,6 +171,10 @@ impl ChatEngine {
             system_prompt,
             redactor: None,
             reasoning_effort: None,
+            rules: None,
+            permissions: Permissions::default(),
+            mode: AgentMode::Build,
+            workspace: std::env::current_dir().unwrap_or_default(),
         }
     }
 
@@ -172,6 +215,10 @@ impl ChatEngine {
             system_prompt,
             redactor: None,
             reasoning_effort: None,
+            rules: None,
+            permissions: Permissions::default(),
+            mode: AgentMode::Build,
+            workspace: std::env::current_dir().unwrap_or_default(),
         })
     }
 
@@ -180,11 +227,35 @@ impl ChatEngine {
         self.provider_name
     }
 
+    /// Combine the configured system prompt, local rules and the Plan-mode
+    /// note into a single system message (or `None`).
+    pub fn system_text(&self) -> Option<String> {
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(sp) = &self.system_prompt {
+            parts.push(sp.clone());
+        }
+        if let Some(rules) = &self.rules {
+            parts.push(rules.clone());
+        }
+        if self.mode.is_plan() {
+            parts.push(
+                "You are in PLAN mode: analyse the request and propose a clear \
+                 step-by-step plan. Do not modify files or run mutating commands."
+                    .to_string(),
+            );
+        }
+        if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join("\n\n"))
+        }
+    }
+
     /// Build the message list sent to the provider (system prompt + history).
     pub fn request_messages(&self) -> Vec<Message> {
         let mut msgs: Vec<Message> = Vec::new();
-        if let Some(sp) = &self.system_prompt {
-            msgs.push(Message::system(sp.clone()));
+        if let Some(sp) = self.system_text() {
+            msgs.push(Message::system(sp));
         }
         msgs.extend(self.session.messages.iter().cloned());
         msgs
@@ -192,12 +263,27 @@ impl ChatEngine {
 
     /// Build the outgoing request, applying privacy-guard redaction when active.
     pub fn outgoing_messages(&mut self) -> Vec<Message> {
-        let skip_system = self.system_prompt.is_some();
+        let skip_system = self.system_text().is_some();
         let mut msgs = self.request_messages();
         if let Some(r) = &mut self.redactor {
             redact_messages(&mut msgs, r, skip_system);
         }
         msgs
+    }
+
+    /// Effective permission for a tool call: Plan mode refuses mutations, the
+    /// `external_directory` rule tightens out-of-workspace paths, and `auto`
+    /// turns `ask` into `allow` (denied tools stay denied).
+    pub fn effective_action(&self, call: &ToolCall) -> Action {
+        if self.mode.is_plan() && is_mutating_tool(&call.name) {
+            return Action::Deny;
+        }
+        let external = crate::core::permissions::call_is_external(call, &self.workspace);
+        let mut action = crate::core::permissions::resolve(&self.permissions, call, external);
+        if action == Action::Ask && self.permissions.auto {
+            action = Action::Allow;
+        }
+        action
     }
 
     /// Persist the user's input and start streaming the assistant reply.
@@ -257,6 +343,7 @@ impl ChatEngine {
         self.session
             .push(Message::user_with_attachments(input, attachments), &self.memory)?;
         let mut approve_all = false;
+        let mut seen: HashMap<String, u32> = HashMap::new();
 
         for _ in 0..max_iterations.max(1) {
             let messages = self.outgoing_messages();
@@ -281,15 +368,32 @@ impl ChatEngine {
             )?;
 
             for call in &response.tool_calls {
-                let decision = if approve_all {
-                    ToolDecision::Approve
-                } else {
-                    match gate.decide(call).await {
-                        ToolDecision::ApproveAll => {
-                            approve_all = true;
+                // Permission policy (with a doom-loop guard for repeats).
+                let key = format!("{}\u{0}{}", call.name, call.arguments);
+                let count = seen.entry(key).or_insert(0);
+                *count += 1;
+                let mut action = self.effective_action(call);
+                if *count >= 3 {
+                    if let Some(dl) = self.permissions.doom_loop {
+                        action = crate::core::permissions::combine(action, dl);
+                    }
+                }
+
+                let decision = match action {
+                    Action::Allow => ToolDecision::Approve,
+                    Action::Deny => ToolDecision::Deny,
+                    Action::Ask => {
+                        if approve_all {
                             ToolDecision::Approve
+                        } else {
+                            match gate.decide(call).await {
+                                ToolDecision::ApproveAll => {
+                                    approve_all = true;
+                                    ToolDecision::Approve
+                                }
+                                other => other,
+                            }
                         }
-                        other => other,
                     }
                 };
 
@@ -299,7 +403,13 @@ impl ChatEngine {
                             .push(Message::tool_result(&call.id, "[stopped by user]"), &self.memory)?;
                         return Ok(String::new());
                     }
-                    ToolDecision::Deny => "[denied by user]".to_string(),
+                    ToolDecision::Deny => {
+                        if action == Action::Deny {
+                            "[denied by policy]".to_string()
+                        } else {
+                            "[denied by user]".to_string()
+                        }
+                    }
                     ToolDecision::Approve => match builtin_tools::execute(call, ctx, gate).await {
                         Ok(out) => out,
                         Err(e) => format!("[tool error] {e}"),
@@ -367,5 +477,57 @@ impl ChatEngine {
     pub fn push_tool_result(&mut self, call_id: &str, output: &str) -> Result<()> {
         self.session
             .push(Message::tool_result(call_id, output), &self.memory)
+    }
+
+    /// Remove the last turn (the trailing assistant/tool messages plus the
+    /// user message that started it) and return the user text so it can be
+    /// re-sent or edited. Returns `None` when there is nothing to undo.
+    pub fn undo_last_turn(&mut self) -> Result<Option<String>> {
+        let last_user = self
+            .session
+            .messages
+            .iter()
+            .rposition(|m| m.role == crate::core::message::Role::User);
+        let Some(idx) = last_user else {
+            return Ok(None);
+        };
+        let text = self.session.messages[idx].content.clone();
+        self.session.truncate_to(&self.memory, idx)?;
+        Ok(Some(text))
+    }
+
+    /// Drop the trailing assistant/tool messages after the last user message
+    /// and return that user text so the reply can be regenerated. Returns
+    /// `None` when there is no user message.
+    pub fn retry_last(&mut self) -> Result<Option<String>> {
+        let Some(idx) = self
+            .session
+            .messages
+            .iter()
+            .rposition(|m| m.role == crate::core::message::Role::User)
+        else {
+            return Ok(None);
+        };
+        self.session.truncate_to(&self.memory, idx + 1)?;
+        Ok(Some(self.session.messages[idx].content.clone()))
+    }
+
+    /// Summarise the conversation with the provider and replace the history
+    /// with that summary (reduces the context sent on later turns).
+    pub async fn compact(&mut self) -> Result<String> {
+        let mut msgs = self.request_messages();
+        msgs.push(Message::user(
+            "Summarise the conversation above for your own future reference. \
+             Keep the key facts, decisions, file paths and open questions. \
+             Be concise; reply with the summary only.",
+        ));
+        let model = self.model.clone();
+        let effort = self.reasoning_effort.clone();
+        let summary = {
+            let provider = self.provider.get().await?;
+            provider.chat(msgs, &model, effort.as_deref()).await?
+        };
+        self.session.compact_with(&self.memory, &summary)?;
+        Ok(summary)
     }
 }

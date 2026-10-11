@@ -9,13 +9,33 @@ Enclave has two tool mechanisms:
    human, executed via `sh -c` (below).
 2. **Agentic mode** (`enclave chat --agent` or `tools.mode = "agent"`) — real
    function calling: the model returns structured tool calls
-   (`read_file`, `write_file`, `list_dir`, `run_shell`), Enclave executes
-   them only after the same ask-always approval, and feeds results back
-   (max 8 iterations). File paths are canonicalized and must resolve inside
-   the current workspace (`..` and outside-absolute paths are rejected).
-   The privacy guard redacts tool arguments and results like any other
-   outgoing text. Multi-agent `delegate` runs sub-agents with **ephemeral,
-   RAM-only sessions** and cannot recurse further (depth limit 1).
+   (`read_file`, `write_file`, `edit_file`, `list_dir`, `glob`, `grep`,
+   `run_shell`), Enclave executes them only after the same ask-always approval,
+   and feeds results back (max 8 iterations). File paths are canonicalized and
+   must resolve inside the current workspace (`..` and outside-absolute paths
+   are rejected). `read_file` accepts an optional `offset`/`limit` line range;
+   `glob` matches files by pattern; `grep` searches contents by regex (optional
+   `glob` filter). `write_file`/`edit_file` return an inline diff. The privacy
+   guard redacts tool arguments and results like any other outgoing text.
+   Multi-agent `delegate` runs sub-agents with **ephemeral, RAM-only sessions**
+   and cannot recurse further (depth limit 1).
+
+### Permissions and modes
+
+Tool calls are gated by the `[permissions]` table and the current agent mode
+(both in `config.toml`):
+
+- each tool maps to an `allow` / `ask` / `deny` rule (defaults: reads
+  `allow`, mutations `ask`); `bash_rules` matches shell commands by glob
+  pattern (longest match wins);
+- `external_directory` gates any path outside the workspace;
+- `doom_loop` can gate a tool call that repeats with identical input;
+- **Plan mode** (`--plan`, `Shift+Tab`, `/plan`) denies all mutating tools and
+  adds a planning note to the system prompt; **Build** is the default;
+- `--auto` auto-approves anything not explicitly denied.
+
+A denied call is reported back to the model as `[denied by policy]` and never
+executed.
 
 ## Design: proposals, not function calling
 

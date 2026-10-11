@@ -50,6 +50,12 @@ pub enum Command {
         /// multimodal models; text files are inlined and guard-scanned.
         #[arg(long = "attach", value_name = "PATH")]
         attach: Vec<String>,
+        /// Auto-approve tool calls unless the permission policy denies them.
+        #[arg(long)]
+        auto: bool,
+        /// Plan mode: read-only, mutating tools are refused.
+        #[arg(long)]
+        plan: bool,
     },
     /// Launch the full-screen terminal UI.
     Tui {
@@ -74,6 +80,12 @@ pub enum Command {
         /// Reasoning effort hint for providers that support it: low|medium|high.
         #[arg(long)]
         effort: Option<String>,
+        /// Auto-approve tool calls unless the permission policy denies them.
+        #[arg(long)]
+        auto: bool,
+        /// Plan mode: read-only, mutating tools are refused.
+        #[arg(long)]
+        plan: bool,
     },
     /// Manage API keys in the OS keychain.
     Keys {
@@ -202,6 +214,8 @@ pub fn run(cli: Cli) -> Result<()> {
             agent,
             effort,
             attach,
+            auto,
+            plan,
         } => {
             let engine = build_engine(
                 &paths,
@@ -211,6 +225,8 @@ pub fn run(cli: Cli) -> Result<()> {
                 session,
                 no_keychain,
                 effort,
+                auto,
+                plan,
             )?;
             let tools = settings.effective_tools(no_tools);
             let guard = settings.effective_guard(no_guard);
@@ -241,6 +257,8 @@ pub fn run(cli: Cli) -> Result<()> {
             no_guard,
             agent,
             effort,
+            auto,
+            plan,
         } => {
             let engine = build_engine(
                 &paths,
@@ -250,6 +268,8 @@ pub fn run(cli: Cli) -> Result<()> {
                 session,
                 no_keychain,
                 effort,
+                auto,
+                plan,
             )?;
             let tools = settings.effective_tools(no_tools);
             let guard = settings.effective_guard(no_guard);
@@ -278,6 +298,7 @@ fn unlock_master_key(vault: &Vault, settings: &Settings, no_keychain: bool) -> R
     vault.derive_key(&password, use_keychain)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_engine(
     paths: &Paths,
     settings: &Settings,
@@ -286,6 +307,8 @@ fn build_engine(
     session_id: Option<String>,
     no_keychain: bool,
     effort: Option<String>,
+    auto: bool,
+    plan: bool,
 ) -> Result<ChatEngine> {
     let provider_name = provider_name.unwrap_or_else(|| settings.default_provider.clone());
 
@@ -329,6 +352,18 @@ fn build_engine(
         settings.system_prompt.clone(),
     )?;
     engine.reasoning_effort = effort.or_else(|| settings.reasoning_effort.clone());
+
+    // Local AGENTS.md rules + permission policy + operating mode.
+    let cwd = std::env::current_dir().unwrap_or_default();
+    engine.workspace = cwd.clone();
+    engine.rules = crate::core::rules::load(&cwd, &paths.config_dir, &settings.instructions);
+    engine.permissions = settings.permissions.clone();
+    if auto {
+        engine.permissions.auto = true;
+    }
+    if plan {
+        engine.mode = crate::core::engine::AgentMode::Plan;
+    }
     Ok(engine)
 }
 
@@ -399,6 +434,36 @@ async fn chat_loop(
             println!("session cleared\n");
             continue;
         }
+
+        // `!command`: run it locally; the output is never sent to the model.
+        if let Some(cmd) = input.strip_prefix('!') {
+            let cmd = cmd.trim();
+            if cmd.is_empty() {
+                println!("usage: !<shell command>\n");
+            } else {
+                match crate::core::tools::run(
+                    cmd,
+                    std::time::Duration::from_secs(tools.timeout_secs),
+                    tools.max_output_bytes,
+                )
+                .await
+                {
+                    Ok(out) => println!("{}\n", out.render()),
+                    Err(e) => println!("error: {e}\n"),
+                }
+            }
+            continue;
+        }
+
+        // `@file` references become attachments (local, guarded like text).
+        let workspace = std::env::current_dir().unwrap_or_default();
+        let resolved = crate::core::commands::resolve_file_refs(input, &workspace);
+        if !resolved.names.is_empty() {
+            println!("attached: {}", resolved.names.join(", "));
+        }
+        attachments.extend(resolved.attachments);
+        let input = resolved.text;
+        let input = input.as_str();
 
         if !guard_gate(&mut engine, &mut decision, input, &guard)? {
             println!("message not sent\n");

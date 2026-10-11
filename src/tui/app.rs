@@ -21,12 +21,11 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Padding, Paragraph, Wrap};
 
-use crate::config::{GuardMode, GuardSettings, ToolsSettings};
-use crate::core::engine::ChatEngine;
+use crate::config::{Action, GuardMode, GuardSettings, ToolsSettings};
+use crate::core::engine::{AgentMode, AgentStep, ApprovedGate, ChatEngine};
 use crate::core::attachment::Attachment;
 use crate::core::message::{Role, ToolCall};
 use crate::core::builtin_tools::FileChange;
-use crate::core::engine::{AgentStep, ApprovedGate};
 use crate::core::tools::{self, Proposal};
 use crate::error::Result;
 use crate::privacy::SessionInfo;
@@ -34,6 +33,8 @@ use crate::privacy::guard::{self, Finding, Redactor};
 use crate::privacy::SecureCredentials;
 use crate::providers::{ChunkStream, OpenRouterAccount, OpenRouterModel};
 use crate::tui::markdown;
+use crate::tui::theme::Palette;
+use crate::tui::keybinds::{BindAction, Keybinds};
 
 /// Sidebar width in cells; hidden on narrow terminals.
 const SIDEBAR_WIDTH: u16 = 28;
@@ -52,24 +53,40 @@ const EFFORT_OPTIONS: &[(&str, &str)] = &[
 // shades (no hard borders): the transcript sits on the base background while
 // the header, sidebar, info panel, input and footer use a slightly lighter
 // surface colour.
-const C_BG: Color = Color::Rgb(17, 18, 22);
-const C_SURFACE: Color = Color::Rgb(30, 31, 37);
-const C_SURFACE_HI: Color = Color::Rgb(44, 46, 54);
-const C_TEXT: Color = Color::Rgb(226, 226, 232);
-const C_DIM: Color = Color::Rgb(132, 134, 148);
-const C_ACCENT: Color = Color::Rgb(167, 139, 250); // soft violet
-const C_GREEN: Color = Color::Rgb(134, 239, 172);
-const C_RED: Color = Color::Rgb(248, 150, 150);
-const C_YELLOW: Color = Color::Rgb(250, 220, 120);
+/// Active colour palette (set once at startup from `[tui] theme`).
+static PALETTE: std::sync::OnceLock<Palette> = std::sync::OnceLock::new();
+
+/// The active palette (defaults to the built-in theme).
+fn pal() -> Palette {
+    *PALETTE.get_or_init(Palette::default)
+}
+
+/// Install the palette selected in the config (idempotent; first call wins).
+fn set_palette(palette: Palette) {
+    let _ = PALETTE.set(palette);
+}
+
+/// Active key-binding overrides (set once at startup from `[tui.keybinds]`).
+static KEYBINDS: std::sync::OnceLock<Keybinds> = std::sync::OnceLock::new();
+
+/// The active key bindings (defaults to none — built-in keys apply).
+fn keybinds() -> &'static Keybinds {
+    KEYBINDS.get_or_init(Keybinds::default)
+}
+
+/// Install the key bindings selected in the config (first call wins).
+fn set_keybinds(bindings: Keybinds) {
+    let _ = KEYBINDS.set(bindings);
+}
 
 /// Full-row surface style used for header/footer bars.
 fn surface() -> Style {
-    Style::default().bg(C_SURFACE)
+    Style::default().bg(pal().surface)
 }
 
 /// Text shown by `/help`.
 const SLASH_HELP: &str =
-    "commands: /help · /new · /switch · /clear · /model [id] (no id opens the model picker; the choice is saved) · /effort [off|low|medium|high] · /attach <path> · /detach · /credits · /quit   (Ctrl-S = session picker)";
+    "commands: /help · /new · /switch · /clear · /undo · /redo · /retry · /compact · /model [id] · /effort [off|low|medium|high] · /plan · /build · /attach <path> · /detach · /copy [n] · /save [path] · /theme [name] · /commands · /credits · /quit   (Ctrl-S picker · Ctrl-Y copy · Shift+Tab plan/build · @file refs · !shell)";
 
 /// One rendered transcript entry.
 struct ChatLine {
@@ -141,8 +158,28 @@ enum KeyAction {
     Newline,
     /// '?' with empty input: toggle the shortcuts overlay.
     Help,
+    /// Shift+Tab: toggle Plan/Build mode.
+    ToggleMode,
     /// Ctrl+S: open the session picker overlay.
     SessionPicker,
+    /// Ctrl+Y: enter copy mode (select transcript lines and yank to clipboard).
+    CopyMode,
+    /// Ctrl+P: recall the previous input from history.
+    HistoryPrev,
+    /// Ctrl+N: recall the next input from history.
+    HistoryNext,
+    /// Clear the whole input box (rebindable).
+    ClearInput,
+}
+
+/// Visual line-selection state for copy mode (Ctrl+Y).
+struct CopyState {
+    /// Plain (raw markdown) transcript lines, one entry per display line.
+    lines: Vec<String>,
+    /// Cursor line that moves with the arrows.
+    sel: usize,
+    /// Fixed end of the selection (set when copy mode opens).
+    anchor: usize,
 }
 
 /// What a key press asks the app to do (proposal-confirmation phase).
@@ -169,6 +206,17 @@ pub async fn run(
     guard_cfg: GuardSettings,
     agent: bool,
 ) -> Result<()> {
+    // Apply the theme and key bindings from config.toml (best effort).
+    if let Ok(paths) = crate::config::Paths::resolve() {
+        if let Ok(settings) = crate::config::Settings::load(&paths.config_file) {
+            if let Some(name) = &settings.tui.theme {
+                if let Some(palette) = crate::tui::theme::by_name(name) {
+                    set_palette(palette);
+                }
+            }
+            set_keybinds(Keybinds::from_settings(&settings.tui));
+        }
+    }
     enable_raw_mode()?;
     let mut out = stdout();
     execute!(out, EnterAlternateScreen, EnableMouseCapture)?;
@@ -251,6 +299,10 @@ async fn run_app(
     let mut changes: Vec<FileChange> = Vec::new();
     // Files attached to the next message (see /attach).
     let mut pending: Vec<Attachment> = Vec::new();
+    // Copy-mode selection (Ctrl+Y) and input history (Ctrl-P / Ctrl-N).
+    let mut copy: Option<CopyState> = None;
+    let mut history: Vec<String> = Vec::new();
+    let mut hist_pos: Option<usize> = None;
     let agent_mode = agent;
     let mut agent_iters: usize = 0;
     let defs = crate::core::builtin_tools::defs(false);
@@ -260,6 +312,19 @@ async fn run_app(
         max_output_bytes: tools_cfg.max_output_bytes,
         delegate: None,
     };
+    // Local custom commands (`.enclave/commands` + `<config>/commands`).
+    let config_dir = crate::config::Paths::resolve()
+        .map(|p| p.config_dir)
+        .unwrap_or_default();
+    let custom: Vec<crate::core::commands::CustomCommand> =
+        crate::core::commands::load_all(&ctx.workspace, &config_dir);
+    // Last message removed by /undo (restored by /redo).
+    let mut last_undone: Option<String> = None;
+    let theme_current = crate::config::Paths::resolve()
+        .ok()
+        .and_then(|p| crate::config::Settings::load(&p.config_file).ok())
+        .and_then(|s| s.tui.theme)
+        .unwrap_or_else(|| "default".to_string());
 
     loop {
         let guard_state = if !guard_cfg.enabled {
@@ -299,6 +364,7 @@ async fn run_app(
                 account.as_ref(),
                 &changes,
                 &atts_label,
+                copy.as_ref(),
             )
         })?;
 
@@ -443,40 +509,21 @@ async fn run_app(
                 }
             }
             Phase::ToolConfirm { .. } => {
-                let (call, idx, total, approve_all) = match &phase {
+                let (call, idx, approve_all) = match &phase {
                     Phase::ToolConfirm {
                         calls,
                         idx,
                         approve_all,
-                    } => (calls.get(*idx).cloned(), *idx, calls.len(), *approve_all),
-                    _ => (None, 0, 0, false),
+                    } => (calls.get(*idx).cloned(), *idx, *approve_all),
+                    _ => (None, 0, false),
                 };
-
-                // "all" already approved: run without waiting for keys.
-                if approve_all {
-                    if let Some(c) = &call {
-                        agentic_approve(engine, &mut transcript, &mut changes, &ctx, c).await?;
-                    }
-                    if !advance_tool(&mut phase, &mut status, idx, total) {
-                        agentic_advance(
-                            engine,
-                            &mut transcript,
-                            &mut status,
-                            &mut phase,
-                            &mut changes,
-                            &mut agent_iters,
-                            &defs,
-                            &ctx,
-                        )
-                        .await?;
-                    }
-                    continue;
-                }
 
                 if let Some(Ok(Event::Key(key))) = events.next().await {
                     if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
                         continue;
                     }
+                    let mut advanced = false;
+                    let mut approve_rest = false;
                     match key.code {
                         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             return Ok(());
@@ -493,47 +540,45 @@ async fn run_app(
                                 agentic_approve(engine, &mut transcript, &mut changes, &ctx, c)
                                     .await?;
                             }
-                            if !advance_tool(&mut phase, &mut status, idx, total) {
-                                agentic_advance(
-                                    engine,
-                                    &mut transcript,
-                                    &mut status,
-                                    &mut phase,
-                                    &mut changes,
-                                    &mut agent_iters,
-                                    &defs,
-                                    &ctx,
-                                )
-                                .await?;
-                            }
+                            advanced = true;
                         }
                         KeyCode::Char('n') | KeyCode::Char('N') => {
                             if let Some(c) = &call {
                                 engine.push_tool_result(&c.id, "[denied by user]")?;
                             }
-                            if !advance_tool(&mut phase, &mut status, idx, total) {
-                                agentic_advance(
-                                    engine,
-                                    &mut transcript,
-                                    &mut status,
-                                    &mut phase,
-                                    &mut changes,
-                                    &mut agent_iters,
-                                    &defs,
-                                    &ctx,
-                                )
-                                .await?;
-                            }
+                            advanced = true;
                         }
                         KeyCode::Char('a') | KeyCode::Char('A') => {
                             if let Some(c) = &call {
                                 agentic_approve(engine, &mut transcript, &mut changes, &ctx, c)
                                     .await?;
                             }
-                            if let Phase::ToolConfirm { approve_all, .. } = &mut phase {
-                                *approve_all = true;
+                            advanced = true;
+                            approve_rest = true;
+                        }
+                        _ => {}
+                    }
+                    if advanced {
+                        let calls = match &phase {
+                            Phase::ToolConfirm { calls, .. } => calls.clone(),
+                            _ => Vec::new(),
+                        };
+                        match process_tool_calls(
+                            engine,
+                            &mut transcript,
+                            &mut changes,
+                            &ctx,
+                            calls,
+                            idx + 1,
+                            approve_rest || approve_all,
+                        )
+                        .await?
+                        {
+                            Some(p) => {
+                                status = "tool call — approve with y/n/a/q".into();
+                                phase = p;
                             }
-                            if !advance_tool(&mut phase, &mut status, idx, total) {
+                            None => {
                                 agentic_advance(
                                     engine,
                                     &mut transcript,
@@ -547,13 +592,64 @@ async fn run_app(
                                 .await?;
                             }
                         }
-                        _ => {}
                     }
                 }
             }
             Phase::Idle => {
                 match events.next().await {
                     Some(Ok(Event::Key(key))) => {
+                        if copy.is_some() {
+                            if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+                                continue;
+                            }
+                            let mut exit: Option<String> = None;
+                            {
+                                let cs = copy.as_mut().unwrap();
+                                let last = cs.lines.len().saturating_sub(1);
+                                match (key.code, key.modifiers) {
+                                    (KeyCode::Char('c'), KeyModifiers::CONTROL) => return Ok(()),
+                                    (KeyCode::Esc, _) | (KeyCode::Char('q'), _) => {
+                                        exit = Some("ready".into())
+                                    }
+                                    (KeyCode::Up, _) | (KeyCode::Char('k'), _) => {
+                                        cs.sel = cs.sel.saturating_sub(1)
+                                    }
+                                    (KeyCode::Down, _) | (KeyCode::Char('j'), _) => {
+                                        cs.sel = (cs.sel + 1).min(last)
+                                    }
+                                    (KeyCode::PageUp, _) => cs.sel = cs.sel.saturating_sub(10),
+                                    (KeyCode::PageDown, _) => cs.sel = (cs.sel + 10).min(last),
+                                    (KeyCode::Home, _) => cs.sel = 0,
+                                    (KeyCode::End, _) => cs.sel = last,
+                                    (KeyCode::Char('a'), _) => {
+                                        cs.anchor = 0;
+                                        cs.sel = last;
+                                    }
+                                    (KeyCode::Char('e'), _) => {
+                                        exit = Some(copy_status(&last_reply_text(&transcript)))
+                                    }
+                                    (KeyCode::Char('y'), _) | (KeyCode::Enter, _) => {
+                                        let (a, b) = if cs.anchor <= cs.sel {
+                                            (cs.anchor, cs.sel)
+                                        } else {
+                                            (cs.sel, cs.anchor)
+                                        };
+                                        let text = if cs.lines.is_empty() {
+                                            String::new()
+                                        } else {
+                                            cs.lines[a..=b].join("\n")
+                                        };
+                                        exit = Some(copy_status(&text));
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            if let Some(st) = exit {
+                                copy = None;
+                                status = st;
+                            }
+                            continue;
+                        }
                         if model_picker {
                             if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
                                 continue;
@@ -788,6 +884,7 @@ async fn run_app(
                             KeyAction::ScrollUp => scroll = scroll.saturating_add(1),
                             KeyAction::ScrollDown => scroll = scroll.saturating_sub(1),
                             KeyAction::DeleteWord => delete_word(&mut input),
+                            KeyAction::ClearInput => input.clear(),
                             KeyAction::Newline => input.push('\n'),
                             KeyAction::Help => help = true,
                             KeyAction::ToggleSidebar => {
@@ -800,6 +897,59 @@ async fn run_app(
                                 sessions = engine.memory.list_sessions().unwrap_or_default();
                                 picker = true;
                                 status = "session picker — ↑/↓ select, Enter open, n new, r rename, d delete, Esc close".into();
+                            }
+                            KeyAction::CopyMode => {
+                                let lines = transcript_copy_lines(&transcript);
+                                if lines.is_empty() {
+                                    status = "nothing to copy yet".into();
+                                } else {
+                                    let last = lines.len() - 1;
+                                    copy = Some(CopyState {
+                                        lines,
+                                        sel: last,
+                                        anchor: last,
+                                    });
+                                    status = "copy — ↑/↓ select · y copy · a all · e last reply · Esc cancel".into();
+                                }
+                            }
+                            KeyAction::HistoryPrev => {
+                                if !history.is_empty() {
+                                    let pos = match hist_pos {
+                                        None => history.len() - 1,
+                                        Some(0) => 0,
+                                        Some(p) => p - 1,
+                                    };
+                                    hist_pos = Some(pos);
+                                    input = history[pos].clone();
+                                }
+                            }
+                            KeyAction::HistoryNext => match hist_pos {
+                                Some(p) if p + 1 < history.len() => {
+                                    let np = p + 1;
+                                    hist_pos = Some(np);
+                                    input = history[np].clone();
+                                }
+                                Some(_) => {
+                                    hist_pos = None;
+                                    input.clear();
+                                }
+                                None => {}
+                            },
+                            KeyAction::ToggleMode => {
+                                engine.mode = match engine.mode {
+                                    AgentMode::Build => AgentMode::Plan,
+                                    AgentMode::Plan => AgentMode::Build,
+                                };
+                                status = format!(
+                                    "mode: {} — {}",
+                                    engine.mode.label(),
+                                    if engine.mode.is_plan() {
+                                        "read-only (edits & shell refused)"
+                                    } else {
+                                        "full access (per permission policy)"
+                                    }
+                                );
+                                privacy = privacy_snapshot(engine, &guard_cfg);
                             }
                             KeyAction::None => {}
                         }
@@ -946,14 +1096,242 @@ async fn run_app(
                                             status = format!("cleared {n} attachment(s)");
                                         }
                                     }
+                                    "copy" => {
+                                        let n: usize =
+                                            arg.trim().parse().unwrap_or(1).clamp(1, 99);
+                                        let mut picked: Vec<&str> = transcript
+                                            .iter()
+                                            .filter(|c| {
+                                                c.speaker == Speaker::Assistant
+                                                    && !c.text.trim().is_empty()
+                                            })
+                                            .map(|c| c.text.as_str())
+                                            .rev()
+                                            .take(n)
+                                            .collect();
+                                        picked.reverse();
+                                        if picked.is_empty() {
+                                            status = "no assistant replies to copy yet".into();
+                                        } else {
+                                            status = copy_status(&picked.join("\n\n"));
+                                        }
+                                    }
+                                    "save" => {
+                                        let path = if arg.trim().is_empty() {
+                                            let short = &engine.session.id
+                                                [..8.min(engine.session.id.len())];
+                                            format!("enclave-{short}.md")
+                                        } else {
+                                            arg.trim().to_string()
+                                        };
+                                        let md = session_markdown(engine, &transcript);
+                                        let n = md.chars().count();
+                                        match std::fs::write(&path, md) {
+                                            Ok(()) => {
+                                                status = format!(
+                                                    "saved {n} chars to {path} (plaintext — not encrypted)"
+                                                )
+                                            }
+                                            Err(e) => status = format!("save failed: {e}"),
+                                        }
+                                    }
+                                    "plan" => {
+                                        engine.mode = AgentMode::Plan;
+                                        status =
+                                            "mode: plan — read-only (edits & shell refused)".into();
+                                        privacy = privacy_snapshot(engine, &guard_cfg);
+                                    }
+                                    "build" => {
+                                        engine.mode = AgentMode::Build;
+                                        status = "mode: build — full access (per permission policy)"
+                                            .into();
+                                        privacy = privacy_snapshot(engine, &guard_cfg);
+                                    }
+                                    "undo" => match engine.undo_last_turn() {
+                                        Ok(Some(text)) => {
+                                            last_undone = Some(text.clone());
+                                            input = text;
+                                            transcript = transcript_from(engine);
+                                            scroll = 0;
+                                            sessions =
+                                                engine.memory.list_sessions().unwrap_or_default();
+                                            privacy = privacy_snapshot(engine, &guard_cfg);
+                                            status =
+                                                "undone — edit and press Enter, or /redo to restore".into();
+                                        }
+                                        Ok(None) => status = "nothing to undo".into(),
+                                        Err(e) => status = format!("error: {e}"),
+                                    },
+                                    "redo" => match &last_undone {
+                                        Some(text) => {
+                                            input = text.clone();
+                                            status = "restored — press Enter to send".into();
+                                        }
+                                        None => status = "nothing to redo".into(),
+                                    },
+                                    "retry" => match engine.undo_last_turn() {
+                                        Ok(Some(text)) => {
+                                            transcript = transcript_from(engine);
+                                            scroll = 0;
+                                            sessions =
+                                                engine.memory.list_sessions().unwrap_or_default();
+                                            if agent_mode && tools_cfg.enabled {
+                                                begin_agentic_turn(
+                                                    engine,
+                                                    &mut transcript,
+                                                    &mut status,
+                                                    &mut phase,
+                                                    &mut changes,
+                                                    &mut agent_iters,
+                                                    &defs,
+                                                    &ctx,
+                                                    &text,
+                                                    Vec::new(),
+                                                )
+                                                .await?;
+                                            } else {
+                                                begin_send(
+                                                    engine,
+                                                    &mut transcript,
+                                                    &mut status,
+                                                    &mut scroll,
+                                                    &mut phase,
+                                                    &mut active,
+                                                    &mut buffer,
+                                                    &text,
+                                                    Vec::new(),
+                                                )
+                                                .await?;
+                                            }
+                                        }
+                                        Ok(None) => status = "nothing to retry".into(),
+                                        Err(e) => status = format!("error: {e}"),
+                                    },
+                                    "compact" => {
+                                        match engine.compact().await {
+                                            Ok(summary) => {
+                                                transcript = transcript_from(engine);
+                                                scroll = 0;
+                                                privacy = privacy_snapshot(engine, &guard_cfg);
+                                                status = format!(
+                                                    "compacted — history replaced with a {} char summary",
+                                                    summary.chars().count()
+                                                );
+                                            }
+                                            Err(e) => status = format!("error: {e}"),
+                                        }
+                                    }
+                                    "commands" => {
+                                        if custom.is_empty() {
+                                            status =
+                                                "no custom commands (add .md files to .enclave/commands or <config>/commands)".into();
+                                        } else {
+                                            let list = custom
+                                                .iter()
+                                                .map(|c| {
+                                                    if c.description.is_empty() {
+                                                        format!("/{}", c.name)
+                                                    } else {
+                                                        format!("/{} — {}", c.name, c.description)
+                                                    }
+                                                })
+                                                .collect::<Vec<_>>()
+                                                .join("\n");
+                                            transcript.push(ChatLine {
+                                                speaker: Speaker::System,
+                                                text: format!("custom commands:\n{list}"),
+                                            });
+                                            status =
+                                                format!("{} custom command(s)", custom.len());
+                                        }
+                                    }
+                                    "theme" => {
+                                        let all = crate::tui::theme::names().join(", ");
+                                        let want = arg.trim();
+                                        if want.is_empty() {
+                                            status =
+                                                format!("theme: {theme_current} (available: {all})");
+                                        } else if let Some(p) =
+                                            crate::tui::theme::by_name(want)
+                                        {
+                                            set_palette(p);
+                                            persist_theme(want);
+                                            status =
+                                                format!("theme: {want} (saved for next launches)");
+                                        } else {
+                                            status = format!(
+                                                "unknown theme '{want}' (available: {all})"
+                                            );
+                                        }
+                                    }
                                     "quit" | "exit" => return Ok(()),
                                     "" => status = "type /help for the command list".into(),
                                     other => {
-                                        status = format!("unknown command '/{other}' — try /help");
+                                        if let Some(c) =
+                                            crate::core::commands::find(&custom, other)
+                                        {
+                                            let expanded =
+                                                crate::core::commands::expand(&c.template, &arg);
+                                            input = expanded;
+                                            status = format!(
+                                                "command /{other} expanded — review and press Enter"
+                                            );
+                                        } else {
+                                            status = format!(
+                                                "unknown command '/{other}' — try /help"
+                                            );
+                                        }
                                     }
                                 }
                                 continue;
                             }
+
+                            // `!command`: run locally and show the output. It is
+                            // never sent to the provider.
+                            if let Some(cmd) = text.strip_prefix('!') {
+                                let cmd = cmd.trim().to_string();
+                                if cmd.is_empty() {
+                                    status = "usage: !<shell command>".into();
+                                } else {
+                                    transcript.push(ChatLine {
+                                        speaker: Speaker::User,
+                                        text: format!("!{cmd}"),
+                                    });
+                                    match tools::run(
+                                        &cmd,
+                                        Duration::from_secs(tools_cfg.timeout_secs),
+                                        tools_cfg.max_output_bytes,
+                                    )
+                                    .await
+                                    {
+                                        Ok(out) => {
+                                            for line in out.render().lines() {
+                                                transcript.push(ChatLine {
+                                                    speaker: Speaker::Tool,
+                                                    text: line.to_string(),
+                                                });
+                                            }
+                                            scroll = 0;
+                                            status =
+                                                "command finished — output kept local".into();
+                                        }
+                                        Err(e) => status = format!("error: {e}"),
+                                    }
+                                }
+                                continue;
+                            }
+
+                            // Resolve `@path` references into attachments.
+                            let refs =
+                                crate::core::commands::resolve_file_refs(&text, &ctx.workspace);
+                            if !refs.names.is_empty() {
+                                status = format!("attached: {}", refs.names.join(", "));
+                                pending.extend(refs.attachments);
+                            }
+                            let text = refs.text;
+
+                            history.push(text.clone());
+                            hist_pos = None;
 
                             // Privacy guard: scan before anything leaves the machine.
                             if guard_cfg.enabled {
@@ -1341,6 +1719,24 @@ fn switch_session(
     Ok(())
 }
 
+/// Rebuild the transcript from the engine's current session messages.
+fn transcript_from(engine: &ChatEngine) -> Vec<ChatLine> {
+    engine
+        .session
+        .messages
+        .iter()
+        .map(|m| ChatLine {
+            speaker: match m.role {
+                Role::User => Speaker::User,
+                Role::Assistant => Speaker::Assistant,
+                Role::Tool => Speaker::Tool,
+                Role::System => Speaker::System,
+            },
+            text: m.content.clone(),
+        })
+        .collect()
+}
+
 /// Footer label summarising pending attachments (empty when none).
 fn attachments_label(pending: &[Attachment]) -> String {
     if pending.is_empty() {
@@ -1391,48 +1787,97 @@ async fn agentic_advance(
     transcript: &mut Vec<ChatLine>,
     status: &mut String,
     phase: &mut Phase,
-    _changes: &mut Vec<FileChange>,
+    changes: &mut Vec<FileChange>,
     agent_iters: &mut usize,
     defs: &[crate::providers::ToolDef],
-    _ctx: &crate::core::builtin_tools::ToolContext,
+    ctx: &crate::core::builtin_tools::ToolContext,
 ) -> Result<()> {
-    *agent_iters += 1;
-    if *agent_iters > 8 {
-        *status = "error: agent loop did not converge (8 steps)".into();
-        *phase = Phase::Idle;
-        return Ok(());
-    }
-    match engine.agentic_step(defs).await {
-        Ok(AgentStep::Final(text)) => {
-            if !text.is_empty() {
-                transcript.push(ChatLine {
-                    speaker: Speaker::Assistant,
-                    text,
-                });
-            }
-            *status = "ready".into();
+    loop {
+        *agent_iters += 1;
+        if *agent_iters > 8 {
+            *status = "error: agent loop did not converge (8 steps)".into();
             *phase = Phase::Idle;
+            return Ok(());
         }
-        Ok(AgentStep::ToolCalls { text, calls }) => {
-            if !text.trim().is_empty() {
-                transcript.push(ChatLine {
-                    speaker: Speaker::Assistant,
-                    text,
-                });
+        match engine.agentic_step(defs).await {
+            Ok(AgentStep::Final(text)) => {
+                if !text.is_empty() {
+                    transcript.push(ChatLine {
+                        speaker: Speaker::Assistant,
+                        text,
+                    });
+                }
+                *status = "ready".into();
+                *phase = Phase::Idle;
+                return Ok(());
             }
-            *status = "tool call — approve with y/n/a/q".into();
-            *phase = Phase::ToolConfirm {
-                calls,
-                idx: 0,
-                approve_all: false,
-            };
-        }
-        Err(e) => {
-            *status = format!("error: {e}");
-            *phase = Phase::Idle;
+            Ok(AgentStep::ToolCalls { text, calls }) => {
+                if !text.trim().is_empty() {
+                    transcript.push(ChatLine {
+                        speaker: Speaker::Assistant,
+                        text,
+                    });
+                }
+                match process_tool_calls(engine, transcript, changes, ctx, calls, 0, false).await? {
+                    Some(p) => {
+                        *status = "tool call — approve with y/n/a/q".into();
+                        *phase = p;
+                        return Ok(());
+                    }
+                    None => continue,
+                }
+            }
+            Err(e) => {
+                *status = format!("error: {e}");
+                *phase = Phase::Idle;
+                return Ok(());
+            }
         }
     }
-    Ok(())
+}
+
+/// Auto-run calls the permission policy allows, auto-deny the denied ones and
+/// stop at the first that needs confirmation. Returns the confirm phase, or
+/// `None` when every call was handled.
+async fn process_tool_calls(
+    engine: &mut ChatEngine,
+    transcript: &mut Vec<ChatLine>,
+    changes: &mut Vec<FileChange>,
+    ctx: &crate::core::builtin_tools::ToolContext,
+    calls: Vec<ToolCall>,
+    mut idx: usize,
+    approve_all: bool,
+) -> Result<Option<Phase>> {
+    while idx < calls.len() {
+        let call = calls[idx].clone();
+        let action = if approve_all {
+            Action::Allow
+        } else {
+            engine.effective_action(&call)
+        };
+        match action {
+            Action::Deny => {
+                transcript.push(ChatLine {
+                    speaker: Speaker::Tool,
+                    text: format!("\u{26d4} {} [denied by policy]", call.name),
+                });
+                engine.push_tool_result(&call.id, "[denied by policy]")?;
+                idx += 1;
+            }
+            Action::Allow => {
+                agentic_approve(engine, transcript, changes, ctx, &call).await?;
+                idx += 1;
+            }
+            Action::Ask => {
+                return Ok(Some(Phase::ToolConfirm {
+                    calls,
+                    idx,
+                    approve_all,
+                }));
+            }
+        }
+    }
+    Ok(None)
 }
 
 /// Execute one approved tool call, render its output and persist the result.
@@ -1467,19 +1912,6 @@ async fn agentic_approve(
         }
     }
     Ok(())
-}
-
-/// Move to the next pending tool call. Returns true if there is one.
-fn advance_tool(phase: &mut Phase, status: &mut String, idx: usize, total: usize) -> bool {
-    if idx + 1 < total {
-        if let Phase::ToolConfirm { idx: i, .. } = phase {
-            *i = idx + 1;
-        }
-        *status = format!("tool call {}/{} — approve with y/n/a/q", idx + 2, total);
-        true
-    } else {
-        false
-    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1589,6 +2021,23 @@ fn handle_key(key: KeyEvent, input: &mut String) -> KeyAction {
     if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
         return KeyAction::None;
     }
+    // User-configured overrides win over the built-in bindings.
+    if let Some(action) = keybinds().action_for(&key) {
+        return match action {
+            BindAction::Quit => KeyAction::Quit,
+            BindAction::Clear => KeyAction::Clear,
+            BindAction::CopyMode => KeyAction::CopyMode,
+            BindAction::SessionPicker => KeyAction::SessionPicker,
+            BindAction::ToggleSidebar => KeyAction::ToggleSidebar,
+            BindAction::ToggleMode => KeyAction::ToggleMode,
+            BindAction::Newline => KeyAction::Newline,
+            BindAction::HistoryPrev => KeyAction::HistoryPrev,
+            BindAction::HistoryNext => KeyAction::HistoryNext,
+            BindAction::DeleteWord => KeyAction::DeleteWord,
+            BindAction::ClearInput => KeyAction::ClearInput,
+            BindAction::Send => KeyAction::Send,
+        };
+    }
     match (key.code, key.modifiers) {
         (KeyCode::Esc, _) => KeyAction::Quit,
         (KeyCode::Char('c'), KeyModifiers::CONTROL) => KeyAction::Quit,
@@ -1599,7 +2048,11 @@ fn handle_key(key: KeyEvent, input: &mut String) -> KeyAction {
             KeyAction::None
         }
         (KeyCode::Char('s'), KeyModifiers::CONTROL) => KeyAction::SessionPicker,
+        (KeyCode::Char('y'), KeyModifiers::CONTROL) => KeyAction::CopyMode,
+        (KeyCode::Char('p'), KeyModifiers::CONTROL) => KeyAction::HistoryPrev,
+        (KeyCode::Char('n'), KeyModifiers::CONTROL) => KeyAction::HistoryNext,
         (KeyCode::Tab, _) => KeyAction::ToggleSidebar,
+        (KeyCode::BackTab, _) => KeyAction::ToggleMode,
         (KeyCode::Enter, KeyModifiers::ALT) => KeyAction::Newline,
         (KeyCode::Enter, _) => KeyAction::Send,
         (KeyCode::Char('?'), KeyModifiers::NONE) => {
@@ -1648,6 +2101,86 @@ fn wrapped_height(lines: &[Line], width: u16) -> u16 {
         rows += if lw == 0 { 1 } else { lw.div_ceil(w) };
     }
     rows.max(1) as u16
+}
+
+/// Copy `text` to the system clipboard and return a short status message.
+fn copy_status(text: &str) -> String {
+    if text.is_empty() {
+        return "nothing to copy".to_string();
+    }
+    match crate::clipboard::copy(text) {
+        Ok(()) => format!(
+            "copied {} line(s), {} chars to the clipboard",
+            text.lines().count().max(1),
+            text.chars().count()
+        ),
+        Err(e) => format!("copy failed: {e}"),
+    }
+}
+
+/// Flatten the transcript to plain (raw markdown) lines for copy mode.
+fn transcript_copy_lines(transcript: &[ChatLine]) -> Vec<String> {
+    let mut out = Vec::new();
+    for (i, c) in transcript.iter().enumerate() {
+        if i > 0 {
+            out.push(String::new());
+        }
+        for l in c.text.lines() {
+            out.push(l.to_string());
+        }
+    }
+    out
+}
+
+/// Raw text of the most recent non-empty assistant reply.
+fn last_reply_text(transcript: &[ChatLine]) -> String {
+    transcript
+        .iter()
+        .rev()
+        .find(|c| c.speaker == Speaker::Assistant && !c.text.trim().is_empty())
+        .map(|c| c.text.clone())
+        .unwrap_or_default()
+}
+
+/// Render the current conversation as a plaintext Markdown document.
+fn session_markdown(engine: &ChatEngine, transcript: &[ChatLine]) -> String {
+    let mut s = String::new();
+    s.push_str(&format!("# Enclave session '{}'\n\n", engine.session.name));
+    s.push_str(&format!(
+        "- id: `{}`\n- provider: {}\n- model: {}\n",
+        engine.session.id,
+        engine.provider_name(),
+        engine.model
+    ));
+    if let Some(effort) = &engine.reasoning_effort {
+        s.push_str(&format!("- reasoning effort: {effort}\n"));
+    }
+    s.push('\n');
+    for c in transcript {
+        let heading = match c.speaker {
+            Speaker::User => "## You",
+            Speaker::Assistant => "## Assistant",
+            Speaker::Tool => "## Tool",
+            Speaker::System => "## System",
+        };
+        s.push_str(heading);
+        s.push_str("\n\n");
+        s.push_str(&c.text);
+        s.push_str("\n\n");
+    }
+    s
+}
+
+/// A centered rectangle of the requested size, clamped to `area`.
+fn centered_rect(area: Rect, w: u16, h: u16) -> Rect {
+    let w = w.min(area.width);
+    let h = h.min(area.height);
+    Rect {
+        x: area.x + area.width.saturating_sub(w) / 2,
+        y: area.y + area.height.saturating_sub(h) / 2,
+        width: w,
+        height: h,
+    }
 }
 
 /// One-line real-time privacy/encryption status for the footer bar.
@@ -1713,10 +2246,11 @@ fn draw_ui(
     account: Option<&OpenRouterAccount>,
     changes: &[FileChange],
     attachments: &str,
+    copy: Option<&CopyState>,
 ) {
     let area = f.area();
     // Base background for the whole screen.
-    f.render_widget(Block::default().style(Style::default().bg(C_BG)), area);
+    f.render_widget(Block::default().style(Style::default().bg(pal().bg)), area);
 
     let main = Layout::vertical([
         Constraint::Length(1),
@@ -1732,10 +2266,10 @@ fn draw_ui(
         Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)]).split(main[0]);
     f.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled(" ◆ ", Style::default().fg(C_ACCENT)),
+            Span::styled(" ◆ ", Style::default().fg(pal().accent)),
             Span::styled(
                 "enclave",
-                Style::default().fg(C_TEXT).add_modifier(Modifier::BOLD),
+                Style::default().fg(pal().text).add_modifier(Modifier::BOLD),
             ),
         ]))
         .style(surface()),
@@ -1759,7 +2293,7 @@ fn draw_ui(
     f.render_widget(
         Paragraph::new(header_right)
             .alignment(Alignment::Right)
-            .style(Style::default().fg(C_DIM).bg(C_SURFACE)),
+            .style(Style::default().fg(pal().dim).bg(pal().surface)),
         header_cols[1],
     );
 
@@ -1830,32 +2364,32 @@ fn draw_ui(
                 lines: entry
                     .text
                     .lines()
-                    .map(|l| Line::from(Span::styled(l.to_string(), Style::default().fg(C_TEXT))))
+                    .map(|l| Line::from(Span::styled(l.to_string(), Style::default().fg(pal().text))))
                     .collect(),
-                bg: C_SURFACE_HI,
-                accent: C_ACCENT,
+                bg: pal().surface_hi,
+                accent: pal().accent,
             },
             Speaker::Assistant => {
                 let mut ls = markdown::render(&entry.text);
                 if entry.text.trim().is_empty() {
                     ls = vec![Line::from(Span::styled(
                         "…",
-                        Style::default().fg(C_DIM).add_modifier(Modifier::ITALIC),
+                        Style::default().fg(pal().dim).add_modifier(Modifier::ITALIC),
                     ))];
                 }
                 Card {
                     lines: ls,
-                    bg: C_SURFACE,
-                    accent: C_SURFACE_HI,
+                    bg: pal().surface,
+                    accent: pal().surface_hi,
                 }
             }
             Speaker::System => Card {
                 lines: vec![Line::from(Span::styled(
                     entry.text.clone(),
-                    Style::default().fg(C_DIM).add_modifier(Modifier::ITALIC),
+                    Style::default().fg(pal().dim).add_modifier(Modifier::ITALIC),
                 ))],
-                bg: C_BG,
-                accent: C_BG,
+                bg: pal().bg,
+                accent: pal().bg,
             },
             Speaker::Tool => Card {
                 lines: entry
@@ -1864,19 +2398,19 @@ fn draw_ui(
                     .map(|l| {
                         // Diff lines get their own colours: + added, - removed.
                         let style = if l.starts_with('+') {
-                            Style::default().fg(C_GREEN)
+                            Style::default().fg(pal().green)
                         } else if l.starts_with('-') {
-                            Style::default().fg(C_RED)
+                            Style::default().fg(pal().red)
                         } else if l.starts_with("@@") || l.starts_with('…') {
-                            Style::default().fg(C_DIM)
+                            Style::default().fg(pal().dim)
                         } else {
-                            Style::default().fg(C_YELLOW)
+                            Style::default().fg(pal().yellow)
                         };
                         Line::from(Span::styled(l.to_string(), style))
                     })
                     .collect(),
-                bg: C_BG,
-                accent: C_BG,
+                bg: pal().bg,
+                accent: pal().bg,
             },
         };
         cards.push(card);
@@ -1886,8 +2420,8 @@ fn draw_ui(
     if cards.is_empty() {
         cards.push(Card {
             lines: welcome_lines(tools_enabled),
-            bg: C_BG,
-            accent: C_BG,
+            bg: pal().bg,
+            accent: pal().bg,
         });
     }
 
@@ -1923,7 +2457,7 @@ fn draw_ui(
             height: draw_h,
         };
         let para = Paragraph::new(card.lines.clone())
-            .style(Style::default().bg(card.bg).fg(C_TEXT))
+            .style(Style::default().bg(card.bg).fg(pal().text))
             .block(Block::default().padding(Padding::new(1, 1, 0, 0)))
             .wrap(Wrap { trim: false })
             .scroll((skip, 0));
@@ -1950,11 +2484,11 @@ fn draw_ui(
                 args_pretty
             );
             let warn = Paragraph::new(body)
-                .style(Style::default().fg(C_TEXT).bg(C_SURFACE_HI))
+                .style(Style::default().fg(pal().text).bg(pal().surface_hi))
                 .block(Block::default().padding(Padding::new(2, 1, 0, 0)))
                 .wrap(Wrap { trim: false });
             f.render_widget(warn, main[2]);
-            accent_bar(f, main[2], C_YELLOW);
+            accent_bar(f, main[2], pal().yellow);
         }
         Phase::Confirming { proposals, idx, .. } => {
             let p = &proposals[*idx];
@@ -1965,16 +2499,16 @@ fn draw_ui(
                 proposals.len()
             );
             let warn = Paragraph::new(body)
-                .style(Style::default().fg(C_TEXT).bg(C_SURFACE_HI))
+                .style(Style::default().fg(pal().text).bg(pal().surface_hi))
                 .block(Block::default().padding(Padding::new(2, 1, 0, 0)))
                 .wrap(Wrap { trim: false });
             f.render_widget(warn, main[2]);
-            accent_bar(f, main[2], C_YELLOW);
+            accent_bar(f, main[2], pal().yellow);
         }
         _ => {
             let renaming = matches!(phase, Phase::Renaming { .. });
             let is_new = matches!(phase, Phase::Renaming { id: None });
-            let accent = if renaming { C_YELLOW } else { C_ACCENT };
+            let accent = if renaming { pal().yellow } else { pal().accent };
             let prompt = if renaming { "› " } else { "❯ " };
             let placeholder = if is_new {
                 "session name  (empty = 'chat')"
@@ -1984,17 +2518,17 @@ fn draw_ui(
                 "send a message…  ( /help commands · ? shortcuts )"
             };
             let (shown, body_fg) = if input.is_empty() {
-                (format!("{prompt}{placeholder}"), C_DIM)
+                (format!("{prompt}{placeholder}"), pal().dim)
             } else {
                 let mut it = input.splitn(2, '\n');
                 let first = it.next().unwrap_or("");
                 match it.next() {
-                    Some(rest) => (format!("{prompt}{first}\n{rest}"), C_TEXT),
-                    None => (format!("{prompt}{first}"), C_TEXT),
+                    Some(rest) => (format!("{prompt}{first}\n{rest}"), pal().text),
+                    None => (format!("{prompt}{first}"), pal().text),
                 }
             };
             let input_widget = Paragraph::new(shown)
-                .style(Style::default().fg(body_fg).bg(C_SURFACE))
+                .style(Style::default().fg(body_fg).bg(pal().surface))
                 .block(Block::default().padding(Padding::new(1, 1, 0, 0)));
             f.render_widget(input_widget, main[2]);
             accent_bar(f, main[2], accent);
@@ -2021,20 +2555,20 @@ fn draw_ui(
 
     // Real-time privacy / encryption status bar.
     f.render_widget(
-        Paragraph::new(format!(" {privacy}")).style(Style::default().fg(C_DIM).bg(C_BG)),
+        Paragraph::new(format!(" {privacy}")).style(Style::default().fg(pal().dim).bg(pal().bg)),
         main[3],
     );
 
     // Footer: model chip left, key chips right (opencode style).
     let status_style = if status.starts_with("error") {
-        Style::default().fg(C_RED)
+        Style::default().fg(pal().red)
     } else if matches!(
         phase,
         Phase::Confirming { .. } | Phase::ToolConfirm { .. } | Phase::Guard { .. }
     ) {
-        Style::default().fg(C_YELLOW).add_modifier(Modifier::BOLD)
+        Style::default().fg(pal().yellow).add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(C_DIM)
+        Style::default().fg(pal().dim)
     };
     let shown_status = if phase_matches_streaming(phase) {
         format!("{spinner} {status}")
@@ -2053,8 +2587,8 @@ fn draw_ui(
         Span::styled(
             format!(" {} · {} ", engine.provider_name(), engine.model),
             Style::default()
-                .fg(C_BG)
-                .bg(C_ACCENT)
+                .fg(pal().bg)
+                .bg(pal().accent)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
@@ -2065,7 +2599,7 @@ fn draw_ui(
     if !attachments.is_empty() {
         left.push(Span::styled(
             format!(" {attachments} "),
-            Style::default().fg(C_ACCENT),
+            Style::default().fg(pal().accent),
         ));
     }
     if focus == Focus::Sidebar {
@@ -2095,16 +2629,16 @@ fn draw_ui(
     // Shortcuts overlay on top of everything.
     if help {
         let box_area = overlay_rect(area);
-        overlay_bg(f, box_area, C_ACCENT);
+        overlay_bg(f, box_area, pal().accent);
         let mut lines = vec![Line::from(Span::styled(
             "shortcuts",
-            Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD),
+            Style::default().fg(pal().accent).add_modifier(Modifier::BOLD),
         ))];
         lines.extend(welcome_lines(tools_enabled));
         lines.push(plain_line(""));
         lines.push(Line::from(Span::styled(
             "  press any key to close",
-            Style::default().fg(C_DIM),
+            Style::default().fg(pal().dim),
         )));
         let overlay = Paragraph::new(lines)
             .block(Block::default().padding(Padding::new(2, 1, 0, 0)))
@@ -2122,15 +2656,15 @@ fn draw_ui(
             width: w,
             height: h,
         };
-        overlay_bg(f, box_area, C_ACCENT);
+        overlay_bg(f, box_area, pal().accent);
         let mut lines: Vec<Line> = vec![Line::from(Span::styled(
             "sessions",
-            Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD),
+            Style::default().fg(pal().accent).add_modifier(Modifier::BOLD),
         ))];
         if sessions.is_empty() {
             lines.push(Line::from(Span::styled(
                 "  no sessions yet — press n to create one",
-                Style::default().fg(C_DIM),
+                Style::default().fg(pal().dim),
             )));
         } else {
             for (i, s) in sessions.iter().enumerate() {
@@ -2140,13 +2674,13 @@ fn draw_ui(
                 let name: String = s.name.chars().take(26).collect();
                 let style = if i == sel {
                     Style::default()
-                        .fg(C_BG)
-                        .bg(C_ACCENT)
+                        .fg(pal().bg)
+                        .bg(pal().accent)
                         .add_modifier(Modifier::BOLD)
                 } else if current {
-                    Style::default().fg(C_GREEN)
+                    Style::default().fg(pal().green)
                 } else {
-                    Style::default().fg(C_TEXT)
+                    Style::default().fg(pal().text)
                 };
                 lines.push(Line::from(Span::styled(
                     format!("{marker}{bullet} {name:<26} {} msg", s.message_count),
@@ -2197,22 +2731,22 @@ fn draw_ui(
         };
         let mut lines: Vec<Line> = vec![Line::from(Span::styled(
             title,
-            Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD),
+            Style::default().fg(pal().accent).add_modifier(Modifier::BOLD),
         ))];
         lines.push(Line::from(vec![
-            Span::styled("  filter: ", Style::default().fg(C_DIM)),
+            Span::styled("  filter: ", Style::default().fg(pal().dim)),
             Span::styled(
                 model_filter.to_string(),
-                Style::default().fg(C_TEXT).add_modifier(Modifier::BOLD),
+                Style::default().fg(pal().text).add_modifier(Modifier::BOLD),
             ),
-            Span::styled("▏", Style::default().fg(C_ACCENT)),
+            Span::styled("▏", Style::default().fg(pal().accent)),
         ]));
         if let Some(acc) = account {
             let s = acc.summary();
             if s != "no account data" {
                 lines.push(Line::from(vec![
-                    Span::styled("  credits: ", Style::default().fg(C_DIM)),
-                    Span::styled(s, Style::default().fg(C_ACCENT)),
+                    Span::styled("  credits: ", Style::default().fg(pal().dim)),
+                    Span::styled(s, Style::default().fg(pal().accent)),
                 ]));
             }
         }
@@ -2223,7 +2757,7 @@ fn draw_ui(
         if filtered.is_empty() {
             lines.push(Line::from(Span::styled(
                 "  no model matches — keep typing or Esc",
-                Style::default().fg(C_DIM),
+                Style::default().fg(pal().dim),
             )));
         } else {
             for (row, &i) in filtered[start..visible + start].iter().enumerate() {
@@ -2239,18 +2773,18 @@ fn draw_ui(
                 let meta_trim: String = meta.chars().take(content_w.saturating_sub(used)).collect();
                 let row_style = if selected {
                     Style::default()
-                        .fg(C_BG)
-                        .bg(C_ACCENT)
+                        .fg(pal().bg)
+                        .bg(pal().accent)
                         .add_modifier(Modifier::BOLD)
                 } else if current {
-                    Style::default().fg(C_GREEN)
+                    Style::default().fg(pal().green)
                 } else {
-                    Style::default().fg(C_TEXT)
+                    Style::default().fg(pal().text)
                 };
                 let meta_style = if selected {
-                    Style::default().fg(C_BG).bg(C_ACCENT)
+                    Style::default().fg(pal().bg).bg(pal().accent)
                 } else {
-                    Style::default().fg(C_DIM)
+                    Style::default().fg(pal().dim)
                 };
                 lines.push(Line::from(vec![
                     Span::styled(format!("{prefix}{id_trim:<id_cols$} "), row_style),
@@ -2275,7 +2809,7 @@ fn draw_ui(
                     start + visible,
                     filtered.len()
                 ),
-                Style::default().fg(C_YELLOW),
+                Style::default().fg(pal().yellow),
             ));
         }
         lines.push(Line::from(chips));
@@ -2287,7 +2821,7 @@ fn draw_ui(
             width: w,
             height: h,
         };
-        overlay_bg(f, box_area, C_ACCENT);
+        overlay_bg(f, box_area, pal().accent);
         let overlay = Paragraph::new(lines)
             .block(Block::default().padding(Padding::new(2, 1, 0, 0)));
         f.render_widget(overlay, box_area);
@@ -2299,11 +2833,11 @@ fn draw_ui(
         let current = engine.reasoning_effort.as_deref().unwrap_or("default");
         let mut lines: Vec<Line> = vec![Line::from(Span::styled(
             format!("reasoning effort — {}", engine.model),
-            Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD),
+            Style::default().fg(pal().accent).add_modifier(Modifier::BOLD),
         ))];
         lines.push(Line::from(Span::styled(
             "  used by models that support it (OpenRouter/OpenAI)",
-            Style::default().fg(C_DIM),
+            Style::default().fg(pal().dim),
         )));
         for (i, (label, desc)) in EFFORT_OPTIONS.iter().enumerate() {
             let selected = i == effort_sel;
@@ -2311,18 +2845,18 @@ fn draw_ui(
             let bullet = if *label == current { "●" } else { "○" };
             let row_style = if selected {
                 Style::default()
-                    .fg(C_BG)
-                    .bg(C_ACCENT)
+                    .fg(pal().bg)
+                    .bg(pal().accent)
                     .add_modifier(Modifier::BOLD)
             } else if *label == current {
-                Style::default().fg(C_GREEN)
+                Style::default().fg(pal().green)
             } else {
-                Style::default().fg(C_TEXT)
+                Style::default().fg(pal().text)
             };
             let desc_style = if selected {
-                Style::default().fg(C_BG).bg(C_ACCENT)
+                Style::default().fg(pal().bg).bg(pal().accent)
             } else {
-                Style::default().fg(C_DIM)
+                Style::default().fg(pal().dim)
             };
             lines.push(Line::from(vec![
                 Span::styled(format!("{marker}{bullet} {label:<8}"), row_style),
@@ -2342,37 +2876,93 @@ fn draw_ui(
             width: w,
             height: h,
         };
-        overlay_bg(f, box_area, C_ACCENT);
+        overlay_bg(f, box_area, pal().accent);
         let overlay = Paragraph::new(lines)
             .block(Block::default().padding(Padding::new(2, 1, 0, 0)));
         f.render_widget(overlay, box_area);
     }
+    // Copy-mode overlay (Ctrl+Y): visual line selection yanked to the clipboard.
+    if let Some(cs) = copy {
+        let w = area.width.saturating_sub(8).clamp(24, 100);
+        let max_rows = (area.height.saturating_sub(8) as usize).clamp(3, 30);
+        let (a, b) = if cs.anchor <= cs.sel {
+            (cs.anchor, cs.sel)
+        } else {
+            (cs.sel, cs.anchor)
+        };
+        let visible = cs.lines.len().min(max_rows);
+        let (start, end) = list_window(cs.lines.len(), cs.sel, visible);
+        let mut lines: Vec<Line> = Vec::new();
+        lines.push(Line::from(Span::styled(
+            format!(
+                "copy — {} line(s) selected · y copy · a all · e last reply · Esc",
+                b.saturating_sub(a) + 1
+            ),
+            Style::default().fg(pal().accent).add_modifier(Modifier::BOLD),
+        )));
+        for i in start..end {
+            let selected = i >= a && i <= b;
+            let style = if selected {
+                Style::default().fg(pal().bg).bg(pal().accent)
+            } else {
+                Style::default().fg(pal().text)
+            };
+            let num_style = if selected {
+                style
+            } else {
+                Style::default().fg(pal().dim)
+            };
+            lines.push(Line::from(vec![
+                Span::styled(format!("{:>4} ", i + 1), num_style),
+                Span::styled(cs.lines[i].clone(), style),
+            ]));
+        }
+        lines.push(Line::from(
+            [
+                chip("↑↓", "select"),
+                chip("PgUp/PgDn", "page"),
+                chip("y", "copy"),
+                chip("a", "all"),
+                chip("e", "last reply"),
+                chip("Esc", "cancel"),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<Span>>(),
+        ));
+        let h = (lines.len() as u16 + 2).min(area.height.saturating_sub(1));
+        let box_area = centered_rect(area, w, h);
+        overlay_bg(f, box_area, pal().accent);
+        let overlay =
+            Paragraph::new(lines).block(Block::default().padding(Padding::new(2, 1, 0, 0)));
+        f.render_widget(overlay, box_area);
+    }
     if let Phase::Guard { text, findings } = phase {
         let box_area = overlay_rect(area);
-        overlay_bg(f, box_area, C_RED);
+        overlay_bg(f, box_area, pal().red);
         let mut lines: Vec<Line> = Vec::new();
         lines.push(Line::from(Span::styled(
             "⚠ privacy guard · sensitive data detected",
-            Style::default().fg(C_RED).add_modifier(Modifier::BOLD),
+            Style::default().fg(pal().red).add_modifier(Modifier::BOLD),
         )));
         lines.push(plain_line(""));
         lines.push(Line::from(Span::styled(
             "  what will leave this machine if you send:",
-            Style::default().fg(C_DIM),
+            Style::default().fg(pal().dim),
         )));
         for fd in findings {
             lines.push(Line::from(vec![
                 Span::styled(
                     format!("  {:<12}", fd.kind.label()),
-                    Style::default().fg(C_YELLOW),
+                    Style::default().fg(pal().yellow),
                 ),
-                Span::styled(fd.text.clone(), Style::default().fg(C_TEXT)),
+                Span::styled(fd.text.clone(), Style::default().fg(pal().text)),
             ]));
         }
         lines.push(plain_line(""));
         lines.push(Line::from(Span::styled(
             "  message preview:",
-            Style::default().fg(C_DIM),
+            Style::default().fg(pal().dim),
         )));
         for l in text.lines().take(6) {
             lines.push(Line::from(format!("    {l}")));
@@ -2394,11 +2984,11 @@ fn draw_ui(
         lines.push(plain_line(""));
         lines.push(Line::from(Span::styled(
             "  placeholders replace every occurrence with [KIND_n], also in history",
-            Style::default().fg(C_DIM),
+            Style::default().fg(pal().dim),
         )));
         lines.push(Line::from(Span::styled(
             "  re-sent on later turns — original text stays encrypted on disk",
-            Style::default().fg(C_DIM),
+            Style::default().fg(pal().dim),
         )));
         let overlay = Paragraph::new(lines)
             .block(Block::default().padding(Padding::new(3, 1, 0, 0)))
@@ -2412,7 +3002,7 @@ fn draw_ui(
 fn overlay_bg(f: &mut Frame, area: Rect, accent: Color) {
     f.render_widget(Clear, area);
     f.render_widget(
-        Block::default().style(Style::default().bg(C_SURFACE_HI)),
+        Block::default().style(Style::default().bg(pal().surface_hi)),
         area,
     );
     accent_bar(f, area, accent);
@@ -2452,6 +3042,12 @@ fn persist_effort(effort: Option<&str>) {
     persist_settings(move |s| s.reasoning_effort = effort);
 }
 
+/// Remember the chosen theme across launches.
+fn persist_theme(name: &str) {
+    let name = name.to_string();
+    persist_settings(move |s| s.tui.theme = Some(name));
+}
+
 fn plain_line(s: &str) -> Line<'static> {
     Line::from(s.to_string())
 }
@@ -2474,23 +3070,23 @@ fn chip(key: &str, label: &str) -> Vec<Span<'static>> {
         Span::styled(
             format!(" {key} "),
             Style::default()
-                .fg(C_BG)
-                .bg(C_SURFACE_HI)
+                .fg(pal().bg)
+                .bg(pal().surface_hi)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(format!(" {label} "), Style::default().fg(C_DIM)),
+        Span::styled(format!(" {label} "), Style::default().fg(pal().dim)),
     ]
 }
 
 /// Welcome screen shown when the conversation is empty.
 fn welcome_lines(tools_enabled: bool) -> Vec<Line<'static>> {
     let plain = |s: &str| Line::from(s.to_string());
-    let dim = |s: &str| Line::from(Span::styled(s.to_string(), Style::default().fg(C_DIM)));
+    let dim = |s: &str| Line::from(Span::styled(s.to_string(), Style::default().fg(pal().dim)));
     let key = |k: &str, d: &str| {
         Line::from(vec![
             Span::styled(
                 format!("  {k:<10}"),
-                Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD),
+                Style::default().fg(pal().accent).add_modifier(Modifier::BOLD),
             ),
             Span::raw(d.to_string()),
         ])
@@ -2499,7 +3095,7 @@ fn welcome_lines(tools_enabled: bool) -> Vec<Line<'static>> {
     let mut v = vec![
         Line::from(Span::styled(
             "◆ ENCLAVE",
-            Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD),
+            Style::default().fg(pal().accent).add_modifier(Modifier::BOLD),
         )),
         dim("  privacy-first AI · encrypted memory · zero telemetry"),
         dim("  privacy guard: sensitive data is detected before sending — send / placeholder / refuse"),
@@ -2514,8 +3110,17 @@ fn welcome_lines(tools_enabled: bool) -> Vec<Line<'static>> {
         key("/clear", "wipe the current session"),
         key("/model", "pick a model from the list (saved for next launches)"),
         key("/effort", "reasoning effort (a picker opens right after /model)"),
+        key("/plan", "plan mode — read-only, no edits or shell (also Shift+Tab)"),
+        key("/build", "build mode — full access within the permission policy"),
         key("/attach", "attach an image or text file to your next message"),
         key("/detach", "clear pending attachments"),
+        key("/copy", "copy the last reply (or the last N replies: /copy 3)"),
+        key("/save", "save this conversation as a Markdown file (plaintext)"),
+        key("/undo /redo", "undo the last turn / restore it"),
+        key("/retry", "regenerate the last reply"),
+        key("/compact", "summarise the history to shrink the context"),
+        key("/theme", "colour theme: default · nord · gruvbox · solarized · mono"),
+        key("/commands", "list your custom .md commands"),
         key("/credits", "show OpenRouter credit / usage / limits"),
         key("/quit", "leave"),
         plain(""),
@@ -2523,6 +3128,10 @@ fn welcome_lines(tools_enabled: bool) -> Vec<Line<'static>> {
             "KEYS",
             Style::default().add_modifier(Modifier::BOLD),
         )),
+        key("@file", "include a file in your message: @src/main.rs or @notes.md"),
+        key("!cmd", "run a shell command locally — the output never leaves the machine"),
+        key("Ctrl-Y", "copy mode: select transcript lines and yank to clipboard"),
+        key("Ctrl-P / Ctrl-N", "previous / next message from your input history"),
         key("Ctrl-S", "session picker: new · rename · delete · open"),
         key("Tab", "sessions sidebar (↑/↓ select · Enter open · r rename · d delete)"),
         key("Alt+Enter", "newline in the message box"),
@@ -2569,22 +3178,22 @@ fn draw_info_panel(
         .sum::<usize>()
         / 4;
 
-    let label = |k: &str| Span::styled(format!("{k:<9}"), Style::default().fg(C_DIM));
+    let label = |k: &str| Span::styled(format!("{k:<9}"), Style::default().fg(pal().dim));
     let mut lines: Vec<Line> = vec![Line::from(Span::styled(
         "info",
-        Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD),
+        Style::default().fg(pal().accent).add_modifier(Modifier::BOLD),
     ))];
     lines.push(Line::from(vec![
         label("session"),
         Span::styled(
             engine.session.name.clone(),
-            Style::default().fg(C_TEXT).add_modifier(Modifier::BOLD),
+            Style::default().fg(pal().text).add_modifier(Modifier::BOLD),
         ),
     ]));
     lines.push(Line::from(vec![label("id"), Span::raw(id)]));
     lines.push(Line::from(vec![
         label("model"),
-        Span::styled(engine.model.clone(), Style::default().fg(C_ACCENT)),
+        Span::styled(engine.model.clone(), Style::default().fg(pal().accent)),
     ]));
     lines.push(Line::from(vec![
         label("effort"),
@@ -2600,6 +3209,21 @@ fn draw_info_panel(
         Span::raw(engine.provider_name().to_string()),
     ]));
     lines.push(Line::from(vec![
+        label("mode"),
+        Span::styled(
+            engine.mode.label().to_string(),
+            Style::default().fg(if engine.mode.is_plan() { pal().yellow } else { pal().text }),
+        ),
+    ]));
+    if let Some(rules) = &engine.rules {
+        let first = rules.lines().next().unwrap_or("").to_string();
+        let short: String = first.chars().take(40).collect();
+        lines.push(Line::from(vec![
+            label("rules"),
+            Span::styled(format!("{short}…"), Style::default().fg(pal().dim)),
+        ]));
+    }
+    lines.push(Line::from(vec![
         label("context"),
         Span::raw(format!("~{est_tokens} tok · {transcript_len} lines")),
     ]));
@@ -2608,7 +3232,7 @@ fn draw_info_panel(
         if s != "no account data" {
             lines.push(Line::from(vec![
                 label("credits"),
-                Span::styled(s, Style::default().fg(C_ACCENT)),
+                Span::styled(s, Style::default().fg(pal().accent)),
             ]));
         }
     }
@@ -2620,7 +3244,7 @@ fn draw_info_panel(
     lines.push(plain_line(""));
     lines.push(Line::from(Span::styled(
         "STORAGE",
-        Style::default().fg(C_DIM).add_modifier(Modifier::BOLD),
+        Style::default().fg(pal().dim).add_modifier(Modifier::BOLD),
     )));
     lines.push(Line::from(vec![
         label("db"),
@@ -2633,25 +3257,25 @@ fn draw_info_panel(
     lines.push(plain_line(""));
     lines.push(Line::from(Span::styled(
         "CHANGES",
-        Style::default().fg(C_DIM).add_modifier(Modifier::BOLD),
+        Style::default().fg(pal().dim).add_modifier(Modifier::BOLD),
     )));
     if changes.is_empty() {
         lines.push(Line::from(Span::styled(
             "no changes yet",
-            Style::default().fg(C_DIM),
+            Style::default().fg(pal().dim),
         )));
     } else {
         for c in changes.iter().rev().take(12) {
             lines.push(Line::from(vec![
-                Span::styled(format!("+{} ", c.added), Style::default().fg(C_GREEN)),
-                Span::styled(format!("−{} ", c.removed), Style::default().fg(C_RED)),
-                Span::styled(c.path.clone(), Style::default().fg(C_TEXT)),
+                Span::styled(format!("+{} ", c.added), Style::default().fg(pal().green)),
+                Span::styled(format!("−{} ", c.removed), Style::default().fg(pal().red)),
+                Span::styled(c.path.clone(), Style::default().fg(pal().text)),
             ]));
         }
     }
 
     let panel = Paragraph::new(lines)
-        .style(Style::default().bg(C_SURFACE))
+        .style(Style::default().bg(pal().surface))
         .block(Block::default().padding(Padding::new(2, 1, 0, 0)))
         .wrap(Wrap { trim: false });
     f.render_widget(panel, area);
@@ -2672,12 +3296,12 @@ fn draw_sidebar(
         } else {
             "sessions"
         },
-        Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD),
+        Style::default().fg(pal().accent).add_modifier(Modifier::BOLD),
     ))];
     if sessions.is_empty() {
         lines.push(Line::from(Span::styled(
             "no sessions",
-            Style::default().fg(C_DIM),
+            Style::default().fg(pal().dim),
         )));
     }
     for (i, s) in sessions.iter().enumerate() {
@@ -2685,13 +3309,13 @@ fn draw_sidebar(
         let name: String = s.name.chars().take(18).collect();
         let style = if i == sel {
             Style::default()
-                .fg(C_TEXT)
-                .bg(C_SURFACE_HI)
+                .fg(pal().text)
+                .bg(pal().surface_hi)
                 .add_modifier(Modifier::BOLD)
         } else if s.id == engine.session.id {
-            Style::default().fg(C_TEXT)
+            Style::default().fg(pal().text)
         } else {
-            Style::default().fg(C_DIM)
+            Style::default().fg(pal().dim)
         };
         lines.push(Line::from(Span::styled(
             format!("{marker} {name} ({})", s.message_count),
@@ -2699,7 +3323,7 @@ fn draw_sidebar(
         )));
     }
     let list = Paragraph::new(lines)
-        .style(Style::default().bg(C_SURFACE))
+        .style(Style::default().bg(pal().surface))
         .block(Block::default().padding(Padding::new(1, 1, 0, 0)))
         .wrap(Wrap { trim: false });
     f.render_widget(list, area);
@@ -2721,6 +3345,59 @@ mod tests {
         assert_eq!(filter_entries(&entries, "free"), vec![1]);
         assert_eq!(filter_entries(&entries, "gpt"), vec![2]);
         assert!(filter_entries(&entries, "zzz").is_empty());
+    }
+
+    #[test]
+    fn transcript_copy_lines_keep_raw_text_and_separators() {
+        let transcript = vec![
+            ChatLine {
+                speaker: Speaker::User,
+                text: "hello".to_string(),
+            },
+            ChatLine {
+                speaker: Speaker::Assistant,
+                text: "line one\nline two".to_string(),
+            },
+        ];
+        let lines = transcript_copy_lines(&transcript);
+        assert_eq!(lines, vec!["hello", "", "line one", "line two"]);
+    }
+
+    #[test]
+    fn last_reply_text_picks_most_recent_non_empty_assistant() {
+        let transcript = vec![
+            ChatLine {
+                speaker: Speaker::Assistant,
+                text: "first".to_string(),
+            },
+            ChatLine {
+                speaker: Speaker::User,
+                text: "again".to_string(),
+            },
+            ChatLine {
+                speaker: Speaker::Assistant,
+                text: "second".to_string(),
+            },
+            ChatLine {
+                speaker: Speaker::Assistant,
+                text: "   ".to_string(),
+            },
+        ];
+        assert_eq!(last_reply_text(&transcript), "second");
+    }
+
+    #[test]
+    fn centered_rect_is_centered_and_clamped() {
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 100,
+            height: 40,
+        };
+        let r = centered_rect(area, 50, 20);
+        assert_eq!((r.x, r.y, r.width, r.height), (25, 10, 50, 20));
+        let tiny = centered_rect(area, 500, 500);
+        assert_eq!((tiny.x, tiny.y, tiny.width, tiny.height), (0, 0, 100, 40));
     }
 
     #[test]

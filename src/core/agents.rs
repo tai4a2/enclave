@@ -41,6 +41,8 @@ pub struct AgentRunner {
     pub timeout_secs: u64,
     pub max_output_bytes: usize,
     pub mode: ToolsMode,
+    /// Connected MCP servers shared with the agentic loop.
+    pub mcp: Option<std::sync::Arc<crate::core::mcp::McpRegistry>>,
 }
 
 impl AgentRunner {
@@ -68,17 +70,27 @@ impl AgentRunner {
             timeout_secs: settings.tools.timeout_secs,
             max_output_bytes: settings.tools.max_output_bytes,
             mode: settings.tools.mode,
+            mcp: crate::core::mcp::McpRegistry::connect_all(&settings.mcp)
+                .map(std::sync::Arc::new),
         }
     }
 
     /// Tool definitions for the top-level agent (delegate only if personas exist).
     pub fn defs(&self) -> Vec<ToolDef> {
-        builtin_tools::defs(!self.personas.is_empty())
+        let mut defs = builtin_tools::defs(!self.personas.is_empty());
+        if let Some(mcp) = &self.mcp {
+            defs.extend(mcp.defs());
+        }
+        defs
     }
 
     /// Tool definitions for sub-agents (never delegate: depth limit).
     fn sub_defs(&self) -> Vec<ToolDef> {
-        builtin_tools::defs(false)
+        let mut defs = builtin_tools::defs(false);
+        if let Some(mcp) = &self.mcp {
+            defs.extend(mcp.defs());
+        }
+        defs
     }
 
     /// Build the `ToolContext` for the top-level agent, wiring the delegate
@@ -98,6 +110,11 @@ impl AgentRunner {
             shell_timeout_secs: self.timeout_secs,
             max_output_bytes: self.max_output_bytes,
             delegate,
+            ask: Some(Box::new(|question, options| {
+                Box::pin(async move { crate::cli::prompt_question(question, options) })
+            })),
+            todos: None,
+            mcp: self.mcp.clone(),
         }
     }
 
@@ -107,7 +124,8 @@ impl AgentRunner {
             workspace: self.workspace.clone(),
             shell_timeout_secs: self.timeout_secs,
             max_output_bytes: self.max_output_bytes,
-            delegate: None,
+            mcp: self.mcp.clone(),
+            ..Default::default()
         }
     }
 

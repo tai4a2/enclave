@@ -196,7 +196,7 @@ pub struct AgentSettings {
 }
 
 /// Terminal-UI appearance and key bindings (`[tui]`).
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TuiSettings {
     /// Colour theme name (`default`, `nord`, `gruvbox`, `solarized`, `mono`).
     #[serde(default)]
@@ -209,6 +209,71 @@ pub struct TuiSettings {
     /// `shift+tab`, `f5`, `esc`, `enter`, `tab`, or a single character.
     #[serde(default)]
     pub keybinds: std::collections::BTreeMap<String, String>,
+    /// Ring the terminal bell and send a desktop notification when a reply
+    /// finishes or a tool call needs approval. Defaults to `true`.
+    #[serde(default = "default_true")]
+    pub notify: bool,
+}
+
+impl Default for TuiSettings {
+    fn default() -> Self {
+        Self {
+            theme: None,
+            keybinds: std::collections::BTreeMap::new(),
+            notify: true,
+        }
+    }
+}
+
+/// A Model Context Protocol server (`[mcp.servers.<name>]`).
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct McpServer {
+    /// Executable to launch (stdio transport).
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub env: std::collections::BTreeMap<String, String>,
+}
+
+/// MCP configuration (`[mcp]`). Servers are launched locally over stdio.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct McpSettings {
+    #[serde(default)]
+    pub servers: std::collections::BTreeMap<String, McpServer>,
+}
+
+/// Local encrypted supermemory (`[memory]`).
+///
+/// Memories live in the encrypted database and, when injected, travel to the
+/// provider like any other context (the privacy guard still applies). A memory
+/// can be flagged `local_only` so it is never sent.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct MemorySettings {
+    /// Enable the memory feature (context injection, `remember` tool, startup reload).
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Autosave interval in seconds (0 = off). When > 0 the TUI periodically
+    /// records a checkpoint memory summarising the session.
+    #[serde(default)]
+    pub autosave_secs: u64,
+    /// Maximum number of memories injected into the system prompt.
+    #[serde(default = "default_memory_limit")]
+    pub inject_limit: usize,
+}
+
+fn default_memory_limit() -> usize {
+    50
+}
+
+impl Default for MemorySettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            autosave_secs: 0,
+            inject_limit: 50,
+        }
+    }
 }
 
 /// Persisted, non-sensitive application settings.
@@ -255,6 +320,15 @@ pub struct Settings {
     /// Terminal-UI theme and key bindings.
     #[serde(default)]
     pub tui: TuiSettings,
+    /// Model Context Protocol servers (local, stdio transport).
+    #[serde(default)]
+    pub mcp: McpSettings,
+    /// Local encrypted supermemory.
+    #[serde(default)]
+    pub memory: MemorySettings,
+    /// Id of the session currently in progress (auto-resumed at startup).
+    #[serde(default)]
+    pub working_session: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -296,6 +370,9 @@ impl Default for Settings {
             permissions: Permissions::default(),
             instructions: Vec::new(),
             tui: TuiSettings::default(),
+            mcp: McpSettings::default(),
+            memory: MemorySettings::default(),
+            working_session: None,
         }
     }
 }

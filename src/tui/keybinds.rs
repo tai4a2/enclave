@@ -19,6 +19,8 @@ pub enum BindAction {
     DeleteWord,
     ClearInput,
     Send,
+    SessionSearch,
+    EditInput,
 }
 
 fn action_by_name(name: &str) -> Option<BindAction> {
@@ -35,6 +37,8 @@ fn action_by_name(name: &str) -> Option<BindAction> {
         "delete_word" => BindAction::DeleteWord,
         "clear_input" => BindAction::ClearInput,
         "send" => BindAction::Send,
+        "session_search" | "search" => BindAction::SessionSearch,
+        "edit_input" | "editor" => BindAction::EditInput,
         _ => return None,
     })
 }

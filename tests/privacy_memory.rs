@@ -119,3 +119,28 @@ fn rename_session_updates_name() {
 
     assert!(memory.rename_session("missing-id", "x").is_err());
 }
+#[test]
+fn search_messages_finds_across_sessions() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("vault.db");
+    let memory = EncryptedMemory::open(&db, &test_key()).unwrap();
+
+    let a = memory.create_session("alpha").unwrap();
+    let b = memory.create_session("beta").unwrap();
+    memory.save_message(&a, "user", "the secret code is 42").unwrap();
+    memory.save_message(&a, "assistant", "noted").unwrap();
+    memory.save_message(&b, "user", "unrelated message").unwrap();
+    memory
+        .save_message(&b, "assistant", "the secret plan is ready")
+        .unwrap();
+
+    let hits = memory.search_messages("secret", 50).unwrap();
+    assert_eq!(hits.len(), 2, "both sessions should match");
+    assert!(hits.iter().all(|h| h.snippet.contains("secret")));
+    let names: Vec<&str> = hits.iter().map(|h| h.session_name.as_str()).collect();
+    assert!(names.contains(&"alpha") && names.contains(&"beta"));
+
+    // Wildcards in the query must be treated literally, not as LIKE patterns.
+    assert!(memory.search_messages("%", 50).unwrap().is_empty());
+    assert!(memory.search_messages("nomatch-xyz", 50).unwrap().is_empty());
+}

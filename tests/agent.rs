@@ -77,7 +77,7 @@ async fn agentic_loop_runs_tools_and_returns_final_text() {
         workspace: dir.path().to_path_buf(),
         shell_timeout_secs: 10,
         max_output_bytes: 8192,
-        delegate: None,
+        ..Default::default()
     };
     let defs = builtin_tools::defs(false);
 
@@ -123,7 +123,7 @@ async fn denied_tool_call_is_reported_to_provider() {
         workspace: dir.path().to_path_buf(),
         shell_timeout_secs: 10,
         max_output_bytes: 8192,
-        delegate: None,
+        ..Default::default()
     };
     let answer = engine
         .turn_agentic("go", &builtin_tools::defs(false), &ctx, &mut gate, 8)
@@ -162,7 +162,7 @@ async fn write_file_stays_inside_workspace() {
         workspace: dir.path().to_path_buf(),
         shell_timeout_secs: 10,
         max_output_bytes: 8192,
-        delegate: None,
+        ..Default::default()
     };
     engine
         .turn_agentic("save it", &builtin_tools::defs(false), &ctx, &mut gate, 8)

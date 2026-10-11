@@ -7,6 +7,8 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use rusqlite::OptionalExtension;
+
 use crate::core::attachment::Attachment;
 use crate::core::message::{Message, Role, ToolCall};
 use crate::error::{EnclaveError, Result};
@@ -50,6 +52,49 @@ fn decode_meta(role: Role, content: String, meta: &str) -> Message {
     message
 }
 
+fn snippet_for(content: &str, query: &str) -> String {
+    let needle = query.to_lowercase();
+    for line in content.lines() {
+        if line.to_lowercase().contains(&needle) {
+            let trimmed = line.trim();
+            let mut s: String = trimmed.chars().take(100).collect();
+            if trimmed.chars().count() > 100 {
+                s.push('…');
+            }
+            return s;
+        }
+    }
+    let mut s: String = content.trim().chars().take(100).collect();
+    if content.trim().chars().count() > 100 {
+        s.push('…');
+    }
+    s
+}
+
+/// Escape `%` and `_` so a user query is matched literally in a LIKE clause.
+fn escape_like(query: &str) -> String {
+    query
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
+}
+
+/// Map a `memories` row (columns: id, text, tags, kind, source_session, pinned,
+/// local_only, created_at, updated_at) into a [`Memory`].
+fn map_memory(row: &rusqlite::Row<'_>) -> rusqlite::Result<Memory> {
+    Ok(Memory {
+        id: row.get(0)?,
+        text: row.get(1)?,
+        tags: row.get(2)?,
+        kind: row.get(3)?,
+        source_session: row.get(4)?,
+        pinned: row.get::<_, i64>(5)? != 0,
+        local_only: row.get::<_, i64>(6)? != 0,
+        created_at: row.get(7)?,
+        updated_at: row.get(8)?,
+    })
+}
+
 /// Summary row describing a stored session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionInfo {
@@ -67,6 +112,32 @@ pub struct DbStats {
     pub freelist_count: i64,
     pub sessions: i64,
     pub messages: i64,
+}
+
+/// A match found while searching the stored conversations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchHit {
+    pub session_id: String,
+    pub session_name: String,
+    pub role: String,
+    pub snippet: String,
+}
+
+/// A persistent note stored encrypted in the vault (Enclave's local "memory").
+///
+/// Memories survive across sessions and can be injected into the system prompt.
+/// `local_only` memories are never sent to a provider (kept only on disk).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Memory {
+    pub id: String,
+    pub text: String,
+    pub tags: String,
+    pub kind: String,
+    pub source_session: Option<String>,
+    pub pinned: bool,
+    pub local_only: bool,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 /// Handle to the encrypted SQLCipher database.
@@ -124,6 +195,21 @@ impl EncryptedMemory {
                 FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE\
              );\
              CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, id);",
+        )?;
+        // Persistent memories (Enclave's encrypted local "supermemory").
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS memories (\
+                id TEXT PRIMARY KEY, \
+                text TEXT NOT NULL, \
+                tags TEXT NOT NULL DEFAULT '', \
+                kind TEXT NOT NULL DEFAULT 'note', \
+                source_session TEXT, \
+                pinned INTEGER NOT NULL DEFAULT 0, \
+                local_only INTEGER NOT NULL DEFAULT 0, \
+                created_at TEXT NOT NULL, \
+                updated_at TEXT NOT NULL\
+             );\
+             CREATE INDEX IF NOT EXISTS idx_memories_updated ON memories(pinned DESC, updated_at DESC);",
         )?;
         // Migration: tool-call metadata column (added in 0.2).
         let has_meta: i64 = conn.query_row(
@@ -306,6 +392,40 @@ impl EncryptedMemory {
         Ok(removed)
     }
 
+    /// Search every stored message for `query` (substring, case-insensitive).
+    /// Most recently updated sessions come first. `limit` caps the hits.
+    pub fn search_messages(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>> {
+        let query = query.trim();
+        if query.is_empty() {
+            return Ok(Vec::new());
+        }
+        let escaped = query
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
+        let pattern = format!("%{escaped}%");
+        let mut stmt = self.conn.prepare(
+            "SELECT m.session_id, s.name, m.role, m.content \
+             FROM messages m JOIN sessions s ON m.session_id = s.id \
+             WHERE m.content LIKE ?1 ESCAPE '\\' \
+             ORDER BY s.updated_at DESC, m.id ASC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![pattern, limit as i64], |row| {
+            let content: String = row.get(3)?;
+            Ok(SearchHit {
+                session_id: row.get(0)?,
+                session_name: row.get(1)?,
+                role: row.get(2)?,
+                snippet: snippet_for(&content, query),
+            })
+        })?;
+        let mut hits = Vec::new();
+        for row in rows {
+            hits.push(row?);
+        }
+        Ok(hits)
+    }
+
     /// Delete every session (and, by cascade/loop, all messages).
     /// Returns the number of deleted sessions.
     pub fn delete_all_sessions(&self) -> Result<usize> {        let sessions = self.list_sessions()?;
@@ -349,5 +469,141 @@ impl EncryptedMemory {
             sessions,
             messages,
         })
+    }
+
+    // --- Persistent memories (Enclave's local, encrypted "supermemory") ---
+
+    /// The column list shared by every `memories` query (keeps `map_memory` aligned).
+    const MEMORY_COLS: &'static str =
+        "id, text, tags, kind, source_session, pinned, local_only, created_at, updated_at";
+
+    /// Store a new memory and return its id.
+    pub fn add_memory(
+        &self,
+        text: &str,
+        tags: &str,
+        kind: &str,
+        source_session: Option<&str>,
+        local_only: bool,
+    ) -> Result<String> {
+        let id = uuid::Uuid::new_v4().to_string();
+        let now = chrono::Utc::now().to_rfc3339();
+        self.conn.execute(
+            "INSERT INTO memories \
+                (id, text, tags, kind, source_session, pinned, local_only, created_at, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, ?7, ?7)",
+            rusqlite::params![id, text, tags, kind, source_session, local_only as i64, now],
+        )?;
+        Ok(id)
+    }
+
+    /// List memories, pinned first then most recently updated. `limit` caps the rows.
+    pub fn list_memories(&self, limit: usize) -> Result<Vec<Memory>> {
+        let sql = format!(
+            "SELECT {} FROM memories ORDER BY pinned DESC, updated_at DESC LIMIT ?1",
+            Self::MEMORY_COLS
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params![limit as i64], map_memory)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Memories eligible for injection into the prompt: excludes `local_only`.
+    pub fn injectable_memories(&self, limit: usize) -> Result<Vec<Memory>> {
+        let sql = format!(
+            "SELECT {} FROM memories WHERE local_only = 0 \
+             ORDER BY pinned DESC, updated_at DESC LIMIT ?1",
+            Self::MEMORY_COLS
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params![limit as i64], map_memory)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Search memories by substring over text and tags.
+    pub fn search_memories(&self, query: &str, limit: usize) -> Result<Vec<Memory>> {
+        let query = query.trim();
+        if query.is_empty() {
+            return Ok(Vec::new());
+        }
+        let pattern = format!("%{}%", escape_like(query));
+        let sql = format!(
+            "SELECT {} FROM memories \
+             WHERE text LIKE ?1 ESCAPE '\\' OR tags LIKE ?1 ESCAPE '\\' \
+             ORDER BY pinned DESC, updated_at DESC LIMIT ?2",
+            Self::MEMORY_COLS
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params![pattern, limit as i64], map_memory)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Fetch a single memory by id.
+    pub fn get_memory(&self, id: &str) -> Result<Option<Memory>> {
+        let sql = format!("SELECT {} FROM memories WHERE id = ?1", Self::MEMORY_COLS);
+        let found = self.conn.query_row(&sql, rusqlite::params![id], map_memory).optional()?;
+        Ok(found)
+    }
+
+    /// Pin or unpin a memory. Returns whether a row was updated.
+    pub fn set_memory_pinned(&self, id: &str, pinned: bool) -> Result<bool> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let rows = self.conn.execute(
+            "UPDATE memories SET pinned = ?1, updated_at = ?2 WHERE id = ?3",
+            rusqlite::params![pinned as i64, now, id],
+        )?;
+        Ok(rows > 0)
+    }
+
+    /// Replace the text and tags of an existing memory. Returns whether it existed.
+    pub fn update_memory(&self, id: &str, text: &str, tags: &str) -> Result<bool> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let rows = self.conn.execute(
+            "UPDATE memories SET text = ?1, tags = ?2, updated_at = ?3 WHERE id = ?4",
+            rusqlite::params![text, tags, now, id],
+        )?;
+        Ok(rows > 0)
+    }
+
+    /// Delete a memory by id. Returns whether it existed.
+    pub fn delete_memory(&self, id: &str) -> Result<bool> {
+        let rows = self
+            .conn
+            .execute("DELETE FROM memories WHERE id = ?1", rusqlite::params![id])?;
+        Ok(rows > 0)
+    }
+
+    /// Delete every memory whose text or tags contain `query`. Returns rows removed.
+    pub fn delete_memories_matching(&self, query: &str) -> Result<usize> {
+        let query = query.trim();
+        if query.is_empty() {
+            return Ok(0);
+        }
+        let pattern = format!("%{}%", escape_like(query));
+        let rows = self.conn.execute(
+            "DELETE FROM memories WHERE text LIKE ?1 ESCAPE '\\' OR tags LIKE ?1 ESCAPE '\\'",
+            rusqlite::params![pattern],
+        )?;
+        Ok(rows)
+    }
+
+    /// Number of stored memories.
+    pub fn memory_count(&self) -> Result<i64> {
+        let n: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM memories", [], |r| r.get(0))?;
+        Ok(n)
     }
 }

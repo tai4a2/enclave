@@ -79,6 +79,39 @@ fn set_keybinds(bindings: Keybinds) {
     let _ = KEYBINDS.set(bindings);
 }
 
+/// Whether desktop notifications / the terminal bell are enabled (`[tui] notify`).
+static NOTIFY_ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+fn set_notify(enabled: bool) {
+    NOTIFY_ENABLED.store(enabled, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Best-effort attention signal: terminal bell plus, on macOS, a desktop
+/// notification. Never fails the app.
+fn notify(summary: &str) {
+    let _ = (summary,);
+    if !NOTIFY_ENABLED.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    use std::io::Write;
+    let mut out = std::io::stdout();
+    let _ = out.write_all(b"\x07");
+    let _ = out.flush();
+    #[cfg(target_os = "macos")]
+    {
+        let script = format!(
+            "display notification \"{}\" with title \"Enclave\"",
+            summary.replace('"', "'")
+        );
+        let _ = std::process::Command::new("osascript")
+            .arg("-e")
+            .arg(script)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+    }
+}
+
 /// Full-row surface style used for header/footer bars.
 fn surface() -> Style {
     Style::default().bg(pal().surface)
@@ -86,7 +119,7 @@ fn surface() -> Style {
 
 /// Text shown by `/help`.
 const SLASH_HELP: &str =
-    "commands: /help · /new · /switch · /clear · /undo · /redo · /retry · /compact · /model [id] · /effort [off|low|medium|high] · /plan · /build · /attach <path> · /detach · /copy [n] · /save [path] · /theme [name] · /commands · /credits · /quit   (Ctrl-S picker · Ctrl-Y copy · Shift+Tab plan/build · @file refs · !shell)";
+    "commands: /help · /new · /switch · /clear · /undo · /redo · /retry · /compact · /find <text> · /search <text> · /model [id] · /effort · /plan · /build · /attach <path> · /detach · /export [md|html|pdf] [path] · /editor · /init · /mcp · /remember <text> · /memory [search <q>|pin <id>] · /forget <id|text> · /checkpoint · /theme [name] · /commands · /credits · /quit   (Ctrl-S picker · Ctrl-R search sessions · Ctrl-Y copy · Ctrl-O editor · Shift+Tab plan/build · @file refs · !shell)";
 
 /// One rendered transcript entry.
 struct ChatLine {
@@ -170,6 +203,12 @@ enum KeyAction {
     HistoryNext,
     /// Clear the whole input box (rebindable).
     ClearInput,
+    /// Ctrl+R: search across all stored sessions.
+    SessionSearch,
+    /// Ctrl+O: edit the input in $EDITOR.
+    EditInput,
+    /// Ctrl+F: search inside the current conversation.
+    Find,
 }
 
 /// Visual line-selection state for copy mode (Ctrl+Y).
@@ -180,6 +219,19 @@ struct CopyState {
     sel: usize,
     /// Fixed end of the selection (set when copy mode opens).
     anchor: usize,
+}
+
+/// In-transcript text search overlay (live substring match over the chat).
+struct FindState {
+    query: String,
+    sel: usize,
+}
+
+/// Cross-session search overlay (searches the encrypted database).
+struct SessionSearch {
+    query: String,
+    hits: Vec<crate::privacy::SearchHit>,
+    sel: usize,
 }
 
 /// What a key press asks the app to do (proposal-confirmation phase).
@@ -215,6 +267,7 @@ pub async fn run(
                 }
             }
             set_keybinds(Keybinds::from_settings(&settings.tui));
+            set_notify(settings.tui.notify);
         }
     }
     enable_raw_mode()?;
@@ -305,12 +358,22 @@ async fn run_app(
     let mut hist_pos: Option<usize> = None;
     let agent_mode = agent;
     let mut agent_iters: usize = 0;
-    let defs = crate::core::builtin_tools::defs(false);
+    if engine.mcp.is_none() {
+        if let Ok(paths) = crate::config::Paths::resolve() {
+            if let Ok(settings) = crate::config::Settings::load(&paths.config_file) {
+                engine.mcp = crate::core::mcp::McpRegistry::connect_all(&settings.mcp)
+                    .map(std::sync::Arc::new);
+            }
+        }
+    }
+    let defs = engine.tool_defs(false);
     let ctx = crate::core::builtin_tools::ToolContext {
         workspace: std::env::current_dir().unwrap_or_default(),
         shell_timeout_secs: tools_cfg.timeout_secs,
         max_output_bytes: tools_cfg.max_output_bytes,
-        delegate: None,
+        todos: Some(engine.todos.clone()),
+        mcp: engine.mcp.clone(),
+        ..Default::default()
     };
     // Local custom commands (`.enclave/commands` + `<config>/commands`).
     let config_dir = crate::config::Paths::resolve()
@@ -320,6 +383,17 @@ async fn run_app(
         crate::core::commands::load_all(&ctx.workspace, &config_dir);
     // Last message removed by /undo (restored by /redo).
     let mut last_undone: Option<String> = None;
+    // Search overlays: local transcript (/find) and cross-session (Ctrl-R).
+    let mut find: Option<FindState> = None;
+    let mut search: Option<SessionSearch> = None;
+    // Optional periodic memory checkpoint (opt-in via `[memory] autosave_secs`).
+    let autosave_secs = crate::config::Paths::resolve()
+        .ok()
+        .and_then(|p| crate::config::Settings::load(&p.config_file).ok())
+        .map(|s| s.memory.autosave_secs)
+        .unwrap_or(0);
+    let mut last_autosave = std::time::Instant::now();
+    let mut autosave_mark = engine.session.messages.len();
     let theme_current = crate::config::Paths::resolve()
         .ok()
         .and_then(|p| crate::config::Settings::load(&p.config_file).ok())
@@ -327,6 +401,28 @@ async fn run_app(
         .unwrap_or_else(|| "default".to_string());
 
     loop {
+        if autosave_secs > 0
+            && matches!(phase, Phase::Idle)
+            && last_autosave.elapsed() >= std::time::Duration::from_secs(autosave_secs)
+            && engine.session.messages.len() > autosave_mark + 1
+        {
+            let instruction = "Summarise the key facts, decisions, preferences and open questions of this conversation into a short bullet list suitable for long-term memory. Output only the bullets.";
+            if let Ok(sum) = engine.summarize(instruction).await {
+                let sum = sum.trim();
+                if !sum.is_empty() {
+                    let _ = engine.memory.add_memory(
+                        sum,
+                        "autosave",
+                        "checkpoint",
+                        Some(&engine.session.id),
+                        false,
+                    );
+                    let _ = engine.reload_memories();
+                }
+            }
+            last_autosave = std::time::Instant::now();
+            autosave_mark = engine.session.messages.len();
+        }
         let guard_state = if !guard_cfg.enabled {
             "off"
         } else {
@@ -365,6 +461,8 @@ async fn run_app(
                 &changes,
                 &atts_label,
                 copy.as_ref(),
+                find.as_ref(),
+                search.as_ref(),
             )
         })?;
 
@@ -455,6 +553,11 @@ async fn run_app(
                                 approve_all: false,
                             }
                         };
+                        if matches!(phase, Phase::Confirming { .. }) {
+                            notify("shell approval needed");
+                        } else {
+                            notify("reply ready");
+                        }
                     }
                     None => {}
                 }
@@ -646,6 +749,123 @@ async fn run_app(
                             }
                             if let Some(st) = exit {
                                 copy = None;
+                                status = st;
+                            }
+                            continue;
+                        }
+                        if find.is_some() {
+                            if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+                                continue;
+                            }
+                            let lines = transcript_copy_lines(&transcript);
+                            let mut exit: Option<String> = None;
+                            {
+                                let fs = find.as_mut().unwrap();
+                                let matches = find_matches(&lines, &fs.query);
+                                let last = matches.len().saturating_sub(1);
+                                fs.sel = fs.sel.min(last);
+                                match (key.code, key.modifiers) {
+                                    (KeyCode::Char('c'), KeyModifiers::CONTROL) => return Ok(()),
+                                    (KeyCode::Esc, _) => exit = Some("ready".into()),
+                                    (KeyCode::Enter, _) => {
+                                        if let Some(&idx) = matches.get(fs.sel) {
+                                            let t = lines.get(idx).cloned().unwrap_or_default();
+                                            exit = Some(copy_status(&t));
+                                        } else {
+                                            exit = Some("no match to copy".into());
+                                        }
+                                    }
+                                    (KeyCode::Up, _) => fs.sel = fs.sel.saturating_sub(1),
+                                    (KeyCode::Down, _) => fs.sel = (fs.sel + 1).min(last),
+                                    (KeyCode::PageUp, _) => fs.sel = fs.sel.saturating_sub(10),
+                                    (KeyCode::PageDown, _) => fs.sel = (fs.sel + 10).min(last),
+                                    (KeyCode::Char('u'), KeyModifiers::CONTROL) => {
+                                        fs.query.clear();
+                                        fs.sel = 0;
+                                    }
+                                    (KeyCode::Backspace, _) => {
+                                        fs.query.pop();
+                                        fs.sel = 0;
+                                    }
+                                    (KeyCode::Char(ch), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
+                                        fs.query.push(ch);
+                                        fs.sel = 0;
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            if let Some(st) = exit {
+                                find = None;
+                                status = st;
+                            }
+                            continue;
+                        }
+                        if search.is_some() {
+                            if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+                                continue;
+                            }
+                            let mut exit: Option<String> = None;
+                            let mut load: Option<String> = None;
+                            let mut changed = false;
+                            {
+                                let ss = search.as_mut().unwrap();
+                                let last = ss.hits.len().saturating_sub(1);
+                                ss.sel = ss.sel.min(last);
+                                match (key.code, key.modifiers) {
+                                    (KeyCode::Char('c'), KeyModifiers::CONTROL) => return Ok(()),
+                                    (KeyCode::Esc, _) => exit = Some("ready".into()),
+                                    (KeyCode::Enter, _) => {
+                                        if let Some(h) = ss.hits.get(ss.sel) {
+                                            load = Some(h.session_id.clone());
+                                        }
+                                    }
+                                    (KeyCode::Up, _) => ss.sel = ss.sel.saturating_sub(1),
+                                    (KeyCode::Down, _) => ss.sel = (ss.sel + 1).min(last),
+                                    (KeyCode::PageUp, _) => ss.sel = ss.sel.saturating_sub(10),
+                                    (KeyCode::PageDown, _) => ss.sel = (ss.sel + 10).min(last),
+                                    (KeyCode::Char('u'), KeyModifiers::CONTROL) => {
+                                        ss.query.clear();
+                                        ss.sel = 0;
+                                        changed = true;
+                                    }
+                                    (KeyCode::Backspace, _) => {
+                                        ss.query.pop();
+                                        ss.sel = 0;
+                                        changed = true;
+                                    }
+                                    (KeyCode::Char(ch), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
+                                        ss.query.push(ch);
+                                        ss.sel = 0;
+                                        changed = true;
+                                    }
+                                    _ => {}
+                                }
+                                if changed {
+                                    refresh_session_search(engine, ss);
+                                }
+                            }
+                            if let Some(id) = load {
+                                search = None;
+                                if id == engine.session.id {
+                                    status = "already on this session".into();
+                                } else if let Ok(sess) =
+                                    crate::core::session::Session::load(&engine.memory, &id)
+                                {
+                                    engine.session = sess;
+                                    transcript = transcript_from(engine);
+                                    scroll = 0;
+                                    sessions = engine.memory.list_sessions().unwrap_or_default();
+                                    persist_settings(|s| {
+                                        s.working_session = Some(engine.session.id.clone())
+                                    });
+                                    status = "opened session from search".into();
+                                } else {
+                                    status = "could not open session".into();
+                                }
+                                continue;
+                            }
+                            if let Some(st) = exit {
+                                search = None;
                                 status = st;
                             }
                             continue;
@@ -897,6 +1117,32 @@ async fn run_app(
                                 sessions = engine.memory.list_sessions().unwrap_or_default();
                                 picker = true;
                                 status = "session picker — ↑/↓ select, Enter open, n new, r rename, d delete, Esc close".into();
+                            }
+                            KeyAction::SessionSearch => {
+                                search = Some(SessionSearch {
+                                    query: String::new(),
+                                    hits: Vec::new(),
+                                    sel: 0,
+                                });
+                                status =
+                                    "session search — type to search, ↑/↓ select, Enter open, Esc close"
+                                        .into();
+                            }
+                            KeyAction::EditInput => match edit_in_editor(terminal, &input) {
+                                Ok(new) => {
+                                    input = new;
+                                    status = "input loaded from editor".into();
+                                }
+                                Err(e) => status = format!("editor failed: {e}"),
+                            },
+                            KeyAction::Find => {
+                                find = Some(FindState {
+                                    query: String::new(),
+                                    sel: 0,
+                                });
+                                status =
+                                    "find — type to search this conversation, Enter copies the line, Esc close"
+                                        .into();
                             }
                             KeyAction::CopyMode => {
                                 let lines = transcript_copy_lines(&transcript);
@@ -1264,6 +1510,292 @@ async fn run_app(
                                             );
                                         }
                                     }
+                                    "find" => {
+                                        let q = arg.trim().to_string();
+                                        let n = find_matches(
+                                            &transcript_copy_lines(&transcript),
+                                            &q,
+                                        )
+                                        .len();
+                                        find = Some(FindState { query: q, sel: 0 });
+                                        status = format!(
+                                            "find: {n} match(es) — type to refine, Enter copies, Esc closes"
+                                        );
+                                    }
+                                    "search" | "search-all" => {
+                                        let mut ss = SessionSearch {
+                                            query: arg.trim().to_string(),
+                                            hits: Vec::new(),
+                                            sel: 0,
+                                        };
+                                        refresh_session_search(engine, &mut ss);
+                                        let n = ss.hits.len();
+                                        search = Some(ss);
+                                        status = format!(
+                                            "session search: {n} hit(s) — type to refine, Enter opens, Esc closes"
+                                        );
+                                    }
+                                    "export" => {
+                                        let mut it = arg.split_whitespace();
+                                        let fmt = it.next().unwrap_or("html");
+                                        let path = it.next();
+                                        match crate::core::export::Format::parse(fmt) {
+                                            Some(f) => {
+                                                let short =
+                                                    &engine.session.id[..8.min(engine.session.id.len())];
+                                                let out = path
+                                                    .map(std::path::PathBuf::from)
+                                                    .unwrap_or_else(|| {
+                                                        std::path::PathBuf::from(format!(
+                                                            "enclave-{short}.{}",
+                                                            f.extension()
+                                                        ))
+                                                    });
+                                                match crate::core::export::export(
+                                                    &engine.session.name,
+                                                    &engine.model,
+                                                    &engine.session.messages,
+                                                    f,
+                                                    &out,
+                                                ) {
+                                                    Ok(()) => {
+                                                        status = format!(
+                                                            "exported to {} (plaintext, not encrypted)",
+                                                            out.display()
+                                                        )
+                                                    }
+                                                    Err(e) => {
+                                                        status = format!("export failed: {e}")
+                                                    }
+                                                }
+                                            }
+                                            None => {
+                                                status = "usage: /export [md|html|pdf] [path]".into()
+                                            }
+                                        }
+                                    }
+                                    "init" => {
+                                        let ws = std::env::current_dir().unwrap_or_default();
+                                        let target = ws.join("AGENTS.md");
+                                        if target.exists() {
+                                            status =
+                                                "AGENTS.md already exists — edit it or remove it first"
+                                                    .into();
+                                        } else {
+                                            let context = project_context(&ws);
+                                            let prompt = format!(
+                                                "You are generating an AGENTS.md file for a software \
+                                                 project. From the file listing and key files below, \
+                                                 write concise guidance for an AI coding agent: \
+                                                 build / test / lint commands, code style, project \
+                                                 structure and conventions. Reply with the AGENTS.md \
+                                                 content ONLY, in Markdown, without wrapping the whole \
+                                                 file in a code fence.\n\n{context}"
+                                            );
+                                            match engine.one_shot(&prompt).await {
+                                                Ok(text) => {
+                                                    let body = strip_code_fence(&text);
+                                                    match std::fs::write(&target, body) {
+                                                        Ok(()) => {
+                                                            transcript.push(ChatLine {
+                                                                speaker: Speaker::System,
+                                                                text: format!(
+                                                                    "AGENTS.md created at {}",
+                                                                    target.display()
+                                                                ),
+                                                            });
+                                                            status = format!(
+                                                                "wrote {}",
+                                                                target.display()
+                                                            );
+                                                        }
+                                                        Err(e) => {
+                                                            status =
+                                                                format!("could not write AGENTS.md: {e}")
+                                                        }
+                                                    }
+                                                }
+                                                Err(e) => status = format!("error: {e}"),
+                                            }
+                                        }
+                                    }
+                                    "mcp" => {
+                                        match engine.mcp.as_ref() {
+                                            Some(reg) => {
+                                                let names = reg.tool_names();
+                                                if names.is_empty() {
+                                                    status = "MCP: connected but no tools exposed".into();
+                                                } else {
+                                                    transcript.push(ChatLine {
+                                                        speaker: Speaker::System,
+                                                        text: format!(
+                                                            "MCP tools ({}):\n{}",
+                                                            names.len(),
+                                                            names.join("\n")
+                                                        ),
+                                                    });
+                                                    status = format!("{} MCP tool(s) available", names.len());
+                                                }
+                                            }
+                                            None => {
+                                                status = "no MCP servers configured (add [mcp.servers.<name>] to config.toml)".into()
+                                            }
+                                        }
+                                    }
+                                    "remember" => {
+                                        let mut words: Vec<String> = Vec::new();
+                                        let mut tags: Vec<String> = Vec::new();
+                                        let mut local_only = false;
+                                        for tok in arg.split_whitespace() {
+                                            if tok == "--local" {
+                                                local_only = true;
+                                            } else if let Some(t) = tok.strip_prefix('#') {
+                                                if !t.is_empty() {
+                                                    tags.push(t.to_string());
+                                                }
+                                            } else {
+                                                words.push(tok.to_string());
+                                            }
+                                        }
+                                        let text = words.join(" ");
+                                        if text.is_empty() {
+                                            status =
+                                                "usage: /remember <text> [#tags] [--local]".into();
+                                        } else {
+                                            match engine.memory.add_memory(
+                                                &text,
+                                                &tags.join(","),
+                                                "note",
+                                                Some(&engine.session.id),
+                                                local_only,
+                                            ) {
+                                                Ok(id) => {
+                                                    let _ = engine.reload_memories();
+                                                    status = format!(
+                                                        "remembered [{}]{}",
+                                                        &id[..8.min(id.len())],
+                                                        if local_only { " (local-only)" } else { "" }
+                                                    );
+                                                }
+                                                Err(e) => status = format!("error: {e}"),
+                                            }
+                                        }
+                                    }
+                                    "memory" | "memories" => {
+                                        let mut it = arg.split_whitespace();
+                                        let sub = it.next().unwrap_or("");
+                                        let rest = it.collect::<Vec<_>>().join(" ");
+                                        match sub {
+                                            "pin" | "unpin" => {
+                                                if rest.is_empty() {
+                                                    status = "usage: /memory pin <id>".into();
+                                                } else {
+                                                    match engine
+                                                        .memory
+                                                        .set_memory_pinned(&rest, sub == "pin")
+                                                    {
+                                                        Ok(true) => {
+                                                            let _ = engine.reload_memories();
+                                                            status = format!(
+                                                                "{} [{}]",
+                                                                if sub == "pin" { "pinned" } else { "unpinned" },
+                                                                &rest[..8.min(rest.len())]
+                                                            );
+                                                        }
+                                                        Ok(false) => status =
+                                                            format!("no memory with id '{rest}'"),
+                                                        Err(e) => status = format!("error: {e}"),
+                                                    }
+                                                }
+                                            }
+                                            _ => {
+                                                let query = if sub == "search" { rest } else { arg.trim().to_string() };
+                                                let res = if query.is_empty() {
+                                                    engine.memory.list_memories(50)
+                                                } else {
+                                                    engine.memory.search_memories(&query, 50)
+                                                };
+                                                match res {
+                                                    Ok(mems) if mems.is_empty() => {
+                                                        status = if query.is_empty() {
+                                                            "no memories yet (use /remember <text>)".into()
+                                                        } else {
+                                                            format!("no memory matches '{query}'")
+                                                        }
+                                                    }
+                                                    Ok(mems) => {
+                                                        let body = memories_to_text(&mems);
+                                                        transcript.push(ChatLine {
+                                                            speaker: Speaker::System,
+                                                            text: format!(
+                                                                "memory ({}):\n{body}",
+                                                                mems.len()
+                                                            ),
+                                                        });
+                                                        status = format!("{} memor{}", mems.len(), if mems.len() == 1 { "y" } else { "ies" });
+                                                    }
+                                                    Err(e) => status = format!("error: {e}"),
+                                                }
+                                            }
+                                        }
+                                    }
+                                    "forget" => {
+                                        let what = arg.trim().to_string();
+                                        if what.is_empty() {
+                                            status = "usage: /forget <id|text>".into();
+                                        } else {
+                                            match engine.memory.delete_memory(&what) {
+                                                Ok(true) => {
+                                                    let _ = engine.reload_memories();
+                                                    status = format!("forgot [{}]", &what[..8.min(what.len())]);
+                                                }
+                                                Ok(false) => match engine
+                                                    .memory
+                                                    .delete_memories_matching(&what)
+                                                {
+                                                    Ok(0) => status = format!("no memory matched '{what}'"),
+                                                    Ok(n) => {
+                                                        let _ = engine.reload_memories();
+                                                        status = format!("forgot {n} memor{}", if n == 1 { "y" } else { "ies" });
+                                                    }
+                                                    Err(e) => status = format!("error: {e}"),
+                                                },
+                                                Err(e) => status = format!("error: {e}"),
+                                            }
+                                        }
+                                    }
+                                    "checkpoint" => match engine
+                                        .summarize(
+                                            "Summarise the key facts, decisions, preferences and open questions from this conversation into a short bullet list suitable for long-term memory. Reply with the bullet list only.",
+                                        )
+                                        .await
+                                    {
+                                        Ok(sum) => {
+                                            let sum = sum.trim().to_string();
+                                            if sum.is_empty() {
+                                                status = "nothing to checkpoint".into();
+                                            } else {
+                                                match engine.memory.add_memory(
+                                                    &sum,
+                                                    "checkpoint",
+                                                    "checkpoint",
+                                                    Some(&engine.session.id),
+                                                    false,
+                                                ) {
+                                                    Ok(_) => {
+                                                        let _ = engine.reload_memories();
+                                                        transcript.push(ChatLine {
+                                                            speaker: Speaker::System,
+                                                            text: format!("checkpoint saved to memory:\n{sum}"),
+                                                        });
+                                                        status = "checkpoint saved to memory".into();
+                                                    }
+                                                    Err(e) => status = format!("error: {e}"),
+                                                }
+                                            }
+                                        }
+                                        Err(e) => status = format!("error: {e}"),
+                                    },
                                     "quit" | "exit" => return Ok(()),
                                     "" => status = "type /help for the command list".into(),
                                     other => {
@@ -1559,6 +2091,10 @@ async fn run_app(
                                                 .unwrap_or_default();
                                             sel = 0;
                                             scroll = 0;
+                                            persist_settings(|st| {
+                                                st.working_session =
+                                                    Some(engine.session.id.clone())
+                                            });
                                             status = format!("created session '{name}'");
                                             phase = Phase::Idle;
                                             input.clear();
@@ -1712,6 +2248,7 @@ fn switch_session(
                 })
                 .collect();
             engine.session = loaded;
+            persist_settings(|s| s.working_session = Some(engine.session.id.clone()));
             *status = format!("opened session '{}'", info.name);
         }
         Err(e) => *status = format!("error: {e}"),
@@ -1809,6 +2346,7 @@ async fn agentic_advance(
                 }
                 *status = "ready".into();
                 *phase = Phase::Idle;
+                notify("reply ready");
                 return Ok(());
             }
             Ok(AgentStep::ToolCalls { text, calls }) => {
@@ -1822,6 +2360,7 @@ async fn agentic_advance(
                     Some(p) => {
                         *status = "tool call — approve with y/n/a/q".into();
                         *phase = p;
+                        notify("tool approval needed");
                         return Ok(());
                     }
                     None => continue,
@@ -1888,6 +2427,20 @@ async fn agentic_approve(
     ctx: &crate::core::builtin_tools::ToolContext,
     call: &ToolCall,
 ) -> Result<()> {
+    if let Some(res) = engine.execute_stateful(call) {
+        let text = match res {
+            Ok(t) => t,
+            Err(e) => format!("[tool error] {e}"),
+        };
+        for line in text.lines() {
+            transcript.push(ChatLine {
+                speaker: Speaker::Tool,
+                text: line.to_string(),
+            });
+        }
+        engine.push_tool_result(&call.id, &text)?;
+        return Ok(());
+    }
     let mut gate = ApprovedGate;
     match crate::core::builtin_tools::execute_detailed(call, ctx, &mut gate).await {
         Ok(out) => {
@@ -2036,6 +2589,8 @@ fn handle_key(key: KeyEvent, input: &mut String) -> KeyAction {
             BindAction::DeleteWord => KeyAction::DeleteWord,
             BindAction::ClearInput => KeyAction::ClearInput,
             BindAction::Send => KeyAction::Send,
+            BindAction::SessionSearch => KeyAction::SessionSearch,
+            BindAction::EditInput => KeyAction::EditInput,
         };
     }
     match (key.code, key.modifiers) {
@@ -2048,6 +2603,9 @@ fn handle_key(key: KeyEvent, input: &mut String) -> KeyAction {
             KeyAction::None
         }
         (KeyCode::Char('s'), KeyModifiers::CONTROL) => KeyAction::SessionPicker,
+        (KeyCode::Char('r'), KeyModifiers::CONTROL) => KeyAction::SessionSearch,
+        (KeyCode::Char('o'), KeyModifiers::CONTROL) => KeyAction::EditInput,
+        (KeyCode::Char('f'), KeyModifiers::CONTROL) => KeyAction::Find,
         (KeyCode::Char('y'), KeyModifiers::CONTROL) => KeyAction::CopyMode,
         (KeyCode::Char('p'), KeyModifiers::CONTROL) => KeyAction::HistoryPrev,
         (KeyCode::Char('n'), KeyModifiers::CONTROL) => KeyAction::HistoryNext,
@@ -2104,6 +2662,47 @@ fn wrapped_height(lines: &[Line], width: u16) -> u16 {
 }
 
 /// Copy `text` to the system clipboard and return a short status message.
+/// Gather a compact view of the workspace (file listing + key files) for `/init`.
+fn project_context(workspace: &std::path::Path) -> String {
+    let mut s = String::new();
+    s.push_str("Project files (relative paths):\n");
+    for p in crate::core::builtin_tools::list_files(workspace).iter().take(200) {
+        if let Ok(rel) = p.strip_prefix(workspace) {
+            s.push_str(&format!("- {}\n", rel.display()));
+        }
+    }
+    let key_files = [
+        "README.md",
+        "readme.md",
+        "Cargo.toml",
+        "package.json",
+        "pyproject.toml",
+        "go.mod",
+        "Makefile",
+        "requirements.txt",
+    ];
+    for name in key_files {
+        let p = workspace.join(name);
+        if let Ok(content) = std::fs::read_to_string(&p) {
+            let trimmed: String = content.chars().take(4000).collect();
+            s.push_str(&format!("\n=== {name} ===\n{trimmed}\n"));
+        }
+    }
+    s
+}
+
+/// Strip a surrounding ``` fence (with optional language tag) from model output.
+fn strip_code_fence(text: &str) -> String {
+    let t = text.trim();
+    if let Some(rest) = t.strip_prefix("```") {
+        let rest = rest.split_once('\n').map(|x| x.1).unwrap_or("");
+        let rest = rest.trim_end();
+        let rest = rest.strip_suffix("```").unwrap_or(rest);
+        return rest.trim_end().to_string();
+    }
+    t.to_string()
+}
+
 fn copy_status(text: &str) -> String {
     if text.is_empty() {
         return "nothing to copy".to_string();
@@ -2130,6 +2729,33 @@ fn transcript_copy_lines(transcript: &[ChatLine]) -> Vec<String> {
         }
     }
     out
+}
+
+/// Indices of transcript lines containing `query` (case-insensitive).
+fn find_matches(lines: &[String], query: &str) -> Vec<usize> {
+    let q = query.trim().to_lowercase();
+    if q.is_empty() {
+        return Vec::new();
+    }
+    lines
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| l.to_lowercase().contains(&q))
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// Refresh the cross-session search results for the current query.
+fn refresh_session_search(engine: &ChatEngine, ss: &mut SessionSearch) {
+    let q = ss.query.trim();
+    ss.hits = if q.is_empty() {
+        Vec::new()
+    } else {
+        engine.memory.search_messages(q, 100).unwrap_or_default()
+    };
+    if ss.sel >= ss.hits.len() {
+        ss.sel = ss.hits.len().saturating_sub(1);
+    }
 }
 
 /// Raw text of the most recent non-empty assistant reply.
@@ -2247,6 +2873,8 @@ fn draw_ui(
     changes: &[FileChange],
     attachments: &str,
     copy: Option<&CopyState>,
+    find: Option<&FindState>,
+    search: Option<&SessionSearch>,
 ) {
     let area = f.area();
     // Base background for the whole screen.
@@ -2937,6 +3565,124 @@ fn draw_ui(
             Paragraph::new(lines).block(Block::default().padding(Padding::new(2, 1, 0, 0)));
         f.render_widget(overlay, box_area);
     }
+    // In-transcript search overlay (/find): live substring matches.
+    if let Some(fs) = find {
+        let all = transcript_copy_lines(transcript);
+        let matches = find_matches(&all, &fs.query);
+        let w = area.width.saturating_sub(8).clamp(24, 100);
+        let max_rows = (area.height.saturating_sub(8) as usize).clamp(3, 30);
+        let visible = matches.len().min(max_rows);
+        let (start, end) = list_window(matches.len(), fs.sel, visible);
+        let mut lines: Vec<Line> = Vec::new();
+        lines.push(Line::from(vec![
+            Span::styled(
+                "find ",
+                Style::default().fg(pal().accent).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(fs.query.clone(), Style::default().fg(pal().text)),
+            Span::styled(
+                format!("   {} match(es)", matches.len()),
+                Style::default().fg(pal().dim),
+            ),
+        ]));
+        if matches.is_empty() {
+            lines.push(plain_line("  no matches — keep typing (Ctrl-U clears), Esc closes"));
+        } else {
+            for (rank, &idx) in matches[start..end].iter().enumerate() {
+                let selected = start + rank == fs.sel;
+                let style = if selected {
+                    Style::default().fg(pal().bg).bg(pal().accent)
+                } else {
+                    Style::default().fg(pal().text)
+                };
+                let num_style = if selected {
+                    style
+                } else {
+                    Style::default().fg(pal().dim)
+                };
+                lines.push(Line::from(vec![
+                    Span::styled(format!("{:>4} ", idx + 1), num_style),
+                    Span::styled(all[idx].clone(), style),
+                ]));
+            }
+        }
+        lines.push(Line::from(
+            [
+                chip("↑↓", "select"),
+                chip("Enter", "copy line"),
+                chip("Esc", "close"),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<Span>>(),
+        ));
+        let h = (lines.len() as u16 + 2).min(area.height.saturating_sub(1));
+        let box_area = centered_rect(area, w, h);
+        overlay_bg(f, box_area, pal().accent);
+        let overlay =
+            Paragraph::new(lines).block(Block::default().padding(Padding::new(2, 1, 0, 0)));
+        f.render_widget(overlay, box_area);
+    }
+    // Cross-session search overlay (Ctrl-R): hits from the encrypted DB.
+    if let Some(ss) = search {
+        let w = area.width.saturating_sub(8).clamp(24, 100);
+        let max_rows = (area.height.saturating_sub(8) as usize).clamp(3, 30);
+        let visible = ss.hits.len().min(max_rows);
+        let (start, end) = list_window(ss.hits.len(), ss.sel, visible);
+        let mut lines: Vec<Line> = Vec::new();
+        lines.push(Line::from(vec![
+            Span::styled(
+                "search ",
+                Style::default().fg(pal().accent).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(ss.query.clone(), Style::default().fg(pal().text)),
+            Span::styled(
+                format!("   {} hit(s) across sessions", ss.hits.len()),
+                Style::default().fg(pal().dim),
+            ),
+        ]));
+        if ss.hits.is_empty() {
+            lines.push(plain_line("  type to search the encrypted database, Enter opens, Esc closes"));
+        } else {
+            for (rank, h) in ss.hits[start..end].iter().enumerate() {
+                let selected = start + rank == ss.sel;
+                let style = if selected {
+                    Style::default().fg(pal().bg).bg(pal().accent)
+                } else {
+                    Style::default().fg(pal().text)
+                };
+                let meta_style = if selected {
+                    style
+                } else {
+                    Style::default().fg(pal().dim)
+                };
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        format!("  {:<20} ", truncate(&h.session_name, 20)),
+                        meta_style,
+                    ),
+                    Span::styled(format!("[{}] ", h.role), meta_style),
+                    Span::styled(h.snippet.clone(), style),
+                ]));
+            }
+        }
+        lines.push(Line::from(
+            [
+                chip("↑↓", "select"),
+                chip("Enter", "open session"),
+                chip("Esc", "close"),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<Span>>(),
+        ));
+        let h = (lines.len() as u16 + 2).min(area.height.saturating_sub(1));
+        let box_area = centered_rect(area, w, h);
+        overlay_bg(f, box_area, pal().accent);
+        let overlay =
+            Paragraph::new(lines).block(Block::default().padding(Padding::new(2, 1, 0, 0)));
+        f.render_widget(overlay, box_area);
+    }
     if let Phase::Guard { text, findings } = phase {
         let box_area = overlay_rect(area);
         overlay_bg(f, box_area, pal().red);
@@ -3019,6 +3765,39 @@ fn accent_bar(f: &mut Frame, area: Rect, accent: Color) {
     f.render_widget(Block::default().style(Style::default().bg(accent)), bar);
 }
 
+/// Suspend the TUI, edit the current input in $VISUAL/$EDITOR, and return it.
+fn edit_in_editor(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    current: &str,
+) -> Result<String> {
+    use std::io::Write;
+    let editor = std::env::var("VISUAL")
+        .or_else(|_| std::env::var("EDITOR"))
+        .unwrap_or_else(|_| "vi".to_string());
+    let mut path = std::env::temp_dir();
+    path.push(format!("enclave-input-{}.md", std::process::id()));
+    std::fs::write(&path, current)
+        .map_err(|e| crate::error::EnclaveError::other(format!("cannot write temp file: {e}")))?;
+
+    let _ = disable_raw_mode();
+    let _ = execute!(std::io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
+    let _ = std::io::stdout().flush();
+    let status = std::process::Command::new(&editor).arg(&path).status();
+    let _ = execute!(std::io::stdout(), EnterAlternateScreen, EnableMouseCapture);
+    let _ = enable_raw_mode();
+    let _ = terminal.clear();
+
+    let result = match status {
+        Ok(_) => std::fs::read_to_string(&path)
+            .map_err(|e| crate::error::EnclaveError::other(format!("cannot read temp file: {e}"))),
+        Err(e) => Err(crate::error::EnclaveError::other(format!(
+            "could not launch editor '{editor}': {e}"
+        ))),
+    };
+    let _ = std::fs::remove_file(&path);
+    result
+}
+
 /// Apply a change to config.toml (best-effort; failures are non-fatal).
 fn persist_settings(update: impl FnOnce(&mut crate::config::Settings)) {
     if let Ok(paths) = crate::config::Paths::resolve() {
@@ -3050,6 +3829,50 @@ fn persist_theme(name: &str) {
 
 fn plain_line(s: &str) -> Line<'static> {
     Line::from(s.to_string())
+}
+
+/// Truncate a string to `n` characters (appending an ellipsis when cut).
+fn truncate(s: &str, n: usize) -> String {
+    if s.chars().count() <= n {
+        s.to_string()
+    } else {
+        let mut out: String = s.chars().take(n.saturating_sub(1)).collect();
+        out.push('…');
+        out
+    }
+}
+
+/// Render a list of memories as an aligned, multi-line block.
+fn memories_to_text(mems: &[crate::privacy::Memory]) -> String {
+    mems.iter()
+        .map(|m| {
+            let mut marks = Vec::new();
+            if m.pinned {
+                marks.push("pinned");
+            }
+            if m.local_only {
+                marks.push("local-only");
+            }
+            let mark = if marks.is_empty() {
+                String::new()
+            } else {
+                format!("  [{}]", marks.join(","))
+            };
+            let tags = if m.tags.trim().is_empty() {
+                String::new()
+            } else {
+                format!("  #{}", m.tags.replace(',', " #"))
+            };
+            format!(
+                "{}  {}{}{}",
+                &m.id[..8.min(m.id.len())],
+                truncate(&m.text, 70),
+                tags,
+                mark
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Centered, capped rectangle for the shortcuts overlay.
@@ -3114,6 +3937,16 @@ fn welcome_lines(tools_enabled: bool) -> Vec<Line<'static>> {
         key("/build", "build mode — full access within the permission policy"),
         key("/attach", "attach an image or text file to your next message"),
         key("/detach", "clear pending attachments"),
+        key("/find", "search this conversation (also Ctrl-F)"),
+        key("/search", "search across all saved sessions (also Ctrl-R)"),
+        key("/export", "export this chat: /export html|md|pdf [path]"),
+        key("/editor", "open the message box in $EDITOR (also Ctrl-O)"),
+        key("/init", "generate an AGENTS.md for this project"),
+        key("/mcp", "list tools exposed by connected MCP servers"),
+        key("/remember", "save a fact to encrypted memory: /remember text #tag"),
+        key("/memory", "list memories (/memory search <q> · /memory pin <id>)"),
+        key("/forget", "delete a memory by id or text"),
+        key("/checkpoint", "summarise this session into long-term memory"),
         key("/copy", "copy the last reply (or the last N replies: /copy 3)"),
         key("/save", "save this conversation as a Markdown file (plaintext)"),
         key("/undo /redo", "undo the last turn / restore it"),
@@ -3270,6 +4103,26 @@ fn draw_info_panel(
                 Span::styled(format!("+{} ", c.added), Style::default().fg(pal().green)),
                 Span::styled(format!("−{} ", c.removed), Style::default().fg(pal().red)),
                 Span::styled(c.path.clone(), Style::default().fg(pal().text)),
+            ]));
+        }
+    }
+
+    let todos = engine.todos.lock().map(|t| t.clone()).unwrap_or_default();
+    if !todos.is_empty() {
+        lines.push(plain_line(""));
+        lines.push(Line::from(Span::styled(
+            "TASKS",
+            Style::default().fg(pal().dim).add_modifier(Modifier::BOLD),
+        )));
+        for t in todos.iter().take(12) {
+            let (mark, color) = match t.status.as_str() {
+                "done" | "completed" | "x" => ("[x] ", pal().green),
+                "in_progress" | "doing" | "~" => ("[~] ", pal().yellow),
+                _ => ("[ ] ", pal().text),
+            };
+            lines.push(Line::from(vec![
+                Span::styled(mark, Style::default().fg(color)),
+                Span::styled(truncate(&t.text, 40), Style::default().fg(pal().text)),
             ]));
         }
     }

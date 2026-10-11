@@ -9,16 +9,21 @@ Enclave has two tool mechanisms:
    human, executed via `sh -c` (below).
 2. **Agentic mode** (`enclave chat --agent` or `tools.mode = "agent"`) — real
    function calling: the model returns structured tool calls
-   (`read_file`, `write_file`, `edit_file`, `list_dir`, `glob`, `grep`,
-   `run_shell`), Enclave executes them only after the same ask-always approval,
-   and feeds results back (max 8 iterations). File paths are canonicalized and
-   must resolve inside the current workspace (`..` and outside-absolute paths
-   are rejected). `read_file` accepts an optional `offset`/`limit` line range;
-   `glob` matches files by pattern; `grep` searches contents by regex (optional
-   `glob` filter). `write_file`/`edit_file` return an inline diff. The privacy
-   guard redacts tool arguments and results like any other outgoing text.
-   Multi-agent `delegate` runs sub-agents with **ephemeral, RAM-only sessions**
-   and cannot recurse further (depth limit 1).
+     (`read_file`, `write_file`, `edit_file`, `apply_patch`, `list_dir`, `glob`,
+     `grep`, `run_shell`, `todo`, `question`, `remember`), Enclave executes them only after the same ask-always approval,
+     and feeds results back (max 8 iterations). File paths are canonicalized and
+     must resolve inside the current workspace (`..` and outside-absolute paths
+     are rejected). `read_file` accepts an optional `offset`/`limit` line range;
+     `glob` matches files by pattern; `grep` searches contents by regex (optional
+     `glob` filter); `apply_patch` applies a unified diff (multi-hunk).
+     `write_file`/`edit_file`/`apply_patch` return an inline diff. `todo` records
+     a task list (shown in the TUI info panel); `question` asks you a
+     multiple-choice question mid-task (interactive prompts in the CLI);
+     `remember` saves a fact to the encrypted long-term memory. The privacy
+    guard redacts tool arguments and results like any other outgoing text.
+    Multi-agent `delegate` runs sub-agents with **ephemeral, RAM-only sessions**
+    and cannot recurse further (depth limit 1). Tools from configured **MCP
+    servers** are added as `mcp__{server}__{tool}` and gated the same way.
 
 ### Permissions and modes
 

@@ -133,6 +133,56 @@ mode = "ask"   # ask | redact (auto-placeholder) | block (auto-refuse)
 turn — including the whole history that is re-sent — with stable placeholder
 numbering, so the model never sees inconsistent tokens.
 
+## Long-term memory (Supermemory)
+
+Enclave keeps a **local, encrypted memory** of facts, preferences and notes
+that persists across sessions and is injected into the system prompt. It lives
+in the same SQLCipher `vault.db` as your conversations — nothing is sent to an
+external memory service.
+
+In the TUI:
+
+| Command | Action |
+|---------|--------|
+| `/remember <text> #tag` | Save a fact (`--local` keeps it off the network) |
+| `/memory` | List memories (`/memory search <q>` to search, `/memory pin <id>`) |
+| `/forget <id\|text>` | Delete a memory by id or by matching text |
+| `/checkpoint` | Summarise the current session into long-term memory |
+
+From the CLI:
+
+```bash
+enclave memory add "prefers Rust" --tags langs
+enclave memory list
+enclave memory search rust
+enclave memory pin <id>          # also: --off to unpin
+enclave memory forget <id|text>
+enclave memory clear --force
+```
+
+Configuration (`config.toml`):
+
+```toml
+[memory]
+enabled = true          # inject memories into the system prompt
+inject_limit = 50       # max memories injected
+autosave_secs = 0       # >0 = periodically checkpoint the session (opt-in)
+
+# The session Enclave reopens on launch (set automatically as you switch).
+working_session = "9f3c1a2b-…"
+```
+
+- **Injection**: the most relevant memories (pinned first, then most recent)
+  are added to the system prompt, up to `inject_limit`. Injected text is
+  context like any other, so the **privacy guard applies** before it goes to a
+  cloud provider.
+- **`--local` / `local_only`**: such memories are stored but **never injected**
+  into requests that leave the machine.
+- **Agent tool**: in agentic mode the model can save memories itself via the
+  `remember` tool (permission-gated).
+- **Working session**: Enclave remembers which session you were in and reopens
+  it on the next launch.
+
 ## Agentic mode (function calling)
 
 Beyond markdown *proposals*, Enclave supports real function calling: the
@@ -150,10 +200,13 @@ Built-in tools (workspace-restricted, human-approved):
 | `read_file` | Read a file inside the workspace (optional `offset`/`limit` line range, output capped) |
 | `write_file` | Write a file inside the workspace (path traversal rejected) |
 | `edit_file` | Replace an exact `old_string` with `new_string` (fails if missing or ambiguous) |
+| `apply_patch` | Apply a unified diff (multi-hunk) to a file in one call |
 | `list_dir` | List a directory inside the workspace |
 | `glob` | Find files by glob pattern (`**/*.rs`, `src/*.toml`, …) |
 | `grep` | Search file contents by regular expression (optional `glob` filter) |
 | `run_shell` | Run a shell command (same timeout + output cap as proposals) |
+| `todo` | Record/update a task list (shown in the info panel) |
+| `question` | Ask you a multiple-choice question mid-task (interactive in the CLI) |
 
 File writes/edits return an inline diff (green `+` / red `−`) which is also
 recorded in the info panel **CHANGES** list.
@@ -252,6 +305,9 @@ you> use the researcher agent to summarize the state of encrypted messaging, the
 | `Esc` / `Ctrl-C` | Quit |
 | `Ctrl-Y` | Copy mode: select transcript lines (↑/↓, PgUp/PgDn, Home/End) and press `y` to copy to the clipboard — `a` selects all, `e` copies the last reply |
 | `Ctrl-P` / `Ctrl-N` | Recall previous / next message from the input history |
+| `Ctrl-F` | Find text in the current conversation (type to search, Enter copies the line) |
+| `Ctrl-R` | Search text across **all** saved sessions (Enter opens the session) |
+| `Ctrl-O` | Edit the message box in `$EDITOR` (`$VISUAL` → `vi`) |
 | `Ctrl-L` | Clear the session (wipes encrypted history, starts fresh) |
 | `Ctrl-W` / `Ctrl-U` | Delete word / clear input |
 | `PgUp` / `PgDn` (or ↑/↓) | Scroll transcript |
@@ -290,6 +346,12 @@ Slash commands (typed in the message box, executed locally, never sent to the pr
 | `/retry` | Undo the last turn and resend the same message |
 | `/compact` | Summarise the conversation and replace the history with the summary |
 | `/commands` | List your custom commands (see below) |
+| `/find <text>` | Search the current conversation (also `Ctrl-F`) |
+| `/search <text>` | Search across all saved sessions (also `Ctrl-R`) |
+| `/export [md\|html\|pdf] [path]` | Export this conversation (HTML/Markdown native; PDF needs `pandoc`/`wkhtmltopdf`) |
+| `/editor` | Open the message box in `$EDITOR` (also `Ctrl-O`) |
+| `/init` | Generate an `AGENTS.md` for this project from its files |
+| `/mcp` | List tools exposed by connected MCP servers |
 | `/theme [name]` | Show or switch the colour theme (`default` · `nord` · `gruvbox` · `solarized` · `mono`) — saved |
 | `/credits` | Show OpenRouter credit / usage / limits (also `/usage`) |
 | `/quit` | Exit Enclave |
@@ -350,6 +412,8 @@ remote URLs are ignored, exactly like `AGENTS.md` rules.
 # config.toml
 [tui]
 theme = "nord"            # default | nord | gruvbox | solarized | mono
+notify = true             # terminal bell + macOS notification when a reply
+                          # or a tool approval is ready (default true)
 
 [tui.keybinds]            # override built-in keys (action = key spec)
 quit          = "ctrl+q"
@@ -360,9 +424,32 @@ toggle_mode   = "ctrl+t"
 
 Recognised actions: `quit`, `clear`, `copy`, `session_picker`, `toggle_sidebar`,
 `toggle_mode`, `newline`, `history_prev`, `history_next`, `delete_word`,
-`clear_input`, `send`. Key specs accept `ctrl`/`alt`/`shift` modifiers plus key
-names (`enter`, `esc`, `tab`, `space`, `backspace`, `up`, `down`, `f1`…`f12`, a
-single character, …). `/theme` also switches the palette at runtime.
+`clear_input`, `send`, `session_search`, `edit_input`. Key specs accept
+`ctrl`/`alt`/`shift` modifiers plus key names (`enter`, `esc`, `tab`, `space`,
+`backspace`, `up`, `down`, `f1`…`f12`, a single character, …). `/theme` also
+switches the palette at runtime.
+
+### MCP servers
+
+Enclave can use tools from [Model Context Protocol](https://modelcontextprotocol.io)
+servers over stdio. Add them to `config.toml`:
+
+```toml
+[mcp.servers.filesystem]
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/Users/me/projects"]
+
+[mcp.servers.weather]
+command = "uvx"
+args = ["mcp-server-weather"]
+env = { API_KEY = "..." }
+```
+
+At startup Enclave connects to each server, performs the `initialize` handshake
+and lists its tools; every one is exposed as `mcp__{server}__{tool}` and gated by
+the permission model (default: **ask**). `/mcp` lists the connected tools. MCP
+tool results flow through the same privacy guard, but remember they are produced
+by a third-party process — only connect servers you trust.
 
 ### Attachments
 
@@ -377,7 +464,8 @@ base64) and never leave the machine unencrypted; images are capped at 8 MB.
 `/detach` clears pending attachments.
 
 With `--agent` the assistant uses the built-in tools (`read_file`,
-`write_file`, `edit_file`, `list_dir`, `run_shell`) through real function
+`write_file`, `edit_file`, `apply_patch`, `list_dir`, `glob`, `grep`,
+`run_shell`, `todo`, `question`, plus any MCP tools) through real function
 calling. Every call is shown in a yellow panel titled *"tool call — nothing
 runs without your approval"* and waits for your `y`/`n`/`a`/`q`. File edits
 are rendered inline in the transcript as **diffs** (green `+added`, red

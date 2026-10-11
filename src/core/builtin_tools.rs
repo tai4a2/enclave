@@ -31,6 +31,24 @@ pub type DelegateFn = Box<
         + Sync,
 >;
 
+/// Closure that asks the user a question (interactive `question` tool).
+pub type AskFn = Box<
+    dyn for<'a> Fn(
+            &'a str,
+            &'a [String],
+        ) -> Pin<Box<dyn Future<Output = Result<String>> + Send + 'a>>
+        + Send
+        + Sync,
+>;
+
+/// One entry of the model's task list (`todo` tool).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TodoItem {
+    pub text: String,
+    /// One of `pending`, `in_progress`, `done`.
+    pub status: String,
+}
+
 /// Runtime context for tool execution.
 pub struct ToolContext {
     /// Root directory: file tools cannot escape it.
@@ -39,6 +57,26 @@ pub struct ToolContext {
     pub max_output_bytes: usize,
     /// Present only on the top-level agent (depth limit for delegation).
     pub delegate: Option<DelegateFn>,
+    /// Present when the UI can prompt the user (`question` tool).
+    pub ask: Option<AskFn>,
+    /// Shared task list the model can update (`todo` tool).
+    pub todos: Option<std::sync::Arc<std::sync::Mutex<Vec<TodoItem>>>>,
+    /// Connected MCP servers, if any (`mcp__server__tool` calls).
+    pub mcp: Option<std::sync::Arc<crate::core::mcp::McpRegistry>>,
+}
+
+impl Default for ToolContext {
+    fn default() -> Self {
+        ToolContext {
+            workspace: std::env::current_dir().unwrap_or_default(),
+            shell_timeout_secs: 30,
+            max_output_bytes: 8192,
+            delegate: None,
+            ask: None,
+            todos: None,
+            mcp: None,
+        }
+    }
 }
 
 /// Summary of a file modification, for the UI.
@@ -98,6 +136,18 @@ pub fn defs(with_delegate: bool) -> Vec<ToolDef> {
             }),
         ),
         ToolDef::new(
+            "apply_patch",
+            "Apply a unified diff (one or more @@ hunks) to a file inside the workspace. Handles several edits in one call.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "patch": {"type": "string", "description": "unified diff hunks, e.g. @@ -1,3 +1,4 @@ ..."}
+                },
+                "required": ["path", "patch"]
+            }),
+        ),
+        ToolDef::new(
             "list_dir",
             "List the entries of a directory inside the workspace.",
             serde_json::json!({
@@ -142,6 +192,60 @@ pub fn defs(with_delegate: bool) -> Vec<ToolDef> {
                     "command": {"type": "string"}
                 },
                 "required": ["command"]
+            }),
+        ),
+        ToolDef::new(
+            "todo",
+            "Record or update your task list for the current request. Call it whenever the plan changes so progress stays visible.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "items": {
+                        "type": "array",
+                        "description": "the full, ordered task list",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "text": {"type": "string"},
+                                "status": {"type": "string", "enum": ["pending", "in_progress", "done"]}
+                            },
+                            "required": ["text", "status"]
+                        }
+                    }
+                },
+                "required": ["items"]
+            }),
+        ),
+        ToolDef::new(
+            "question",
+            "Ask the user a question when you need a decision or missing information. Optionally provide a list of choices.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "question": {"type": "string"},
+                    "options": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "optional suggested answers"
+                    }
+                },
+                "required": ["question"]
+            }),
+        ),
+        ToolDef::new(
+            "remember",
+            "Save a durable fact, preference or decision to the user's encrypted long-term memory so it is recalled in future sessions.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "the fact to remember"},
+                    "tags": {"type": "string", "description": "optional comma-separated tags"},
+                    "local_only": {
+                        "type": "boolean",
+                        "description": "if true, never send this memory to a remote provider"
+                    }
+                },
+                "required": ["text"]
             }),
         ),
     ];
@@ -257,6 +361,111 @@ pub fn list_files(root: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     walk_files(root, &mut out);
     out
+}
+
+/// Apply a unified diff (one or more `@@` hunks) to `original`.
+///
+/// Context (`' '`) and removal (`'-'`) lines must match exactly; lines starting
+/// with `---`/`+++`/`diff `/`index ` headers are ignored. Unrecognised lines are
+/// treated as context.
+pub fn apply_unified(original: &str, patch: &str) -> Result<String> {
+    #[derive(Clone, Copy)]
+    enum Op {
+        Context,
+        Remove,
+        Add,
+    }
+    struct Hunk {
+        old_start: usize,
+        lines: Vec<(Op, String)>,
+    }
+
+    let orig_lines: Vec<&str> = original.split('\n').collect();
+    let mut hunks: Vec<Hunk> = Vec::new();
+    let mut current: Option<Hunk> = None;
+
+    for raw in patch.split('\n') {
+        let line = raw.strip_suffix('\r').unwrap_or(raw);
+        if let Some(rest) = line.strip_prefix("@@") {
+            if let Some(h) = current.take() {
+                hunks.push(h);
+            }
+            let spec = rest.trim_end_matches('@').trim();
+            let old_part = spec
+                .split_whitespace()
+                .next()
+                .and_then(|s| s.strip_prefix('-'))
+                .unwrap_or("0");
+            let old_start = old_part
+                .split(',')
+                .next()
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(1);
+            current = Some(Hunk {
+                old_start,
+                lines: Vec::new(),
+            });
+            continue;
+        }
+        let Some(h) = current.as_mut() else {
+            continue; // preamble (---/+++/diff/index) before the first hunk
+        };
+        match line.as_bytes().first() {
+            Some(b'+') => h.lines.push((Op::Add, line[1..].to_string())),
+            Some(b'-') => h.lines.push((Op::Remove, line[1..].to_string())),
+            Some(b' ') => h.lines.push((Op::Context, line[1..].to_string())),
+            Some(b'\\') => {} // "\ No newline at end of file"
+            None => h.lines.push((Op::Context, String::new())),
+            _ => h.lines.push((Op::Context, line.to_string())),
+        }
+    }
+    if let Some(h) = current.take() {
+        hunks.push(h);
+    }
+    if hunks.is_empty() {
+        return Err(EnclaveError::other("patch contains no @@ hunks"));
+    }
+
+    let mut out: Vec<String> = Vec::new();
+    let mut cursor = 0usize; // next original line not yet copied (0-based)
+    for h in &hunks {
+        let start = h.old_start.saturating_sub(1);
+        if start < cursor {
+            return Err(EnclaveError::other("overlapping or out-of-order hunks"));
+        }
+        if start > orig_lines.len() {
+            return Err(EnclaveError::other("hunk starts past end of file"));
+        }
+        while cursor < start {
+            out.push(orig_lines[cursor].to_string());
+            cursor += 1;
+        }
+        for (op, text) in &h.lines {
+            match op {
+                Op::Add => out.push(text.clone()),
+                Op::Context | Op::Remove => {
+                    let actual = orig_lines.get(cursor).copied().unwrap_or("");
+                    if actual != text {
+                        return Err(EnclaveError::other(format!(
+                            "hunk context mismatch at line {}: expected {:?}, found {:?}",
+                            cursor + 1,
+                            text,
+                            actual
+                        )));
+                    }
+                    if matches!(op, Op::Context) {
+                        out.push(actual.to_string());
+                    }
+                    cursor += 1;
+                }
+            }
+        }
+    }
+    while cursor < orig_lines.len() {
+        out.push(orig_lines[cursor].to_string());
+        cursor += 1;
+    }
+    Ok(out.join("\n"))
 }
 
 /// Execute one tool call, returning rendered text and any file change.
@@ -468,6 +677,35 @@ pub async fn execute_detailed(
                 }),
             })
         }
+        "apply_patch" => {
+            let path = resolve_in_workspace(&ctx.workspace, &arg_str("path"))?;
+            let patch = arg_str("patch");
+            if patch.trim().is_empty() {
+                return Err(EnclaveError::other("apply_patch requires a 'patch'"));
+            }
+            let old = std::fs::read_to_string(&path)
+                .map_err(|e| EnclaveError::other(format!("cannot read {}: {e}", path.display())))?;
+            let new = apply_unified(&old, &patch)
+                .map_err(|e| EnclaveError::other(format!("patch failed: {e}")))?;
+            std::fs::write(&path, &new)?;
+            let d = diff::lines(&old, &new);
+            let (added, removed) = diff::stats(&d);
+            let text = format!(
+                "patched {} (+{} \u{2212}{})\n{}",
+                path.display(),
+                added,
+                removed,
+                diff::render(&d, 400)
+            );
+            Ok(ToolOutcome {
+                text,
+                change: Some(FileChange {
+                    path: path.display().to_string(),
+                    added,
+                    removed,
+                }),
+            })
+        }
         "list_dir" => {
             let raw = arg_str("path");
             let path = if raw.is_empty() {
@@ -512,7 +750,88 @@ pub async fn execute_detailed(
                 "delegation not available (no personas configured)",
             )),
         },
-        other => Err(EnclaveError::other(format!("unknown tool '{other}'"))),
+        "todo" => {
+            let items: Vec<TodoItem> = args["items"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| {
+                            let text = v["text"].as_str()?.trim().to_string();
+                            if text.is_empty() {
+                                return None;
+                            }
+                            let status = v["status"].as_str().unwrap_or("pending").to_string();
+                            Some(TodoItem { text, status })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            if items.is_empty() {
+                return Err(EnclaveError::other("todo requires a non-empty 'items' array"));
+            }
+            if let Some(shared) = &ctx.todos {
+                if let Ok(mut guard) = shared.lock() {
+                    *guard = items.clone();
+                }
+            }
+            let rendered = items
+                .iter()
+                .map(|t| {
+                    let mark = match t.status.as_str() {
+                        "done" => "[x]",
+                        "in_progress" => "[~]",
+                        _ => "[ ]",
+                    };
+                    format!("{mark} {}", t.text)
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            Ok(ToolOutcome {
+                text: format!("task list ({} items):\n{rendered}", items.len()),
+                change: None,
+            })
+        }
+        "question" => {
+            let question = arg_str("question");
+            if question.is_empty() {
+                return Err(EnclaveError::other("question requires a 'question'"));
+            }
+            let options: Vec<String> = args["options"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
+            match &ctx.ask {
+                Some(ask) => Ok(ToolOutcome {
+                    text: ask(&question, &options).await?,
+                    change: None,
+                }),
+                None => Ok(ToolOutcome {
+                    text: format!(
+                        "[question asked: {question}] \
+                         (no interactive input available — answer in your next message)"
+                    ),
+                    change: None,
+                }),
+            }
+        }
+        other => {
+            if other.starts_with("mcp__") {
+                let registry = ctx.mcp.as_ref().ok_or_else(|| {
+                    EnclaveError::other(format!("mcp tool '{other}' has no connected server"))
+                })?;
+                let args: serde_json::Value = serde_json::from_str(&call.arguments)
+                    .unwrap_or_else(|_| serde_json::json!({}));
+                return Ok(ToolOutcome {
+                    text: registry.call(other, args)?,
+                    change: None,
+                });
+            }
+            Err(EnclaveError::other(format!("unknown tool '{other}'")))
+        }
     }
 }
 
@@ -553,14 +872,18 @@ mod tests {
     #[test]
     fn defs_shape_and_delegate_flag() {
         let base = defs(false);
-        assert_eq!(base.len(), 7);
+        assert_eq!(base.len(), 11);
         assert!(base.iter().all(|d| !d.name.is_empty()));
         assert!(base.iter().any(|d| d.name == "edit_file"));
+        assert!(base.iter().any(|d| d.name == "apply_patch"));
         assert!(base.iter().any(|d| d.name == "glob"));
         assert!(base.iter().any(|d| d.name == "grep"));
+        assert!(base.iter().any(|d| d.name == "todo"));
+        assert!(base.iter().any(|d| d.name == "question"));
+        assert!(base.iter().any(|d| d.name == "remember"));
         let with = defs(true);
-        assert_eq!(with.len(), 8);
-        assert_eq!(with[7].name, "delegate");
+        assert_eq!(with.len(), 12);
+        assert_eq!(with[11].name, "delegate");
     }
 
     fn ctx_at(ws: &Path) -> ToolContext {
@@ -568,7 +891,7 @@ mod tests {
             workspace: ws.to_path_buf(),
             shell_timeout_secs: 5,
             max_output_bytes: 8192,
-            delegate: None,
+            ..Default::default()
         }
     }
 
@@ -627,5 +950,53 @@ mod tests {
         assert!(execute_detailed(&ambiguous, &ctx_at(dir.path()), &mut AllowAll)
             .await
             .is_err());
+    }
+
+    #[tokio::test]
+    async fn todo_records_and_renders_items() {
+        let dir = tempfile::tempdir().unwrap();
+        let shared = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let ctx = ToolContext {
+            todos: Some(shared.clone()),
+            ..ctx_at(dir.path())
+        };
+        let call = ToolCall {
+            id: "1".into(),
+            name: "todo".into(),
+            arguments: serde_json::json!({"items":[
+                {"text":"read the code","status":"done"},
+                {"text":"write the fix","status":"in_progress"}
+            ]})
+            .to_string(),
+        };
+        let out = execute_detailed(&call, &ctx, &mut AllowAll).await.unwrap();
+        assert!(out.text.contains("[x] read the code"));
+        assert!(out.text.contains("[~] write the fix"));
+        assert_eq!(shared.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn question_without_ui_reports_and_does_not_fail() {
+        let dir = tempfile::tempdir().unwrap();
+        let call = ToolCall {
+            id: "1".into(),
+            name: "question".into(),
+            arguments: serde_json::json!({"question":"which file?","options":["a","b"]}).to_string(),
+        };
+        let out = execute_detailed(&call, &ctx_at(dir.path()), &mut AllowAll)
+            .await
+            .unwrap();
+        assert!(out.text.contains("which file?"));
+    }
+
+    #[test]
+    fn apply_unified_applies_hunks_and_rejects_mismatch() {
+        let original = "one\ntwo\nthree\n";
+        let patch = "@@ -1,3 +1,3 @@\n one\n-two\n+TWO\n three";
+        let out = apply_unified(original, patch).unwrap();
+        assert_eq!(out, "one\nTWO\nthree\n");
+
+        assert!(apply_unified(original, "@@ -1,1 +1,1 @@\n-zzz\n+x").is_err());
+        assert!(apply_unified(original, "no hunks here").is_err());
     }
 }

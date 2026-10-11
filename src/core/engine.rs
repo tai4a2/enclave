@@ -7,8 +7,45 @@ use crate::core::message::{Message, ToolCall};
 use crate::core::session::Session;
 use crate::error::{EnclaveError, Result};
 use crate::privacy::guard::{Redactor, redact_messages};
+use crate::privacy::keys::SecureCredentials;
 use crate::privacy::memory::EncryptedMemory;
-use crate::providers::{ChunkStream, Provider, ToolDef};
+use crate::providers::{
+    ChunkStream, Provider, ToolDef, create_provider, default_model_for, requires_api_key,
+};
+
+/// Lazily-created provider: avoids touching the OS keychain until the first
+/// message is actually sent.
+enum ProviderSlot {
+    Ready(Box<dyn Provider>),
+    Lazy {
+        name: String,
+        ollama_base_url: String,
+    },
+}
+
+impl ProviderSlot {
+    async fn get(&mut self) -> Result<&dyn Provider> {
+        if let ProviderSlot::Lazy {
+            name,
+            ollama_base_url,
+        } = self
+        {
+            let name = name.clone();
+            let base_url = ollama_base_url.clone();
+            let api_key = if requires_api_key(&name) {
+                Some(SecureCredentials::resolve_key(&name)?)
+            } else {
+                None
+            };
+            let provider = create_provider(&name, api_key, &base_url)?;
+            *self = ProviderSlot::Ready(provider);
+        }
+        match self {
+            ProviderSlot::Ready(p) => Ok(&**p),
+            ProviderSlot::Lazy { .. } => unreachable!("slot was just materialized"),
+        }
+    }
+}
 
 /// What the approval UI decided for a proposed tool call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,7 +69,8 @@ pub trait ToolGate: Send {
 
 /// Orchestrates a conversation turn by turn.
 pub struct ChatEngine {
-    pub provider: Box<dyn Provider>,
+    provider: ProviderSlot,
+    provider_name: &'static str,
     pub model: String,
     pub memory: EncryptedMemory,
     pub session: Session,
@@ -51,8 +89,10 @@ impl ChatEngine {
         session: Session,
         system_prompt: Option<String>,
     ) -> Self {
+        let provider_name = provider.name();
         ChatEngine {
-            provider,
+            provider: ProviderSlot::Ready(provider),
+            provider_name,
             model,
             memory,
             session,
@@ -61,9 +101,48 @@ impl ChatEngine {
         }
     }
 
+    /// Build an engine that creates its provider (and reads the API key from
+    /// the keychain) only when the first message is sent.
+    pub fn lazy(
+        provider_name: &str,
+        ollama_base_url: String,
+        model: Option<String>,
+        memory: EncryptedMemory,
+        session: Session,
+        system_prompt: Option<String>,
+    ) -> Result<Self> {
+        let canonical = crate::providers::known_providers()
+            .iter()
+            .copied()
+            .find(|p| *p == provider_name)
+            .ok_or_else(|| {
+                EnclaveError::provider(format!(
+                    "unknown provider '{provider_name}' (known: {})",
+                    crate::providers::known_providers().join(", ")
+                ))
+            })?;
+        let model = model.unwrap_or_else(|| {
+            default_model_for(canonical)
+                .unwrap_or("unknown")
+                .to_string()
+        });
+        Ok(ChatEngine {
+            provider: ProviderSlot::Lazy {
+                name: canonical.to_string(),
+                ollama_base_url,
+            },
+            provider_name: canonical,
+            model,
+            memory,
+            session,
+            system_prompt,
+            redactor: None,
+        })
+    }
+
     /// Provider name.
     pub fn provider_name(&self) -> &'static str {
-        self.provider.name()
+        self.provider_name
     }
 
     /// Build the message list sent to the provider (system prompt + history).
@@ -90,7 +169,9 @@ impl ChatEngine {
     pub async fn stream_reply(&mut self, input: &str) -> Result<ChunkStream> {
         self.session.add_user(&self.memory, input)?;
         let messages = self.outgoing_messages();
-        self.provider.chat_stream(messages, &self.model).await
+        let model = self.model.clone();
+        let provider = self.provider.get().await?;
+        provider.chat_stream(messages, &model).await
     }
 
     /// Persist a completed assistant reply.
@@ -117,9 +198,12 @@ impl ChatEngine {
 
         for _ in 0..max_iterations.max(1) {
             let messages = self.outgoing_messages();
+            let model = self.model.clone();
             let response = self
                 .provider
-                .chat_with_tools(messages, &self.model, defs)
+                .get()
+                .await?
+                .chat_with_tools(messages, &model, defs)
                 .await?;
 
             if response.tool_calls.is_empty() {

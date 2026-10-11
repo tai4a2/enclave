@@ -144,7 +144,12 @@ pub struct Settings {
     pub default_provider: String,
     /// Default model identifier.
     pub default_model: String,
-    /// Whether to cache the master key in the OS keychain.
+    /// Whether to cache the derived master key in the OS keychain.
+    ///
+    /// Defaults to `false`: the master key is then re-derived from the
+    /// password on every launch (PBKDF2) and never stored. Enabling this
+    /// makes macOS show a keychain permission dialog at startup.
+    #[serde(default)]
     pub use_keychain: bool,
     /// Optional system prompt prepended to every conversation.
     pub system_prompt: Option<String>,
@@ -186,7 +191,7 @@ impl Default for Settings {
         Self {
             default_provider: "openrouter".to_string(),
             default_model: "mistralai/mistral-large-4-0".to_string(),
-            use_keychain: true,
+            use_keychain: false,
             system_prompt: None,
             ollama_base_url: "http://localhost:11434".to_string(),
             tools: ToolsSettings::default(),

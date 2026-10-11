@@ -35,6 +35,55 @@ impl SecureCredentials {
         }
     }
 
+    /// Resolve an API key for `provider`, preferring environment variables over
+    /// the OS keychain.
+    ///
+    /// Lookup order:
+    /// 1. `ENCLAVE_<PROVIDER>_API_KEY` (e.g. `ENCLAVE_OPENROUTER_API_KEY`)
+    /// 2. `<PROVIDER>_API_KEY` (e.g. `OPENROUTER_API_KEY`, `OPENAI_API_KEY`)
+    /// 3. the OS keychain
+    ///
+    /// Empty variables are ignored. Exporting the key in the shell lets users
+    /// avoid macOS keychain prompts altogether.
+    pub fn resolve_key(provider: &str) -> Result<String> {
+        Self::env_key(provider, |name| std::env::var(name).ok())
+            .map(Ok)
+            .unwrap_or_else(|| Self::get(provider))
+    }
+
+    /// Pure environment lookup used by [`resolve_key`] (testable without a
+    /// keychain).
+    fn env_key<F>(provider: &str, lookup: F) -> Option<String>
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        let upper = provider.to_ascii_uppercase();
+        for name in [format!("ENCLAVE_{upper}_API_KEY"), format!("{upper}_API_KEY")] {
+            if let Some(value) = lookup(&name) {
+                let value = value.trim();
+                if !value.is_empty() {
+                    return Some(value.to_string());
+                }
+            }
+        }
+        None
+    }
+
+    /// Name of the environment variable providing `provider`'s key, if any.
+    ///
+    /// Used for user-facing messages (the key never leaves the environment).
+    pub fn env_var_name(provider: &str) -> Option<String> {
+        let upper = provider.to_ascii_uppercase();
+        for name in [format!("ENCLAVE_{upper}_API_KEY"), format!("{upper}_API_KEY")] {
+            if let Ok(value) = std::env::var(&name) {
+                if !value.trim().is_empty() {
+                    return Some(name);
+                }
+            }
+        }
+        None
+    }
+
     /// Delete the API key for `provider` (no error if absent).
     pub fn delete(provider: &str) -> Result<()> {
         match Self::entry(provider)?.delete_credential() {
@@ -44,9 +93,9 @@ impl SecureCredentials {
         }
     }
 
-    /// Whether a key exists for `provider`.
+    /// Whether a key exists for `provider` (environment variable or keychain).
     pub fn exists(provider: &str) -> bool {
-        Self::get(provider).is_ok()
+        Self::env_var_name(provider).is_some() || Self::get(provider).is_ok()
     }
 
     /// Return the subset of `known` providers that have a stored key.
@@ -72,5 +121,42 @@ impl SecureCredentials {
     /// Remove the cached master key.
     pub fn delete_master_key() -> Result<()> {
         Self::delete("master_key")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prefixed_env_var_is_used_and_trimmed() {
+        let key = SecureCredentials::env_key("openrouter", |name| {
+            (name == "ENCLAVE_OPENROUTER_API_KEY").then(|| "  env-secret  ".to_string())
+        });
+        assert_eq!(key.as_deref(), Some("env-secret"));
+    }
+
+    #[test]
+    fn standard_env_var_is_a_fallback() {
+        let key = SecureCredentials::env_key("openai", |name| {
+            (name == "OPENAI_API_KEY").then(|| "sk-test".to_string())
+        });
+        assert_eq!(key.as_deref(), Some("sk-test"));
+    }
+
+    #[test]
+    fn prefixed_var_wins_over_standard() {
+        let key = SecureCredentials::env_key("openai", |name| match name {
+            "ENCLAVE_OPENAI_API_KEY" => Some("prefixed".to_string()),
+            "OPENAI_API_KEY" => Some("standard".to_string()),
+            _ => None,
+        });
+        assert_eq!(key.as_deref(), Some("prefixed"));
+    }
+
+    #[test]
+    fn empty_or_missing_vars_yield_none() {
+        assert!(SecureCredentials::env_key("openrouter", |_| None).is_none());
+        assert!(SecureCredentials::env_key("openrouter", |_| Some("   ".to_string())).is_none());
     }
 }

@@ -39,6 +39,8 @@
 | `src/config.rs` | Resolved paths and settings (XDG via `directories`) |
 | `src/core/engine.rs` | Chat loop: history, streaming print, in-chat commands |
 | `src/core/tools.rs` | Shell proposals: parse fenced blocks, ask-always execution, timeout + output cap |
+| `src/core/builtin_tools.rs` | Function-calling executors: `read_file`/`write_file`/`list_dir`/`run_shell` (+`delegate`), workspace-confined paths |
+| `src/core/agents.rs` | Multi-agent MVP: personas from config, `delegate` tool, ephemeral sub-agent sessions (RAM-only) |
 | `src/core/session.rs` | `Session`: RAM view + encrypted persistence |
 | `src/core/message.rs` | `Message` / `Role` model (serde) |
 | `src/privacy/crypto.rs` | PBKDF2-SHA256 (600k iter), AES-256-GCM, CSPRNG |
@@ -47,7 +49,7 @@
 | `src/privacy/memory.rs` | `EncryptedMemory`: SQLCipher handle + schema + queries + stats/VACUUM |
 | `docs/audit.md` | Security & privacy audit with verified findings and fixes |
 | `src/privacy/export.rs` | Encrypted session export/import (`.enclave` files, AES-256-GCM + PBKDF2) |
-| `src/providers/*` | `Provider` trait + 4 implementations, streaming via SSE |
+| `src/providers/*` | `Provider` trait + 4 implementations, streaming via SSE; `chat_with_tools` (OpenAI-compatible, Anthropic tool_use, Ollama native) |
 | `src/tui/` | ratatui full-screen interface: sessions sidebar, markdown rendering (`markdown.rs`), spinner, proposal panel, ask-always execution |
 
 ## Data flow (one chat turn)

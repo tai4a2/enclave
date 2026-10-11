@@ -36,7 +36,7 @@ cargo install --path .
 enclave keys set openrouter
 
 # Start an encrypted chat
-enclave chat --provider openrouter --model mistralai/mistral-large
+enclave chat --provider openrouter --model mistralai/mistral-large-4-0
 
 # Fully offline chat with a local model
 enclave chat --provider ollama --model llama3.2
@@ -121,6 +121,57 @@ mode = "ask"   # ask | redact (auto-placeholder) | block (auto-refuse)
 `--no-guard` disables the scan (not recommended). Detection runs on every
 turn — including the whole history that is re-sent — with stable placeholder
 numbering, so the model never sees inconsistent tokens.
+
+## Agentic mode (function calling)
+
+Beyond markdown *proposals*, Enclave supports real function calling: the
+model receives a typed tool schema and returns structured tool calls that
+Enclave executes for it, feeding results back until the task is done.
+
+```bash
+enclave chat --agent                      # built-in tools + ask-always approvals
+```
+
+Built-in tools (workspace-restricted, human-approved):
+
+| Tool | What it does |
+|------|--------------|
+| `read_file` | Read a file inside the workspace (output capped) |
+| `write_file` | Write a file inside the workspace (path traversal rejected) |
+| `list_dir` | List a directory inside the workspace |
+| `run_shell` | Run a shell command (same timeout + output cap as proposals) |
+
+Guardrails: every call needs explicit approval (`[y]es/[n]o/[a]ll/[q]uit`,
+ask-always), paths are canonicalized and confined to the current directory,
+`..` and absolute paths outside the workspace are rejected, max 8 tool
+iterations per turn. The privacy guard redacts tool arguments/results the
+same way as chat text.
+
+### Multi-agent (delegate)
+
+Define sub-agents in `config.toml` — each with its own provider/model/persona
+(sub-agent sessions are ephemeral: RAM-only, never written to disk):
+
+```toml
+[agent.personas.researcher]
+provider = "openrouter"
+model = "mistralai/mistral-large-4-0"
+system_prompt = "You research topics and report facts back concisely."
+
+[agent.personas.writer]
+provider = "ollama"
+model = "llama3.2:1b"
+system_prompt = "You turn research notes into short summaries."
+```
+
+The main agent then gets a `delegate(agent, task)` tool: it can hand
+subtasks to sub-agents and collect their results. Depth limit: sub-agents
+cannot delegate further (no fan-out explosions). Example:
+
+```bash
+enclave chat --agent
+you> use the researcher agent to summarize the state of encrypted messaging, then have the writer produce a tweet-length summary
+```
 
 ## TUI keybindings
 

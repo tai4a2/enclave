@@ -178,6 +178,7 @@ async fn run_app(
             speaker: match m.role {
                 Role::User => Speaker::User,
                 Role::Assistant => Speaker::Assistant,
+                Role::Tool => Speaker::Tool,
                 Role::System => Speaker::System,
             },
             text: m.content.clone(),
@@ -716,6 +717,7 @@ fn switch_session(
                     speaker: match m.role {
                         Role::User => Speaker::User,
                         Role::Assistant => Speaker::Assistant,
+                        Role::Tool => Speaker::Tool,
                         Role::System => Speaker::System,
                     },
                     text: m.content.clone(),

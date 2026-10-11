@@ -9,6 +9,7 @@ pub enum Role {
     System,
     User,
     Assistant,
+    Tool,
 }
 
 impl Role {
@@ -18,6 +19,7 @@ impl Role {
             Role::System => "system",
             Role::User => "user",
             Role::Assistant => "assistant",
+            Role::Tool => "tool",
         }
     }
 
@@ -26,9 +28,22 @@ impl Role {
         match s {
             "system" => Role::System,
             "assistant" => Role::Assistant,
+            "tool" => Role::Tool,
             _ => Role::User,
         }
     }
+}
+
+/// One function/tool invocation requested by the assistant.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ToolCall {
+    /// Stable id assigned by the provider (echoed in the tool result).
+    #[serde(default)]
+    pub id: String,
+    /// Tool name.
+    pub name: String,
+    /// JSON-encoded arguments object.
+    pub arguments: String,
 }
 
 /// A single chat message.
@@ -36,6 +51,12 @@ impl Role {
 pub struct Message {
     pub role: Role,
     pub content: String,
+    /// Tool calls requested by an assistant message.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<ToolCall>,
+    /// For `Role::Tool` messages: the id of the call this result answers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
 }
 
 impl Message {
@@ -43,6 +64,8 @@ impl Message {
         Self {
             role,
             content: content.into(),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
         }
     }
 
@@ -56,5 +79,19 @@ impl Message {
 
     pub fn assistant(content: impl Into<String>) -> Self {
         Self::new(Role::Assistant, content)
+    }
+
+    /// Assistant message carrying tool calls (content may be empty).
+    pub fn assistant_with_tool_calls(content: impl Into<String>, calls: Vec<ToolCall>) -> Self {
+        let mut m = Self::new(Role::Assistant, content);
+        m.tool_calls = calls;
+        m
+    }
+
+    /// Tool result answering `tool_call_id`.
+    pub fn tool_result(call_id: impl Into<String>, content: impl Into<String>) -> Self {
+        let mut m = Self::new(Role::Tool, content);
+        m.tool_call_id = Some(call_id.into());
+        m
     }
 }

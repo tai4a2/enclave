@@ -57,6 +57,22 @@ pub struct ToolsSettings {
     pub timeout_secs: u64,
     /// Per-stream output cap in bytes (display and history).
     pub max_output_bytes: usize,
+    /// Interaction model: `proposals` (fenced blocks, ask-always) or
+    /// `agent` (real function calling with the built-in tool set).
+    #[serde(default)]
+    pub mode: ToolsMode,
+}
+
+/// How the assistant may use tools.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ToolsMode {
+    /// Parse fenced ```bash blocks and ask before running them.
+    #[default]
+    Proposals,
+    /// Real function calling: tools are advertised to the provider and the
+    /// engine runs an approval-gated agentic loop.
+    Agent,
 }
 
 impl Default for ToolsSettings {
@@ -65,6 +81,7 @@ impl Default for ToolsSettings {
             enabled: true,
             timeout_secs: 30,
             max_output_bytes: 8192,
+            mode: ToolsMode::Proposals,
         }
     }
 }
@@ -101,6 +118,25 @@ impl Default for GuardSettings {
     }
 }
 
+/// One sub-agent persona (`[agent.personas.<name>]`).
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct PersonaSettings {
+    /// Provider name (defaults to `default_provider`).
+    pub provider: Option<String>,
+    /// Model override (defaults to the provider default).
+    pub model: Option<String>,
+    /// System prompt for the sub-agent.
+    pub system_prompt: Option<String>,
+}
+
+/// Multi-agent settings.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct AgentSettings {
+    /// Named personas the top-level agent can delegate to.
+    #[serde(default)]
+    pub personas: std::collections::BTreeMap<String, PersonaSettings>,
+}
+
 /// Persisted, non-sensitive application settings.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Settings {
@@ -120,6 +156,9 @@ pub struct Settings {
     /// Privacy-guard settings.
     #[serde(default)]
     pub guard: GuardSettings,
+    /// Multi-agent settings.
+    #[serde(default)]
+    pub agent: AgentSettings,
 }
 
 impl Settings {
@@ -152,6 +191,7 @@ impl Default for Settings {
             ollama_base_url: "http://localhost:11434".to_string(),
             tools: ToolsSettings::default(),
             guard: GuardSettings::default(),
+            agent: AgentSettings::default(),
         }
     }
 }

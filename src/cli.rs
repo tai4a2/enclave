@@ -39,6 +39,9 @@ pub enum Command {
         /// Send messages without the privacy-guard scan (not recommended).
         #[arg(long)]
         no_guard: bool,
+        /// Agentic mode: real function calling with the built-in tool set.
+        #[arg(long)]
+        agent: bool,
     },
     /// Launch the full-screen terminal UI.
     Tui {
@@ -168,6 +171,7 @@ pub fn run(cli: Cli) -> Result<()> {
             no_keychain,
             no_tools,
             no_guard,
+            agent,
         } => {
             let engine = build_engine(
                 &paths,
@@ -179,9 +183,16 @@ pub fn run(cli: Cli) -> Result<()> {
             )?;
             let tools = settings.effective_tools(no_tools);
             let guard = settings.effective_guard(no_guard);
+            let agent_mode = (agent || tools.mode == crate::config::ToolsMode::Agent)
+                && tools.enabled;
+            let runner = if agent_mode {
+                Some(std::sync::Arc::new(crate::core::AgentRunner::from_settings(&settings)))
+            } else {
+                None
+            };
             let runtime = tokio::runtime::Runtime::new()
                 .map_err(|e| EnclaveError::other(e.to_string()))?;
-            runtime.block_on(chat_loop(engine, tools, guard))
+            runtime.block_on(chat_loop(engine, tools, guard, runner))
         }
         Command::Tui {
             model,
@@ -260,6 +271,7 @@ async fn chat_loop(
     mut engine: ChatEngine,
     tools: crate::config::ToolsSettings,
     guard: crate::config::GuardSettings,
+    runner: Option<std::sync::Arc<crate::core::AgentRunner>>,
 ) -> Result<()> {
     use futures::StreamExt;
 
@@ -270,7 +282,11 @@ async fn chat_loop(
         engine.session.id
     );
     if tools.enabled {
-        println!("Tools: ON — the assistant may propose shell commands; nothing runs without your approval.");
+        if runner.is_some() {
+            println!("Tools: ON (agentic) — function calling with read_file/write_file/list_dir/run_shell; every call needs your approval.");
+        } else {
+            println!("Tools: ON — the assistant may propose shell commands; nothing runs without your approval.");
+        }
     }
     if guard.enabled {
         println!(
@@ -313,22 +329,83 @@ async fn chat_loop(
             continue;
         }
 
-        print!("ai> ");
-        std::io::stdout().flush().ok();
-        let mut stream = engine.stream_reply(input).await?;
-        let mut full = String::new();
-        while let Some(chunk) = stream.next().await {
-            let piece = chunk?;
-            print!("{piece}");
-            std::io::stdout().flush().ok();
-            full.push_str(&piece);
+        match &runner {
+            Some(runner) => {
+                let defs = runner.defs();
+                let ctx = runner.context();
+                let mut gate = CliGate::new();
+                print!("ai> ");
+                std::io::stdout().flush().ok();
+                match engine
+                    .turn_agentic(input, &defs, &ctx, &mut gate, 8)
+                    .await
+                {
+                    Ok(text) if !text.is_empty() => println!("{text}\n"),
+                    Ok(_) => {}
+                    Err(e) => println!("error: {e}"),
+                }
+            }
+            None => {
+                print!("ai> ");
+                std::io::stdout().flush().ok();
+                let mut stream = engine.stream_reply(input).await?;
+                let mut full = String::new();
+                while let Some(chunk) = stream.next().await {
+                    let piece = chunk?;
+                    print!("{piece}");
+                    std::io::stdout().flush().ok();
+                    full.push_str(&piece);
+                }
+                println!();
+                engine.commit_assistant(full.clone())?;
+                handle_proposals(&mut engine, &full, &tools).await?;
+            }
         }
-        println!();
-        engine.commit_assistant(full.clone())?;
-        handle_proposals(&mut engine, &full, &tools).await?;
     }
 
     Ok(())
+}
+
+/// Interactive approval gate for the agentic loop (ask-always).
+struct CliGate {
+    approve_all: bool,
+}
+
+impl CliGate {
+    fn new() -> Self {
+        Self { approve_all: false }
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::core::engine::ToolGate for CliGate {
+    async fn decide(&mut self, call: &crate::core::ToolCall) -> crate::core::engine::ToolDecision {
+        use crate::core::engine::ToolDecision;
+
+        if self.approve_all {
+            return ToolDecision::ApproveAll;
+        }
+        println!("— proposed tool call —");
+        println!("  tool: {}", call.name);
+        match serde_json::from_str::<serde_json::Value>(&call.arguments) {
+            Ok(v) => println!("  args: {}", serde_json::to_string_pretty(&v).unwrap_or_default()),
+            Err(_) => println!("  args: {}", call.arguments),
+        }
+        let answer = prompt_run_choice().unwrap_or_default();
+        match answer.as_str() {
+            "a" => {
+                self.approve_all = true;
+                ToolDecision::ApproveAll
+            }
+            "y" => ToolDecision::Approve,
+            "q" => ToolDecision::Stop,
+            _ => ToolDecision::Deny,
+        }
+    }
+
+    async fn observe(&mut self, call: &crate::core::ToolCall, output: &str) {
+        println!("[{}] {}", call.name, output.trim_end());
+    }
 }
 
 /// Privacy-guard gate: scan the input and enforce the configured behaviour.

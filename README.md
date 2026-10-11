@@ -48,6 +48,11 @@ enclave chat --provider ollama --model llama3.2
 # Full-screen TUI
 enclave tui
 enclave tui --no-tools   # TUI without shell-proposal prompts
+enclave tui --agent      # agentic tool loop (read/write/edit files, shell)
+enclave tui --effort high  # reasoning effort hint (low|medium|high)
+
+# Attach a file to the first message (image for multimodal models, or text)
+enclave chat --attach ./diagram.png --attach ./notes.md
 
 # Manage sessions
 enclave sessions list
@@ -207,7 +212,13 @@ Slash commands (typed in the message box, executed locally, never sent to the pr
 | `/new` | Create a new session (asks for a name) |
 | `/switch` | Open the session picker overlay (also `Ctrl-S`) |
 | `/clear` | Wipe the current session history |
-| `/model <id>` | Switch model for this run (`/model` alone shows the current one) |
+| `/model` | Open the model picker (type to filter, ↑/↓/PgUp/PgDn select, Enter choose, Esc close) — the choice is saved for next launches |
+| `/model <id>` | Switch model directly (saved for next launches) |
+| `/models` | Alias of `/model` (opens the picker) |
+| `/effort` | Set reasoning effort: `off` · `low` · `medium` · `high` (saved) |
+| `/attach <path>` | Attach an image or text file to your next message |
+| `/detach` | Clear pending attachments |
+| `/credits` | Show OpenRouter credit / usage / limits (also `/usage`) |
 | `/quit` | Exit Enclave |
 
 The TUI renders an opencode-style layout: a header bar, a sessions sidebar
@@ -217,9 +228,45 @@ inline code, code blocks with gutter, lists, quotes), a spinner while
 streaming, and a yellow panel for shell proposals — same ask-always security
 model as the CLI. The sidebar shows ● for the active session and ○ for the
 others. Sessions are named when you create them (an empty name becomes
-`chat`). By default the master key is **not** cached in the OS keychain, so
-macOS does not prompt on every launch (set `use_keychain = true` in
-`config.toml` to re-enable caching).
+`chat`). On launch Enclave **reopens the most recently used session**, so
+past conversations come back; the chosen **model** and **reasoning effort**
+(`/effort`) are saved in `config.toml` and reused next time.
+
+When the terminal is at least **110 columns** an **info panel** appears on the
+right with live details: session name/id, model and provider, a context
+estimate, OpenRouter credits, tools/guard state, the encrypted database size,
+message/session counts, and a **CHANGES** list (`+added −removed` per file).
+
+### Attachments
+
+Use `/attach <path>` (or `--attach <path>` in the CLI) to add a **file** to
+your next message. **Images** (`png`/`jpg`/`gif`/`webp`) are sent to the model
+as multimodal content — use a vision model (e.g. `openai/gpt-4o`,
+`anthropic/claude-3-5-sonnet`, `google/gemini-*`, or a local `ollama` model
+such as `llava`). **Text files** (`.txt`/`.md`/`.json`/`.csv`/code…) are
+inlined into the prompt, so they are also scanned by the privacy guard.
+Attachments are stored **encrypted** inside the SQLCipher database (images as
+base64) and never leave the machine unencrypted; images are capped at 8 MB.
+`/detach` clears pending attachments.
+
+With `--agent` the assistant uses the built-in tools (`read_file`,
+`write_file`, `edit_file`, `list_dir`, `run_shell`) through real function
+calling. Every call is shown in a yellow panel titled *"tool call — nothing
+runs without your approval"* and waits for your `y`/`n`/`a`/`q`. File edits
+are rendered inline in the transcript as **diffs** (green `+added`, red
+`−removed` lines) and are summarised in the info panel's CHANGES list.
+
+A **privacy bar** above the footer always shows live information:
+the encrypted database size on disk, the number of sessions and messages,
+the cipher, and whether the privacy guard is active. For OpenRouter the
+header additionally shows account info (credits used, remaining, limits).
+API keys are read from `ENCLAVE_<PROVIDER>_API_KEY` / `<PROVIDER>_API_KEY`
+or the local `keys.toml` (mode `0600`) — the OS keychain is only a fallback,
+so macOS does not prompt on every launch. By default the master password is
+asked only the first time: the derived key is cached in the local `keys.toml`
+(`use_keychain = true`, mode `0600`), so later launches skip it with **no**
+OS-keychain dialog. Set `use_keychain = false` to require the password on every
+launch.
 
 ## Useful commands
 

@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::core::attachment::Attachment;
+
 /// Role of a chat message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -57,6 +59,9 @@ pub struct Message {
     /// For `Role::Tool` messages: the id of the call this result answers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    /// Files attached to this message (images or text).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<Attachment>,
 }
 
 impl Message {
@@ -66,6 +71,7 @@ impl Message {
             content: content.into(),
             tool_calls: Vec::new(),
             tool_call_id: None,
+            attachments: Vec::new(),
         }
     }
 
@@ -75,6 +81,19 @@ impl Message {
 
     pub fn user(content: impl Into<String>) -> Self {
         Self::new(Role::User, content)
+    }
+
+    /// A user message carrying file attachments.
+    pub fn user_with_attachments(content: impl Into<String>, attachments: Vec<Attachment>) -> Self {
+        let mut m = Self::new(Role::User, content);
+        m.attachments = attachments;
+        m
+    }
+
+    /// Attach files to any message (builder style).
+    pub fn with_attachments(mut self, attachments: Vec<Attachment>) -> Self {
+        self.attachments = attachments;
+        self
     }
 
     pub fn assistant(content: impl Into<String>) -> Self {

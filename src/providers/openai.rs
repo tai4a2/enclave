@@ -34,12 +34,20 @@ impl Provider for OpenAIProvider {
         "gpt-4o-mini"
     }
 
-    async fn chat_stream(&self, messages: Vec<Message>, model: &str) -> Result<ChunkStream> {
-        let body = serde_json::json!({
+    async fn chat_stream(
+        &self,
+        messages: Vec<Message>,
+        model: &str,
+        effort: Option<&str>,
+    ) -> Result<ChunkStream> {
+        let mut body = serde_json::json!({
             "model": model,
             "messages": serde_json::to_value(&messages)?,
             "stream": true,
         });
+        if let Some(e) = effort {
+            body["reasoning_effort"] = serde_json::json!(e);
+        }
 
         let response = self
             .client
@@ -93,14 +101,18 @@ impl Provider for OpenAIProvider {
         messages: Vec<Message>,
         model: &str,
         tools: &[ToolDef],
+        effort: Option<&str>,
     ) -> Result<ToolResponse> {
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "model": model,
             "messages": openai_compat::wire_messages(&messages),
             "stream": false,
             "tools": openai_compat::tools_json(tools),
             "tool_choice": "auto",
         });
+        if let Some(e) = effort {
+            body["reasoning_effort"] = serde_json::json!(e);
+        }
 
         let response = self
             .client

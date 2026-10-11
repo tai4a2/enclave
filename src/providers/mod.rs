@@ -17,7 +17,7 @@ pub mod openrouter;
 pub use anthropic::AnthropicProvider;
 pub use ollama::OllamaProvider;
 pub use openai::OpenAIProvider;
-pub use openrouter::{OpenRouterModel, OpenRouterProvider};
+pub use openrouter::{OpenRouterAccount, OpenRouterModel, OpenRouterProvider};
 
 /// A stream of text chunks produced by a provider.
 pub type ChunkStream = Pin<Box<dyn Stream<Item = Result<String>> + Send>>;
@@ -59,7 +59,15 @@ pub trait Provider: Send + Sync {
     fn default_model(&self) -> &'static str;
 
     /// Start a streaming chat completion.
-    async fn chat_stream(&self, messages: Vec<Message>, model: &str) -> Result<ChunkStream>;
+    ///
+    /// `effort` is an optional reasoning effort hint (`low`/`medium`/`high`);
+    /// providers that support it include it in the request, others ignore it.
+    async fn chat_stream(
+        &self,
+        messages: Vec<Message>,
+        model: &str,
+        effort: Option<&str>,
+    ) -> Result<ChunkStream>;
 
     /// Non-streaming turn with function-calling support.
     ///
@@ -70,18 +78,19 @@ pub trait Provider: Send + Sync {
         messages: Vec<Message>,
         model: &str,
         tools: &[ToolDef],
+        effort: Option<&str>,
     ) -> Result<ToolResponse> {
         let _ = tools;
         Ok(ToolResponse {
-            text: self.chat(messages, model).await?,
+            text: self.chat(messages, model, effort).await?,
             tool_calls: Vec::new(),
         })
     }
 
     /// Convenience: collect a full (non-streaming) completion.
-    async fn chat(&self, messages: Vec<Message>, model: &str) -> Result<String> {
+    async fn chat(&self, messages: Vec<Message>, model: &str, effort: Option<&str>) -> Result<String> {
         use futures::StreamExt;
-        let mut stream = self.chat_stream(messages, model).await?;
+        let mut stream = self.chat_stream(messages, model, effort).await?;
         let mut out = String::new();
         while let Some(chunk) = stream.next().await {
             out.push_str(&chunk?);
@@ -109,6 +118,22 @@ pub fn default_model_for(name: &str) -> Option<&'static str> {
         "ollama" => "llama3.1",
         _ => return None,
     })
+}
+
+/// Static, offline model suggestions for providers without a public catalogue.
+///
+/// OpenRouter returns an empty list here: its catalogue is fetched live.
+pub fn suggested_models(name: &str) -> Vec<&'static str> {
+    match name {
+        "openai" => vec!["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini", "gpt-4.1", "o4-mini"],
+        "anthropic" => vec![
+            "claude-3-5-sonnet-latest",
+            "claude-3-5-haiku-latest",
+            "claude-3-opus-latest",
+        ],
+        "ollama" => vec!["llama3.1", "llama3.2", "qwen2.5", "mistral", "phi4", "deepseek-r1"],
+        _ => Vec::new(),
+    }
 }
 
 /// Build a provider from its registry name.
@@ -167,7 +192,12 @@ impl Provider for MockProvider {
         "mock-1"
     }
 
-    async fn chat_stream(&self, _messages: Vec<Message>, _model: &str) -> Result<ChunkStream> {
+    async fn chat_stream(
+        &self,
+        _messages: Vec<Message>,
+        _model: &str,
+        _effort: Option<&str>,
+    ) -> Result<ChunkStream> {
         let text = match self.steps.lock().unwrap().pop_front() {
             Some(MockStep::Text(t)) => t,
             Some(MockStep::ToolCalls(_, t)) => t,
@@ -182,6 +212,7 @@ impl Provider for MockProvider {
         _messages: Vec<Message>,
         _model: &str,
         _tools: &[ToolDef],
+        _effort: Option<&str>,
     ) -> Result<ToolResponse> {
         let step = self.steps.lock().unwrap().pop_front();
         Ok(match step {

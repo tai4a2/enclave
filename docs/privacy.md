@@ -38,10 +38,14 @@ lives only in your shell environment, not on disk.
 
 - Derived with **PBKDF2-HMAC-SHA256, 600,000 iterations**, random 32-byte salt (`~/.config/enclave/salt.bin`)
 - Held in a `MasterKey` type that is **zeroized on drop**
-- Optionally cached in the keychain for convenience (`derive_key(..., use_keychain = true)`)
+- With `use_keychain = true` (default) the derived key is cached in the local
+  credentials file (`keys.toml`, mode `0600`): the master password is asked only
+  the first time, then later launches skip it with no OS-keychain dialog. With
+  `use_keychain = false` the key is re-derived from the password on every launch
+  and never stored.
 - `wipe` deletes database, salt and cached keys
 
-Trade-off: lose the password (and the keychain cache) → the history is unrecoverable. That is by design.
+Trade-off: lose the password (and the cached key) → the history is unrecoverable. That is by design.
 
 ## 4. What is NOT encrypted
 
@@ -71,6 +75,16 @@ consistent while the original text never leaves the encrypted database.
 Note: the scan is deterministic (regex + Luhn), not an AI model; sophisticated
 identifiers (e.g. free-text names without structure) are out of scope.
 Remote providers still receive whatever you explicitly approved.
+
+### Attachments
+
+Files added with `/attach` (or `--attach`) are stored **encrypted** in the same
+SQLCipher database — image bytes as base64 inside the message metadata, text
+files as content. **Text attachments are inlined into the prompt and scanned
+by the privacy guard** just like typed text. **Images cannot be scanned** by
+the guard (they are opaque bytes): treat them as you would a photo you are
+about to upload to a cloud provider, and prefer a local `ollama` vision model
+for anything sensitive. Images are capped at 8 MB each.
 
 ## 5. Telemetry
 

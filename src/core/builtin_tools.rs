@@ -11,6 +11,7 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 
+use crate::core::diff;
 use crate::core::engine::ToolGate;
 use crate::core::message::ToolCall;
 use crate::core::tools as shell;
@@ -38,6 +39,21 @@ pub struct ToolContext {
     pub delegate: Option<DelegateFn>,
 }
 
+/// Summary of a file modification, for the UI.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileChange {
+    pub path: String,
+    pub added: usize,
+    pub removed: usize,
+}
+
+/// Structured tool result: rendered text plus an optional file change.
+#[derive(Debug, Clone)]
+pub struct ToolOutcome {
+    pub text: String,
+    pub change: Option<FileChange>,
+}
+
 /// The built-in tool set. `with_delegate` adds the multi-agent tool.
 pub fn defs(with_delegate: bool) -> Vec<ToolDef> {
     let mut tools = vec![
@@ -62,6 +78,19 @@ pub fn defs(with_delegate: bool) -> Vec<ToolDef> {
                     "content": {"type": "string"}
                 },
                 "required": ["path", "content"]
+            }),
+        ),
+        ToolDef::new(
+            "edit_file",
+            "Replace an exact string in a text file inside the workspace (fails if not found or ambiguous).",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "old_string": {"type": "string", "description": "exact text to replace"},
+                    "new_string": {"type": "string", "description": "replacement text"}
+                },
+                "required": ["path", "old_string", "new_string"]
             }),
         ),
         ToolDef::new(
@@ -147,12 +176,13 @@ fn cap(data: &[u8], max: usize) -> (String, bool) {
     }
 }
 
-/// Execute one tool call. Unknown tools are reported, not guessed.
-pub async fn execute(
+/// Execute one tool call, returning rendered text and any file change.
+/// Unknown tools are reported, not guessed.
+pub async fn execute_detailed(
     call: &ToolCall,
     ctx: &ToolContext,
     gate: &mut dyn ToolGate,
-) -> Result<String> {
+) -> Result<ToolOutcome> {
     let args: serde_json::Value =
         serde_json::from_str(&call.arguments).unwrap_or_else(|_| serde_json::json!({}));
     let arg_str = |key: &str| args[key].as_str().unwrap_or_default().to_string();
@@ -162,20 +192,86 @@ pub async fn execute(
             let path = resolve_in_workspace(&ctx.workspace, &arg_str("path"))?;
             let data = std::fs::read(&path)?;
             let (text, truncated) = cap(&data, ctx.max_output_bytes);
-            Ok(if truncated {
+            let text = if truncated {
                 format!("{text}\n[truncated at {} bytes]", ctx.max_output_bytes)
             } else {
                 text
-            })
+            };
+            Ok(ToolOutcome { text, change: None })
         }
         "write_file" => {
             let path = resolve_in_workspace(&ctx.workspace, &arg_str("path"))?;
             let content = arg_str("content");
+            let old = std::fs::read_to_string(&path).unwrap_or_default();
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
             std::fs::write(&path, &content)?;
-            Ok(format!("wrote {} bytes to {}", content.len(), path.display()))
+            let d = diff::lines(&old, &content);
+            let (added, removed) = diff::stats(&d);
+            let body = diff::render(&d, 400);
+            let text = if old.is_empty() {
+                format!("created {} (+{} lines)\n{}", path.display(), added, body)
+            } else {
+                format!(
+                    "wrote {} bytes to {} (+{} \u{2212}{})\n{}",
+                    content.len(),
+                    path.display(),
+                    added,
+                    removed,
+                    body
+                )
+            };
+            Ok(ToolOutcome {
+                text,
+                change: Some(FileChange {
+                    path: path.display().to_string(),
+                    added,
+                    removed,
+                }),
+            })
+        }
+        "edit_file" => {
+            let path = resolve_in_workspace(&ctx.workspace, &arg_str("path"))?;
+            let old_string = arg_str("old_string");
+            let new_string = arg_str("new_string");
+            if old_string.is_empty() {
+                return Err(EnclaveError::other("old_string must not be empty"));
+            }
+            let old = std::fs::read_to_string(&path)
+                .map_err(|e| EnclaveError::other(format!("cannot read {}: {e}", path.display())))?;
+            let count = old.matches(&old_string).count();
+            if count == 0 {
+                return Err(EnclaveError::other(format!(
+                    "old_string not found in {}",
+                    path.display()
+                )));
+            }
+            if count > 1 {
+                return Err(EnclaveError::other(format!(
+                    "old_string is ambiguous ({count} matches) in {}",
+                    path.display()
+                )));
+            }
+            let new = old.replacen(&old_string, &new_string, 1);
+            std::fs::write(&path, &new)?;
+            let d = diff::lines(&old, &new);
+            let (added, removed) = diff::stats(&d);
+            let text = format!(
+                "edited {} (+{} \u{2212}{})\n{}",
+                path.display(),
+                added,
+                removed,
+                diff::render(&d, 400)
+            );
+            Ok(ToolOutcome {
+                text,
+                change: Some(FileChange {
+                    path: path.display().to_string(),
+                    added,
+                    removed,
+                }),
+            })
         }
         "list_dir" => {
             let raw = arg_str("path");
@@ -196,26 +292,42 @@ pub async fn execute(
                 })
                 .collect();
             entries.sort();
-            Ok(if entries.is_empty() {
+            let text = if entries.is_empty() {
                 "(empty directory)".to_string()
             } else {
                 entries.join("\n")
-            })
+            };
+            Ok(ToolOutcome { text, change: None })
         }
         "run_shell" => {
             let command = arg_str("command");
             let timeout = std::time::Duration::from_secs(ctx.shell_timeout_secs.max(1));
             let out = shell::run(&command, timeout, ctx.max_output_bytes).await?;
-            Ok(out.render())
+            Ok(ToolOutcome {
+                text: out.render(),
+                change: None,
+            })
         }
         "delegate" => match &ctx.delegate {
-            Some(delegate) => delegate(&arg_str("agent"), &arg_str("task"), gate).await,
+            Some(delegate) => {
+                let text = delegate(&arg_str("agent"), &arg_str("task"), gate).await?;
+                Ok(ToolOutcome { text, change: None })
+            }
             None => Err(EnclaveError::other(
                 "delegation not available (no personas configured)",
             )),
         },
         other => Err(EnclaveError::other(format!("unknown tool '{other}'"))),
     }
+}
+
+/// Execute one tool call, returning only the rendered text.
+pub async fn execute(
+    call: &ToolCall,
+    ctx: &ToolContext,
+    gate: &mut dyn ToolGate,
+) -> Result<String> {
+    Ok(execute_detailed(call, ctx, gate).await?.text)
 }
 
 #[cfg(test)]
@@ -246,10 +358,77 @@ mod tests {
     #[test]
     fn defs_shape_and_delegate_flag() {
         let base = defs(false);
-        assert_eq!(base.len(), 4);
+        assert_eq!(base.len(), 5);
         assert!(base.iter().all(|d| !d.name.is_empty()));
+        assert!(base.iter().any(|d| d.name == "edit_file"));
         let with = defs(true);
-        assert_eq!(with.len(), 5);
-        assert_eq!(with[4].name, "delegate");
+        assert_eq!(with.len(), 6);
+        assert_eq!(with[5].name, "delegate");
+    }
+
+    fn ctx_at(ws: &Path) -> ToolContext {
+        ToolContext {
+            workspace: ws.to_path_buf(),
+            shell_timeout_secs: 5,
+            max_output_bytes: 8192,
+            delegate: None,
+        }
+    }
+
+    struct AllowAll;
+    #[async_trait::async_trait]
+    impl ToolGate for AllowAll {
+        async fn decide(&mut self, _call: &ToolCall) -> crate::core::engine::ToolDecision {
+            crate::core::engine::ToolDecision::Approve
+        }
+        async fn observe(&mut self, _call: &ToolCall, _output: &str) {}
+    }
+
+    #[tokio::test]
+    async fn edit_file_replaces_once_and_reports_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a.txt");
+        std::fs::write(&file, "hello world").unwrap();
+        let call = ToolCall {
+            id: "1".into(),
+            name: "edit_file".into(),
+            arguments: serde_json::json!({
+                "path": "a.txt",
+                "old_string": "world",
+                "new_string": "enclave"
+            })
+            .to_string(),
+        };
+        let out = execute_detailed(&call, &ctx_at(dir.path()), &mut AllowAll)
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "hello enclave");
+        let change = out.change.expect("expected a file change");
+        assert!(change.added >= 1 && change.removed >= 1);
+        assert!(out.text.contains("edited"));
+    }
+
+    #[tokio::test]
+    async fn edit_file_rejects_missing_and_ambiguous_old_string() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "x x").unwrap();
+        let missing = ToolCall {
+            id: "1".into(),
+            name: "edit_file".into(),
+            arguments: serde_json::json!({"path":"a.txt","old_string":"zzz","new_string":"y"})
+                .to_string(),
+        };
+        assert!(execute_detailed(&missing, &ctx_at(dir.path()), &mut AllowAll)
+            .await
+            .is_err());
+        let ambiguous = ToolCall {
+            id: "2".into(),
+            name: "edit_file".into(),
+            arguments: serde_json::json!({"path":"a.txt","old_string":"x","new_string":"y"})
+                .to_string(),
+        };
+        assert!(execute_detailed(&ambiguous, &ctx_at(dir.path()), &mut AllowAll)
+            .await
+            .is_err());
     }
 }

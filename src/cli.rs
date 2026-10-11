@@ -8,6 +8,7 @@ use crate::config::{Paths, Settings};
 use crate::core::engine::ChatEngine;
 use crate::core::session::Session;
 use crate::error::{EnclaveError, Result};
+use crate::privacy::vault::MasterKey;
 use crate::privacy::{EncryptedMemory, SecureCredentials, Vault};
 use crate::providers::known_providers;
 
@@ -42,6 +43,13 @@ pub enum Command {
         /// Agentic mode: real function calling with the built-in tool set.
         #[arg(long)]
         agent: bool,
+        /// Reasoning effort hint for providers that support it: low|medium|high.
+        #[arg(long)]
+        effort: Option<String>,
+        /// Attach a file to the first message (repeatable). Images go to
+        /// multimodal models; text files are inlined and guard-scanned.
+        #[arg(long = "attach", value_name = "PATH")]
+        attach: Vec<String>,
     },
     /// Launch the full-screen terminal UI.
     Tui {
@@ -59,6 +67,13 @@ pub enum Command {
         /// Send messages without the privacy-guard scan (not recommended).
         #[arg(long)]
         no_guard: bool,
+        /// Use the agentic tool loop (read/write/edit files, shell) instead of
+        /// text proposals.
+        #[arg(long)]
+        agent: bool,
+        /// Reasoning effort hint for providers that support it: low|medium|high.
+        #[arg(long)]
+        effort: Option<String>,
     },
     /// Manage API keys in the OS keychain.
     Keys {
@@ -103,6 +118,9 @@ pub enum KeysAction {
         provider: String,
         #[arg(short, long)]
         key: Option<String>,
+        /// Store in the OS keychain instead of the local keys.toml file.
+        #[arg(long)]
+        keychain: bool,
     },
     /// Check whether an API key is present.
     Get { provider: String },
@@ -116,6 +134,11 @@ pub enum KeysAction {
 pub enum SessionsAction {
     /// List stored sessions.
     List,
+    /// Show the stored messages of a session (defaults to the most recent).
+    Show {
+        /// Session id (omit for the most recent session that has messages).
+        id: Option<String>,
+    },
     /// Rename a session.
     Rename { id: String, name: String },
     /// Export a session to an encrypted file.
@@ -143,7 +166,12 @@ pub enum SessionsAction {
 pub fn run(cli: Cli) -> Result<()> {
     let paths = Paths::resolve()?;
     paths.ensure_dirs()?;
-    let settings = Settings::load(&paths.config_file)?;
+    let mut settings = Settings::load(&paths.config_file)?;
+    // Convenience override without editing config.toml.
+    if let Ok(v) = std::env::var("ENCLAVE_USE_KEYCHAIN") {
+        let v = v.trim().to_ascii_lowercase();
+        settings.use_keychain = matches!(v.as_str(), "1" | "true" | "yes" | "on");
+    }
 
     match cli.command {
         Command::Keys { action } => keys_cmd(action),
@@ -172,6 +200,8 @@ pub fn run(cli: Cli) -> Result<()> {
             no_tools,
             no_guard,
             agent,
+            effort,
+            attach,
         } => {
             let engine = build_engine(
                 &paths,
@@ -180,6 +210,7 @@ pub fn run(cli: Cli) -> Result<()> {
                 model,
                 session,
                 no_keychain,
+                effort,
             )?;
             let tools = settings.effective_tools(no_tools);
             let guard = settings.effective_guard(no_guard);
@@ -190,9 +221,16 @@ pub fn run(cli: Cli) -> Result<()> {
             } else {
                 None
             };
+            let mut attachments = Vec::new();
+            for path in &attach {
+                match crate::core::Attachment::from_file(std::path::Path::new(path)) {
+                    Ok(a) => attachments.push(a),
+                    Err(e) => eprintln!("attach failed: {e}"),
+                }
+            }
             let runtime = tokio::runtime::Runtime::new()
                 .map_err(|e| EnclaveError::other(e.to_string()))?;
-            runtime.block_on(chat_loop(engine, tools, guard, runner))
+            runtime.block_on(chat_loop(engine, tools, guard, runner, attachments))
         }
         Command::Tui {
             model,
@@ -201,6 +239,8 @@ pub fn run(cli: Cli) -> Result<()> {
             no_keychain,
             no_tools,
             no_guard,
+            agent,
+            effort,
         } => {
             let engine = build_engine(
                 &paths,
@@ -209,14 +249,33 @@ pub fn run(cli: Cli) -> Result<()> {
                 model,
                 session,
                 no_keychain,
+                effort,
             )?;
             let tools = settings.effective_tools(no_tools);
             let guard = settings.effective_guard(no_guard);
             let runtime = tokio::runtime::Runtime::new()
                 .map_err(|e| EnclaveError::other(e.to_string()))?;
-            runtime.block_on(crate::tui::run(engine, tools, guard))
+            runtime.block_on(crate::tui::run(engine, tools, guard, agent))
         }
     }
+}
+
+/// Obtain the master key, asking for the password only when needed.
+///
+/// With `use_keychain = true` (default) the derived key is cached in the local
+/// credentials file (`keys.toml`, mode 0600) after the first unlock, so the
+/// password is only required once and **no** OS-keychain dialog is shown. With
+/// `use_keychain = false` the password is always required and nothing is stored.
+fn unlock_master_key(vault: &Vault, settings: &Settings, no_keychain: bool) -> Result<MasterKey> {
+    let use_keychain = settings.use_keychain && !no_keychain;
+    if use_keychain {
+        if let Some(key) = vault.try_cached_key() {
+            return Ok(key);
+        }
+    }
+    let password = rpassword::prompt_password("Master password: ")
+        .map_err(|e| EnclaveError::other(e.to_string()))?;
+    vault.derive_key(&password, use_keychain)
 }
 
 fn build_engine(
@@ -226,30 +285,51 @@ fn build_engine(
     model: Option<String>,
     session_id: Option<String>,
     no_keychain: bool,
+    effort: Option<String>,
 ) -> Result<ChatEngine> {
     let provider_name = provider_name.unwrap_or_else(|| settings.default_provider.clone());
 
-    let password = rpassword::prompt_password("Master password: ")
-        .map_err(|e| EnclaveError::other(e.to_string()))?;
     let vault = Vault::new(&paths.config_dir);
-    let key = vault.derive_key(&password, settings.use_keychain && !no_keychain)?;
+    let key = unlock_master_key(&vault, settings, no_keychain)?;
 
     let memory = EncryptedMemory::open(&paths.db_path, &key)?;
     let session = match session_id {
         Some(id) => Session::load(&memory, &id)?,
-        None => Session::create(&memory, "chat")?,
+        // Reopen the most recently used session that actually has messages, so
+        // past conversations come back and empty throwaway sessions are skipped.
+        None => match memory
+            .list_sessions()?
+            .into_iter()
+            .find(|info| info.message_count > 0)
+        {
+            Some(info) => Session::load(&memory, &info.id)?,
+            None => Session::create(&memory, "chat")?,
+        },
     };
+
+    // Honour the saved default model when the provider matches; an explicit
+    // --model always wins, and a different provider falls back to its own
+    // default (the saved model likely belongs to another provider).
+    let model = model.or_else(|| {
+        if provider_name == settings.default_provider {
+            Some(settings.default_model.clone())
+        } else {
+            None
+        }
+    });
 
     // The provider (and therefore the API key in the keychain) is created
     // lazily on the first message — no keychain dialog at startup.
-    ChatEngine::lazy(
+    let mut engine = ChatEngine::lazy(
         &provider_name,
         settings.ollama_base_url.clone(),
         model,
         memory,
         session,
         settings.system_prompt.clone(),
-    )
+    )?;
+    engine.reasoning_effort = effort.or_else(|| settings.reasoning_effort.clone());
+    Ok(engine)
 }
 
 /// Session-scoped privacy-guard decision (never persisted).
@@ -267,6 +347,7 @@ async fn chat_loop(
     tools: crate::config::ToolsSettings,
     guard: crate::config::GuardSettings,
     runner: Option<std::sync::Arc<crate::core::AgentRunner>>,
+    mut attachments: Vec<crate::core::Attachment>,
 ) -> Result<()> {
     use futures::StreamExt;
 
@@ -332,7 +413,14 @@ async fn chat_loop(
                 print!("ai> ");
                 std::io::stdout().flush().ok();
                 match engine
-                    .turn_agentic(input, &defs, &ctx, &mut gate, 8)
+                    .turn_agentic_with(
+                        input,
+                        std::mem::take(&mut attachments),
+                        &defs,
+                        &ctx,
+                        &mut gate,
+                        8,
+                    )
                     .await
                 {
                     Ok(text) if !text.is_empty() => println!("{text}\n"),
@@ -343,7 +431,9 @@ async fn chat_loop(
             None => {
                 print!("ai> ");
                 std::io::stdout().flush().ok();
-                let mut stream = engine.stream_reply(input).await?;
+                let mut stream = engine
+                    .stream_reply_with(input, std::mem::take(&mut attachments))
+                    .await?;
                 let mut full = String::new();
                 while let Some(chunk) = stream.next().await {
                     let piece = chunk?;
@@ -564,36 +654,65 @@ fn prompt_run_choice() -> Result<String> {
 
 fn keys_cmd(action: KeysAction) -> Result<()> {
     match action {
-        KeysAction::Set { provider, key } => {
+        KeysAction::Set {
+            provider,
+            key,
+            keychain,
+        } => {
             let key = match key {
                 Some(k) => k,
                 None => rpassword::prompt_password(format!("API key for {provider}: "))
                     .map_err(|e| EnclaveError::other(e.to_string()))?,
             };
-            SecureCredentials::store(&provider, key.trim())?;
-            println!("stored API key for '{provider}' in the OS keychain");
+            if keychain {
+                SecureCredentials::store(&provider, key.trim())?;
+                println!("stored API key for '{provider}' in the OS keychain");
+            } else {
+                SecureCredentials::store_file(&provider, key.trim())?;
+                let path = SecureCredentials::keys_path()?;
+                println!(
+                    "stored API key for '{provider}' in {} (mode 0600, no keychain prompts)",
+                    path.display()
+                );
+            }
             Ok(())
         }
         KeysAction::Get { provider } => {
-            if let Some(var) = SecureCredentials::env_var_name(&provider) {
-                println!("key for '{provider}' provided by environment variable {var}");
+            if let Some(source) = SecureCredentials::source(&provider) {
+                let preview = SecureCredentials::local_api_key(&provider)
+                    .map(|k| k.chars().take(8).collect::<String>())
+                    .unwrap_or_default();
+                if preview.is_empty() {
+                    println!("key for '{provider}' provided by {source}");
+                } else {
+                    println!("key for '{provider}' provided by {source} (starts with {preview}…)");
+                }
                 return Ok(());
             }
+            // Not in env/file: fall back to the keychain (may prompt once).
             match SecureCredentials::get(&provider) {
                 Ok(k) => {
                     let preview: String = k.chars().take(8).collect();
-                    println!("key for '{provider}' present (starts with {preview}…)");
+                    if SecureCredentials::store_file(&provider, &k).is_ok() {
+                        println!(
+                            "migrated key for '{provider}' from the OS keychain to keys.toml \
+                             (starts with {preview}…) — no more prompts"
+                        );
+                    } else {
+                        println!("key for '{provider}' present in the OS keychain (starts with {preview}…)");
+                    }
                     Ok(())
                 }
                 Err(_) => {
-                    println!("no key stored for '{provider}'");
+                    println!("no key stored for '{provider}'. Run: enclave keys set {provider}");
                     Ok(())
                 }
             }
         }
         KeysAction::Delete { provider } => {
-            SecureCredentials::delete(&provider)?;
-            println!("deleted key for '{provider}'");
+            SecureCredentials::delete_file(&provider)?;
+            let _ = SecureCredentials::delete(&provider);
+            println!("deleted key for '{provider}' (local file and keychain)");
             Ok(())
         }
         KeysAction::List => {
@@ -603,7 +722,8 @@ fn keys_cmd(action: KeysAction) -> Result<()> {
             } else {
                 println!("configured providers:");
                 for p in configured {
-                    println!("  • {p}");
+                    let src = SecureCredentials::source(&p).unwrap_or_default();
+                    println!("  • {p}  ({src})");
                 }
             }
             Ok(())
@@ -690,10 +810,8 @@ async fn models_cmd(
 fn db_cmd(paths: &Paths, settings: &Settings) -> Result<()> {
     use crate::privacy::EncryptedMemory;
 
-    let password = rpassword::prompt_password("Master password: ")
-        .map_err(|e| EnclaveError::other(e.to_string()))?;
     let vault = Vault::new(&paths.config_dir);
-    let key = vault.derive_key(&password, settings.use_keychain)?;
+    let key = unlock_master_key(&vault, settings, false)?;
     let memory = EncryptedMemory::open(&paths.db_path, &key)?;
     let stats = memory.stats()?;
 
@@ -717,15 +835,20 @@ fn db_cmd(paths: &Paths, settings: &Settings) -> Result<()> {
     println!("  computed     : {}", fmt_size(computed));
     println!("  sessions     : {}", stats.sessions);
     println!("  messages     : {}", stats.messages);
-    println!("  key store    : {}", if settings.use_keychain { "OS keychain" } else { "password only" });
+    println!(
+        "  key store    : {}",
+        if settings.use_keychain {
+            "local keys.toml (0600) — password asked once"
+        } else {
+            "password every launch (nothing stored)"
+        }
+    );
     Ok(())
 }
 
 fn sessions_cmd(paths: &Paths, settings: &Settings, action: SessionsAction) -> Result<()> {
-    let password = rpassword::prompt_password("Master password: ")
-        .map_err(|e| EnclaveError::other(e.to_string()))?;
     let vault = Vault::new(&paths.config_dir);
-    let key = vault.derive_key(&password, settings.use_keychain)?;
+    let key = unlock_master_key(&vault, settings, false)?;
     let memory = EncryptedMemory::open(&paths.db_path, &key)?;
 
     match action {
@@ -736,6 +859,39 @@ fn sessions_cmd(paths: &Paths, settings: &Settings, action: SessionsAction) -> R
             } else {
                 for s in sessions {
                     println!("{}  {}  ({} messages, {})", s.id, s.name, s.message_count, s.updated_at);
+                }
+            }
+            Ok(())
+        }
+        SessionsAction::Show { id } => {
+            let sessions = memory.list_sessions()?;
+            let sid = match id {
+                Some(id) => id,
+                None => sessions
+                    .iter()
+                    .find(|s| s.message_count > 0)
+                    .map(|s| s.id.clone())
+                    .ok_or_else(|| EnclaveError::other("no session has messages yet"))?,
+            };
+            let name = sessions
+                .iter()
+                .find(|s| s.id == sid)
+                .map(|s| s.name.clone())
+                .unwrap_or_else(|| "?".into());
+            let history = memory.get_history(&sid, 100_000)?;
+            println!("session {sid} '{name}' — {} messages", history.len());
+            for (i, m) in history.iter().enumerate() {
+                let role = m.role.as_str();
+                if m.tool_calls.is_empty() {
+                    println!("{:>3}. {role}: {}", i + 1, m.content.trim());
+                } else {
+                    let names: Vec<&str> = m.tool_calls.iter().map(|c| c.name.as_str()).collect();
+                    println!(
+                        "{:>3}. {role}: [tool calls: {}] {}",
+                        i + 1,
+                        names.join(", "),
+                        m.content.trim()
+                    );
                 }
             }
             Ok(())
@@ -849,6 +1005,7 @@ fn wipe_cmd(paths: &Paths, force: bool) -> Result<()> {
         }
     }
 
+    let _ = SecureCredentials::delete_file_store();
     for provider in known_providers() {
         let _ = SecureCredentials::delete(provider);
     }

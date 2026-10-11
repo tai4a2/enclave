@@ -730,6 +730,7 @@ dependencies = [
  "argon2",
  "async-stream",
  "async-trait",
+ "base64 0.22.1",
  "chrono",
  "clap",
  "crossterm 0.28.1",

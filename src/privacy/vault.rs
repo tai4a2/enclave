@@ -1,7 +1,7 @@
 //! Master key management.
 //!
 //! The master key encrypts the SQLCipher database. It is derived from a user
-//! password (PBKDF2) and optionally cached in the OS keychain.
+//! password (PBKDF2) and optionally cached locally (Keys.toml, mode 0600).
 
 use std::path::{Path, PathBuf};
 
@@ -83,10 +83,11 @@ impl Vault {
         }
     }
 
-    /// Derive the master key from `password`, optionally using the keychain cache.
+    /// Derive the master key from `password`, optionally using the local cache.
     ///
-    /// The keychain is a *cache*, not a bypass: the typed password is always
-    /// verified against the derived key before the cached one is accepted.
+    /// The local cache (keys.toml, mode 0600) is a *cache*, not a bypass: the
+    /// typed password is always verified against the derived key before the
+    /// cached one is accepted.
     pub fn derive_key(&self, password: &str, use_keychain: bool) -> Result<MasterKey> {
         if use_keychain {
             if let Some(hex_key) = crate::privacy::keys::SecureCredentials::get_master_key() {
@@ -110,6 +111,17 @@ impl Vault {
         Ok(key)
     }
 
+    /// Return the master key cached locally, if any, **without** asking for the
+    /// password.
+    ///
+    /// This is the "unlock once" path: the derived key is cached in keys.toml
+    /// (mode 0600) so later launches skip the password. Only used when
+    /// `use_keychain = true`.
+    pub fn try_cached_key(&self) -> Option<MasterKey> {
+        let hex_key = crate::privacy::keys::SecureCredentials::get_master_key()?;
+        MasterKey::from_hex(&hex_key).ok()
+    }
+
     /// Verify `password` derives exactly `cached` (constant-time compare).
     pub fn cached_key_matches(&self, password: &str, cached: &MasterKey) -> Result<bool> {
         let salt = self.load_or_create_salt()?;
@@ -117,7 +129,7 @@ impl Vault {
         Ok(crate::privacy::crypto::ct_equal(&derived, cached.expose()))
     }
 
-    /// Remove the cached master key from the keychain.
+    /// Remove the cached master key.
     pub fn forget_cached_key(&self) -> Result<()> {
         crate::privacy::keys::SecureCredentials::delete_master_key()
     }

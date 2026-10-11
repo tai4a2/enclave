@@ -7,6 +7,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use crate::core::attachment::Attachment;
 use crate::core::message::{Message, Role, ToolCall};
 use crate::error::{EnclaveError, Result};
 use crate::privacy::vault::MasterKey;
@@ -18,15 +19,21 @@ struct MessageMeta {
     tool_calls: Vec<ToolCall>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     tool_call_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    attachments: Vec<Attachment>,
 }
 
 fn encode_meta(message: &Message) -> Result<String> {
-    if message.tool_calls.is_empty() && message.tool_call_id.is_none() {
+    if message.tool_calls.is_empty()
+        && message.tool_call_id.is_none()
+        && message.attachments.is_empty()
+    {
         return Ok(String::new());
     }
     let meta = MessageMeta {
         tool_calls: message.tool_calls.clone(),
         tool_call_id: message.tool_call_id.clone(),
+        attachments: message.attachments.clone(),
     };
     serde_json::to_string(&meta).map_err(EnclaveError::from)
 }
@@ -37,6 +44,7 @@ fn decode_meta(role: Role, content: String, meta: &str) -> Message {
         if let Ok(parsed) = serde_json::from_str::<MessageMeta>(meta) {
             message.tool_calls = parsed.tool_calls;
             message.tool_call_id = parsed.tool_call_id;
+            message.attachments = parsed.attachments;
         }
     }
     message
@@ -64,6 +72,14 @@ pub struct DbStats {
 /// Handle to the encrypted SQLCipher database.
 pub struct EncryptedMemory {
     conn: rusqlite::Connection,
+    path: Option<std::path::PathBuf>,
+}
+
+/// Sibling path with a suffix appended (e.g. SQLite `-journal`).
+fn sidecar(path: &Path, suffix: &str) -> std::path::PathBuf {
+    let mut s = path.as_os_str().to_os_string();
+    s.push(suffix);
+    std::path::PathBuf::from(s)
 }
 
 impl EncryptedMemory {
@@ -73,7 +89,9 @@ impl EncryptedMemory {
     pub fn open(db_path: &Path, key: &MasterKey) -> Result<Self> {
         let conn = rusqlite::Connection::open(db_path)?;
         conn.execute_batch(&format!("PRAGMA key = \"x'{}'\";", key.to_hex()))?;
-        Self::configure(conn)
+        let mut mem = Self::configure(conn)?;
+        mem.path = Some(db_path.to_path_buf());
+        Ok(mem)
     }
 
     /// An encrypted in-memory database (sub-agents: nothing touches disk).
@@ -118,7 +136,26 @@ impl EncryptedMemory {
                 "ALTER TABLE messages ADD COLUMN meta TEXT NOT NULL DEFAULT '';",
             )?;
         }
-        Ok(Self { conn })
+        Ok(Self { conn, path: None })
+    }
+
+    /// Path of the on-disk encrypted database, if this is not ephemeral.
+    pub fn db_path(&self) -> Option<&Path> {
+        self.path.as_deref()
+    }
+
+    /// Total size on disk of the encrypted database (+ journal/WAL sidecars).
+    pub fn disk_bytes(&self) -> u64 {
+        let Some(path) = &self.path else {
+            return 0;
+        };
+        let mut total = 0u64;
+        for candidate in [path.clone(), sidecar(path, "-journal"), sidecar(path, "-wal")] {
+            if let Ok(m) = std::fs::metadata(&candidate) {
+                total += m.len();
+            }
+        }
+        total
     }
 
     /// Create a new session and return its id.

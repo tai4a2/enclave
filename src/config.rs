@@ -144,15 +144,22 @@ pub struct Settings {
     pub default_provider: String,
     /// Default model identifier.
     pub default_model: String,
-    /// Whether to cache the derived master key in the OS keychain.
+    /// Whether to cache the derived master key so the password is asked only
+    /// once.
     ///
-    /// Defaults to `false`: the master key is then re-derived from the
-    /// password on every launch (PBKDF2) and never stored. Enabling this
-    /// makes macOS show a keychain permission dialog at startup.
-    #[serde(default)]
+    /// Defaults to `true`: after the first successful unlock the derived key is
+    /// stored in the local credentials file (`keys.toml`, mode 0600), so
+    /// subsequent launches skip the password with **no** OS-keychain dialog.
+    /// Set to `false` to require the master password on every launch (nothing is
+    /// stored).
+    #[serde(default = "default_true")]
     pub use_keychain: bool,
     /// Optional system prompt prepended to every conversation.
     pub system_prompt: Option<String>,
+    /// Optional reasoning effort hint (`low`/`medium`/`high`) sent to
+    /// providers that support it. `None` keeps the model default.
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
     /// Base URL for the local Ollama server.
     pub ollama_base_url: String,
     /// Shell-tool settings.
@@ -164,6 +171,10 @@ pub struct Settings {
     /// Multi-agent settings.
     #[serde(default)]
     pub agent: AgentSettings,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Settings {
@@ -191,8 +202,9 @@ impl Default for Settings {
         Self {
             default_provider: "openrouter".to_string(),
             default_model: "mistralai/mistral-large-4-0".to_string(),
-            use_keychain: false,
+            use_keychain: true,
             system_prompt: None,
+            reasoning_effort: None,
             ollama_base_url: "http://localhost:11434".to_string(),
             tools: ToolsSettings::default(),
             guard: GuardSettings::default(),

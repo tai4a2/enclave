@@ -49,7 +49,36 @@ pub fn wire_messages(messages: &[Message]) -> Vec<serde_json::Value> {
                 wire.push(serde_json::json!({ "role": "user", "content": blocks }));
             }
             Role::User => {
-                wire.push(serde_json::json!({ "role": "user", "content": m.content }));
+                if m.attachments.is_empty() {
+                    wire.push(serde_json::json!({ "role": "user", "content": m.content }));
+                } else {
+                    let mut blocks = Vec::new();
+                    let mut text = m.content.clone();
+                    for a in &m.attachments {
+                        if let Some(body) = a.text_body() {
+                            if !text.is_empty() {
+                                text.push_str("\n\n");
+                            }
+                            text.push_str(&format!("[{}]\n{}", a.name, body));
+                        }
+                    }
+                    if !text.is_empty() {
+                        blocks.push(serde_json::json!({ "type": "text", "text": text }));
+                    }
+                    for a in &m.attachments {
+                        if a.is_image() {
+                            blocks.push(serde_json::json!({
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": a.mime,
+                                    "data": a.data,
+                                },
+                            }));
+                        }
+                    }
+                    wire.push(serde_json::json!({ "role": "user", "content": blocks }));
+                }
                 i += 1;
             }
             Role::Assistant => {
@@ -113,16 +142,18 @@ impl Provider for AnthropicProvider {
         "claude-3-5-sonnet-latest"
     }
 
-    async fn chat_stream(&self, messages: Vec<Message>, model: &str) -> Result<ChunkStream> {
-        let mut system_parts: Vec<String> = Vec::new();
-        let mut wire: Vec<serde_json::Value> = Vec::new();
-        for message in &messages {
-            if message.role == Role::System {
-                system_parts.push(message.content.clone());
-            } else {
-                wire.push(serde_json::to_value(message)?);
-            }
-        }
+    async fn chat_stream(
+        &self,
+        messages: Vec<Message>,
+        model: &str,
+        _effort: Option<&str>,
+    ) -> Result<ChunkStream> {
+        let system_parts: Vec<String> = messages
+            .iter()
+            .filter(|m| m.role == Role::System)
+            .map(|m| m.content.clone())
+            .collect();
+        let wire = wire_messages(&messages);
 
         let mut body = serde_json::json!({
             "model": model,
@@ -186,6 +217,7 @@ impl Provider for AnthropicProvider {
         messages: Vec<Message>,
         model: &str,
         tools: &[ToolDef],
+        _effort: Option<&str>,
     ) -> Result<ToolResponse> {
         let mut system_parts: Vec<String> = Vec::new();
         for message in &messages {
@@ -255,6 +287,25 @@ mod tests {
         assert_eq!(wire[1]["content"][0]["input"]["path"], "f");
         assert_eq!(wire[2]["content"][0]["type"], "tool_result");
         assert_eq!(wire[2]["content"][0]["tool_use_id"], "tu_1");
+    }
+
+    #[test]
+    fn wire_user_with_image_uses_content_blocks() {
+        use crate::core::attachment::{Attachment, AttachmentKind};
+        let img = Attachment {
+            kind: AttachmentKind::Image,
+            name: "a.png".into(),
+            mime: "image/png".into(),
+            data: "QUJD".into(),
+        };
+        let wire = wire_messages(&[Message::user_with_attachments("what is this?", vec![img])]);
+        let blocks = wire[0]["content"].as_array().unwrap();
+        assert_eq!(blocks[0]["type"], "text");
+        assert_eq!(blocks[0]["text"], "what is this?");
+        assert_eq!(blocks[1]["type"], "image");
+        assert_eq!(blocks[1]["source"]["type"], "base64");
+        assert_eq!(blocks[1]["source"]["media_type"], "image/png");
+        assert_eq!(blocks[1]["source"]["data"], "QUJD");
     }
 
     #[test]

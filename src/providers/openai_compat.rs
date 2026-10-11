@@ -6,6 +6,39 @@ use serde_json::{Value, json};
 use crate::core::message::{Message, Role, ToolCall};
 use crate::providers::ToolDef;
 
+/// Concatenate a message body with the text of its text attachments.
+fn text_with_attachments(m: &Message) -> String {
+    let mut text = m.content.clone();
+    for a in &m.attachments {
+        if let Some(body) = a.text_body() {
+            if !text.is_empty() {
+                text.push_str("\n\n");
+            }
+            text.push_str(&format!("[{}]\n{}", a.name, body));
+        }
+    }
+    text
+}
+
+/// OpenAI/OpenRouter `content`: a plain string, or a multimodal array of
+/// `text` / `image_url` parts when the message carries attachments.
+pub fn openai_content(m: &Message) -> Value {
+    if m.attachments.is_empty() {
+        return Value::String(m.content.clone());
+    }
+    let mut parts: Vec<Value> = Vec::new();
+    let text = text_with_attachments(m);
+    if !text.is_empty() {
+        parts.push(json!({ "type": "text", "text": text }));
+    }
+    for a in &m.attachments {
+        if a.is_image() {
+            parts.push(json!({ "type": "image_url", "image_url": { "url": a.data_url() } }));
+        }
+    }
+    Value::Array(parts)
+}
+
 /// Convert history messages to the OpenAI-compatible wire format,
 /// including assistant `tool_calls` and `role: "tool"` results.
 pub fn wire_messages(messages: &[Message]) -> Vec<Value> {
@@ -18,7 +51,7 @@ pub fn wire_messages(messages: &[Message]) -> Vec<Value> {
                 "content": m.content,
             }),
             _ => {
-                let mut v = json!({ "role": m.role.as_str(), "content": m.content });
+                let mut v = json!({ "role": m.role.as_str(), "content": openai_content(m) });
                 if !m.tool_calls.is_empty() {
                     v["tool_calls"] = Value::Array(
                         m.tool_calls
@@ -40,6 +73,7 @@ pub fn wire_messages(messages: &[Message]) -> Vec<Value> {
 }
 
 /// Ollama variant: `tool_calls[].function.arguments` is an object, not a string.
+/// Attachments map to `content` (text files) and `images` (base64 strings).
 pub fn ollama_wire_messages(messages: &[Message]) -> Vec<Value> {
     messages
         .iter()
@@ -47,6 +81,18 @@ pub fn ollama_wire_messages(messages: &[Message]) -> Vec<Value> {
             let mut v = json!({ "role": m.role.as_str(), "content": m.content });
             if m.role == Role::Tool {
                 v["tool_call_id"] = json!(m.tool_call_id.clone().unwrap_or_default());
+            }
+            if !m.attachments.is_empty() {
+                v["content"] = json!(text_with_attachments(m));
+                let images: Vec<Value> = m
+                    .attachments
+                    .iter()
+                    .filter(|a| a.is_image())
+                    .map(|a| json!(a.data))
+                    .collect();
+                if !images.is_empty() {
+                    v["images"] = Value::Array(images);
+                }
             }
             if !m.tool_calls.is_empty() {
                 v["tool_calls"] = Value::Array(
@@ -205,6 +251,44 @@ mod tests {
         });
         let (_, calls) = parse_ollama_response(&value);
         assert_eq!(calls[0].id, "call_0");
-        assert!(calls[0].arguments.contains(r#""path":"x""#) || calls[0].arguments.contains(r#""path": "x""#));
+        assert!(
+            calls[0].arguments.contains(r#""path":"x""#)
+                || calls[0].arguments.contains(r#""path": "x""#)
+        );
+    }
+
+    #[test]
+    fn wire_messages_encodes_attachments() {
+        use crate::core::attachment::{Attachment, AttachmentKind};
+        let img = Attachment {
+            kind: AttachmentKind::Image,
+            name: "a.png".into(),
+            mime: "image/png".into(),
+            data: "QUJD".into(),
+        };
+        let txt = Attachment {
+            kind: AttachmentKind::Text,
+            name: "notes.txt".into(),
+            mime: "text/plain".into(),
+            data: "hello".into(),
+        };
+        let wire = wire_messages(&[Message::user_with_attachments("look", vec![img, txt])]);
+        let parts = wire[0]["content"].as_array().unwrap();
+        assert_eq!(parts[0]["type"], "text");
+        assert!(parts[0]["text"].as_str().unwrap().contains("hello"));
+        assert_eq!(parts[1]["type"], "image_url");
+        assert_eq!(parts[1]["image_url"]["url"], "data:image/png;base64,QUJD");
+
+        // Ollama: text inlined, image as a base64 entry in `images`.
+        let oll = ollama_wire_messages(&[Message::user_with_attachments(
+            "look",
+            vec![Attachment {
+                kind: AttachmentKind::Image,
+                name: "a.png".into(),
+                mime: "image/png".into(),
+                data: "QUJD".into(),
+            }],
+        )]);
+        assert_eq!(oll[0]["images"][0], "QUJD");
     }
 }

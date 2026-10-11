@@ -16,6 +16,7 @@ use std::collections::HashMap;
 
 use regex::Regex;
 
+use crate::core::attachment::AttachmentKind;
 use crate::core::message::Message;
 
 /// Category of a detected sensitive item.
@@ -238,6 +239,12 @@ impl Redactor {
 pub fn redact_messages(messages: &mut [Message], redactor: &mut Redactor, skip_first: bool) {
     for m in messages.iter_mut().skip(usize::from(skip_first)) {
         m.content = redactor.apply(&m.content);
+        // Text attachments travel to the provider too: redact them as well.
+        for a in m.attachments.iter_mut() {
+            if a.kind == AttachmentKind::Text {
+                a.data = redactor.apply(&a.data);
+            }
+        }
     }
 }
 

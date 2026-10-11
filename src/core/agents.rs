@@ -126,7 +126,12 @@ impl AgentRunner {
         })?;
 
         let api_key = if requires_api_key(&persona.provider) {
-            Some(SecureCredentials::resolve_key(&persona.provider)?)
+            Some(SecureCredentials::local_api_key(&persona.provider).ok_or_else(|| {
+                EnclaveError::auth(format!(
+                    "no API key for provider '{}' (agent '{agent}') — run `enclave keys set {}`",
+                    persona.provider, persona.provider
+                ))
+            })?)
         } else {
             None
         };

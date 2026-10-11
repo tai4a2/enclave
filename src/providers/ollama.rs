@@ -34,7 +34,12 @@ impl Provider for OllamaProvider {
         "llama3.1"
     }
 
-    async fn chat_stream(&self, messages: Vec<Message>, model: &str) -> Result<ChunkStream> {
+    async fn chat_stream(
+        &self,
+        messages: Vec<Message>,
+        model: &str,
+        _effort: Option<&str>,
+    ) -> Result<ChunkStream> {
         let body = serde_json::json!({
             "model": model,
             "messages": serde_json::to_value(&messages)?,
@@ -104,6 +109,7 @@ impl Provider for OllamaProvider {
         messages: Vec<Message>,
         model: &str,
         tools: &[ToolDef],
+        _effort: Option<&str>,
     ) -> Result<ToolResponse> {
         let body = serde_json::json!({
             "model": model,

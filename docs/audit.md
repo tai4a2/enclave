@@ -49,6 +49,12 @@ derives exactly the same key (constant-time comparison, `crypto::ct_equal`).
 Wrong password → `auth error: wrong master password`. Regression test in
 `tests/vault.rs`.
 
+Note: with `use_keychain = true`, `unlock_master_key` may skip the prompt
+entirely by reading the cached key (`Vault::try_cached_key`) — this is the
+documented default convenience trade-off (the key is then protected by the OS
+login session, not by a typed password). Password verification still applies
+whenever a password *is* typed.
+
 ### 🟠 F2 — Deleted ciphertext lingered on disk (mitigated)
 
 `DELETE` marks pages free; the encrypted file kept old ciphertext until

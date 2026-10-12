@@ -8,11 +8,36 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use rusqlite::OptionalExtension;
+use sha2::{Digest, Sha256};
 
 use crate::core::attachment::Attachment;
 use crate::core::message::{Message, Role, ToolCall};
 use crate::error::{EnclaveError, Result};
 use crate::privacy::vault::MasterKey;
+
+/// Hex-encoded SHA-256 of `data`.
+fn sha256_hex(data: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    hex::encode(hasher.finalize())
+}
+
+/// Compute one link of the egress hash chain.
+fn egress_hash(
+    prev: &str,
+    ts: &str,
+    provider: &str,
+    model: &str,
+    payload_sha: &str,
+    redactions: &str,
+) -> String {
+    let mut hasher = Sha256::new();
+    for part in [prev, ts, provider, model, payload_sha, redactions] {
+        hasher.update(part.as_bytes());
+        hasher.update(b"\n");
+    }
+    hex::encode(hasher.finalize())
+}
 
 /// Tool-call metadata persisted alongside a message.
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -140,6 +165,22 @@ pub struct Memory {
     pub updated_at: String,
 }
 
+/// One row of the encrypted egress ledger: a tamper-evident record of an
+/// outbound request. It stores only a SHA-256 fingerprint of the payload and a
+/// summary of the guard redactions — never the payload or any secret.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EgressEntry {
+    pub id: i64,
+    pub ts: String,
+    pub session_id: Option<String>,
+    pub provider: String,
+    pub model: String,
+    pub payload_sha: String,
+    pub payload_bytes: i64,
+    pub redactions: String,
+    pub hash: String,
+}
+
 /// Handle to the encrypted SQLCipher database.
 pub struct EncryptedMemory {
     conn: rusqlite::Connection,
@@ -210,6 +251,23 @@ impl EncryptedMemory {
                 updated_at TEXT NOT NULL\
              );\
              CREATE INDEX IF NOT EXISTS idx_memories_updated ON memories(pinned DESC, updated_at DESC);",
+        )?;
+        // Encrypted egress ledger: a tamper-evident hash chain of what left the
+        // machine (fingerprints only — never payloads or secrets).
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS egress (\
+                id INTEGER PRIMARY KEY AUTOINCREMENT, \
+                ts TEXT NOT NULL, \
+                session_id TEXT, \
+                provider TEXT NOT NULL, \
+                model TEXT NOT NULL, \
+                payload_sha TEXT NOT NULL, \
+                payload_bytes INTEGER NOT NULL DEFAULT 0, \
+                redactions TEXT NOT NULL DEFAULT '', \
+                prev_hash TEXT NOT NULL DEFAULT '', \
+                hash TEXT NOT NULL\
+             );\
+             CREATE INDEX IF NOT EXISTS idx_egress_id ON egress(id);",
         )?;
         // Migration: tool-call metadata column (added in 0.2).
         let has_meta: i64 = conn.query_row(
@@ -605,5 +663,126 @@ impl EncryptedMemory {
             .conn
             .query_row("SELECT COUNT(*) FROM memories", [], |r| r.get(0))?;
         Ok(n)
+    }
+
+    // ---- Egress ledger --------------------------------------------------
+
+    /// Append an outbound request to the encrypted, tamper-evident ledger.
+    ///
+    /// Only a SHA-256 fingerprint of `payload` is stored, chained to the
+    /// previous entry's hash. `redactions` is a human summary of the guard
+    /// placeholders (kind counts), never the secret values.
+    pub fn add_egress(
+        &self,
+        session_id: Option<&str>,
+        provider: &str,
+        model: &str,
+        payload: &[u8],
+        redactions: &str,
+    ) -> Result<()> {
+        let payload_sha = sha256_hex(payload);
+        let prev_hash: String = self
+            .conn
+            .query_row(
+                "SELECT hash FROM egress ORDER BY id DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or_default();
+        let ts = chrono::Utc::now().to_rfc3339();
+        let hash = egress_hash(&prev_hash, &ts, provider, model, &payload_sha, redactions);
+        self.conn.execute(
+            "INSERT INTO egress (ts, session_id, provider, model, payload_sha, payload_bytes, redactions, prev_hash, hash) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            rusqlite::params![
+                ts,
+                session_id,
+                provider,
+                model,
+                payload_sha,
+                payload.len() as i64,
+                redactions,
+                prev_hash,
+                hash
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Most recent ledger entries first.
+    pub fn list_egress(&self, limit: usize) -> Result<Vec<EgressEntry>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, ts, session_id, provider, model, payload_sha, payload_bytes, redactions, hash \
+             FROM egress ORDER BY id DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![limit as i64], |r| {
+            Ok(EgressEntry {
+                id: r.get(0)?,
+                ts: r.get(1)?,
+                session_id: r.get(2)?,
+                provider: r.get(3)?,
+                model: r.get(4)?,
+                payload_sha: r.get(5)?,
+                payload_bytes: r.get(6)?,
+                redactions: r.get(7)?,
+                hash: r.get(8)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Number of ledger entries.
+    pub fn egress_count(&self) -> Result<i64> {
+        let n: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM egress", [], |r| r.get(0))?;
+        Ok(n)
+    }
+
+    /// Recompute the whole hash chain. Returns `true` when intact.
+    pub fn verify_egress_chain(&self) -> Result<bool> {
+        let mut stmt = self.conn.prepare(
+            "SELECT ts, provider, model, payload_sha, redactions, prev_hash, hash FROM egress ORDER BY id ASC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+                r.get::<_, String>(5)?,
+                r.get::<_, String>(6)?,
+            ))
+        })?;
+        let mut prev = String::new();
+        for row in rows {
+            let (ts, provider, model, payload_sha, redactions, stored_prev, stored_hash) = row?;
+            if stored_prev != prev {
+                return Ok(false);
+            }
+            let expected = egress_hash(&prev, &ts, &provider, &model, &payload_sha, &redactions);
+            if expected != stored_hash {
+                return Ok(false);
+            }
+            prev = stored_hash;
+        }
+        Ok(true)
+    }
+
+    /// Test-only helper: corrupt the most recent egress row's `redactions`
+    /// without updating its hash, so [`Self::verify_egress_chain`] must fail.
+    #[doc(hidden)]
+    pub fn tamper_last_egress(&self) -> Result<()> {
+        self.conn.execute(
+            "UPDATE egress SET redactions = 'tampered' WHERE id = (SELECT MAX(id) FROM egress)",
+            [],
+        )?;
+        Ok(())
     }
 }

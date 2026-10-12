@@ -119,6 +119,15 @@ pub enum Command {
         #[command(subcommand)]
         action: MemoryAction,
     },
+    /// Show the encrypted egress ledger (what left the machine — fingerprints only).
+    Ledger {
+        /// Verify the tamper-evident hash chain instead of listing entries.
+        #[arg(long)]
+        verify: bool,
+        /// Number of most-recent entries to show.
+        #[arg(short, long, default_value = "20")]
+        limit: usize,
+    },
     /// Show the resolved configuration (no secrets).
     Config,
     /// Securely delete the encrypted database, salt and stored keys.
@@ -227,6 +236,8 @@ pub enum MemoryAction {
 
 /// Entry point invoked by the binary.
 pub fn run(cli: Cli) -> Result<()> {
+    // Best-effort hardening: refuse core dumps so a crash cannot spill secrets.
+    crate::privacy::secure::harden_process();
     let paths = Paths::resolve()?;
     paths.ensure_dirs()?;
     let mut settings = Settings::load(&paths.config_file)?;
@@ -240,6 +251,7 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::Keys { action } => keys_cmd(action),
         Command::Sessions { action } => sessions_cmd(&paths, &settings, action),
         Command::Memory { action } => memory_cmd(&paths, &settings, action),
+        Command::Ledger { verify, limit } => ledger_cmd(&paths, &settings, verify, limit),
         Command::Models {
             search,
             set,
@@ -347,7 +359,58 @@ fn unlock_master_key(vault: &Vault, settings: &Settings, no_keychain: bool) -> R
     }
     let password = rpassword::prompt_password("Master password: ")
         .map_err(|e| EnclaveError::other(e.to_string()))?;
-    vault.derive_key(&password, use_keychain)
+    let kdf = settings
+        .kdf
+        .as_deref()
+        .and_then(crate::privacy::crypto::Kdf::from_name)
+        .unwrap_or(crate::privacy::crypto::Kdf::Argon2id);
+    vault.derive_key_with(&password, use_keychain, kdf)
+}
+
+/// Unlock the master key for the interactive engine, honouring the duress
+/// password: when `ENCLAVE_DURESS_PASSWORD` matches, a decoy vault is opened
+/// instead (plausible deniability). Returns the key and the effective paths.
+fn unlock_for_engine(
+    paths: &Paths,
+    settings: &Settings,
+    no_keychain: bool,
+) -> Result<(MasterKey, Paths)> {
+    let use_keychain = settings.use_keychain && !no_keychain;
+    let duress_on = crate::privacy::vault::duress_configured();
+    let kdf = settings
+        .kdf
+        .as_deref()
+        .and_then(crate::privacy::crypto::Kdf::from_name)
+        .unwrap_or(crate::privacy::crypto::Kdf::Argon2id);
+
+    // Fast path: cached key (only when no duress password is configured, since
+    // duress requires seeing the typed password).
+    if use_keychain && !duress_on {
+        let vault = Vault::new(&paths.config_dir);
+        if let Some(key) = vault.try_cached_key() {
+            return Ok((key, paths.clone()));
+        }
+    }
+
+    let password = rpassword::prompt_password("Master password: ")
+        .map_err(|e| EnclaveError::other(e.to_string()))?;
+
+    if crate::privacy::vault::duress_matches(&password) {
+        // Open a decoy vault in its own directory; never touch the real one.
+        let dir = paths.config_dir.join("decoy");
+        std::fs::create_dir_all(&dir)?;
+        let vault = Vault::new(&dir);
+        let key = vault.derive_key_with(&password, false, kdf)?;
+        let mut decoy = paths.clone();
+        decoy.salt_path = dir.join("salt.bin");
+        decoy.db_path = dir.join("vault.db");
+        decoy.config_dir = dir;
+        return Ok((key, decoy));
+    }
+
+    let vault = Vault::new(&paths.config_dir);
+    let key = vault.derive_key_with(&password, use_keychain, kdf)?;
+    Ok((key, paths.clone()))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -364,10 +427,9 @@ fn build_engine(
 ) -> Result<ChatEngine> {
     let provider_name = provider_name.unwrap_or_else(|| settings.default_provider.clone());
 
-    let vault = Vault::new(&paths.config_dir);
-    let key = unlock_master_key(&vault, settings, no_keychain)?;
+    let (key, effective) = unlock_for_engine(paths, settings, no_keychain)?;
 
-    let memory = EncryptedMemory::open(&paths.db_path, &key)?;
+    let memory = EncryptedMemory::open(&effective.db_path, &key)?;
     let session = match session_id {
         Some(id) => Session::load(&memory, &id)?,
         // Prefer the explicitly remembered working session, then the most
@@ -1101,6 +1163,57 @@ fn memory_cmd(paths: &Paths, settings: &Settings, action: MemoryAction) -> Resul
             println!("deleted {n} memor{}", if n == 1 { "y" } else { "ies" });
         }
     }
+    Ok(())
+}
+
+/// Show or verify the encrypted egress ledger.
+fn ledger_cmd(paths: &Paths, settings: &Settings, verify: bool, limit: usize) -> Result<()> {
+    let vault = Vault::new(&paths.config_dir);
+    let key = unlock_master_key(&vault, settings, false)?;
+    let memory = EncryptedMemory::open(&paths.db_path, &key)?;
+
+    if verify {
+        let ok = memory.verify_egress_chain()?;
+        if ok {
+            println!(
+                "egress ledger: chain OK ({} entries, none tampered)",
+                memory.egress_count()?
+            );
+        } else {
+            println!("egress ledger: CHAIN BROKEN — the ledger was modified");
+            std::process::exit(2);
+        }
+        return Ok(());
+    }
+
+    let entries = memory.list_egress(limit)?;
+    if entries.is_empty() {
+        println!("egress ledger is empty (nothing has been sent yet)");
+        return Ok(());
+    }
+    println!(
+        "egress ledger ({} total, showing {} most recent):",
+        memory.egress_count()?,
+        entries.len()
+    );
+    for e in entries {
+        let red = if e.redactions.is_empty() {
+            String::new()
+        } else {
+            format!("  redacted: {}", e.redactions)
+        };
+        println!(
+            "#{:<5} {}  {} · {}  {} bytes  sha {}{}",
+            e.id,
+            e.ts,
+            e.provider,
+            e.model,
+            e.payload_bytes,
+            &e.payload_sha[..12.min(e.payload_sha.len())],
+            red
+        );
+    }
+    println!("\nthe ledger stores fingerprints only — never payloads or secrets");
     Ok(())
 }
 

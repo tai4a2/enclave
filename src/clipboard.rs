@@ -25,3 +25,22 @@ pub fn paste() -> Result<String> {
         .get_text()
         .map_err(|e| EnclaveError::other(format!("clipboard read failed: {e}")))
 }
+
+/// Copy `text`, then clear the clipboard after `ttl_secs` seconds **only if** it
+/// still holds exactly that text (so we never clobber something the user copied
+/// in the meantime). `ttl_secs == 0` disables the timer.
+pub fn copy_with_ttl(text: &str, ttl_secs: u64) -> Result<()> {
+    copy(text)?;
+    if ttl_secs > 0 {
+        let expected = text.to_string();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(ttl_secs));
+            if let Ok(current) = paste() {
+                if current == expected {
+                    let _ = copy("");
+                }
+            }
+        });
+    }
+    Ok(())
+}

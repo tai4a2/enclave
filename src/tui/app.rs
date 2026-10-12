@@ -5,8 +5,8 @@ use std::path::Path;
 use std::time::Duration;
 
 use crossterm::event::{
-    DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyCode, KeyEvent, KeyEventKind,
-    KeyModifiers, MouseButton, MouseEventKind,
+    DisableFocusChange, DisableMouseCapture, EnableFocusChange, EnableMouseCapture, Event,
+    EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -82,8 +82,19 @@ fn set_keybinds(bindings: Keybinds) {
 /// Whether desktop notifications / the terminal bell are enabled (`[tui] notify`).
 static NOTIFY_ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 
+/// Seconds after which an Enclave copy auto-clears the clipboard (`[security]`).
+static CLIPBOARD_TTL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(30);
+
 fn set_notify(enabled: bool) {
     NOTIFY_ENABLED.store(enabled, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn set_clipboard_ttl(secs: u64) {
+    CLIPBOARD_TTL.store(secs, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn clip_ttl() -> u64 {
+    CLIPBOARD_TTL.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Best-effort attention signal: terminal bell plus, on macOS, a desktop
@@ -119,7 +130,7 @@ fn surface() -> Style {
 
 /// Text shown by `/help`.
 const SLASH_HELP: &str =
-    "commands: /help · /new · /switch · /clear · /undo · /redo · /retry · /compact · /find <text> · /search <text> · /model [id] · /effort · /plan · /build · /attach <path> · /detach · /export [md|html|pdf] [path] · /editor · /init · /mcp · /remember <text> · /memory [search <q>|pin <id>] · /forget <id|text> · /checkpoint · /theme [name] · /commands · /credits · /quit   (Ctrl-S picker · Ctrl-R search sessions · Ctrl-Y copy · Ctrl-O editor · Shift+Tab plan/build · @file refs · !shell)";
+    "commands: /help · /new · /switch · /clear · /undo · /redo · /retry · /compact · /find <text> · /search <text> · /model [id] · /effort · /plan · /build · /attach <path> · /detach · /export [md|html|pdf] [path] · /editor · /init · /mcp · /ledger · /remember <text> · /memory [search <q>|pin <id>] · /forget <id|text> · /checkpoint · /theme [name] · /commands · /credits · /panic · /quit   (Ctrl-S picker · Ctrl-R search sessions · Ctrl-Y copy · Ctrl-O editor · Shift+Tab plan/build · @file refs · !shell)";
 
 /// One rendered transcript entry.
 struct ChatLine {
@@ -268,11 +279,17 @@ pub async fn run(
             }
             set_keybinds(Keybinds::from_settings(&settings.tui));
             set_notify(settings.tui.notify);
+            set_clipboard_ttl(settings.security.clipboard_clear_secs);
         }
     }
     enable_raw_mode()?;
     let mut out = stdout();
-    execute!(out, EnterAlternateScreen, EnableMouseCapture)?;
+    execute!(
+        out,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        EnableFocusChange
+    )?;
     let backend = CrosstermBackend::new(out);
     let mut terminal = Terminal::new(backend)?;
 
@@ -282,7 +299,8 @@ pub async fn run(
     let _ = execute!(
         terminal.backend_mut(),
         LeaveAlternateScreen,
-        DisableMouseCapture
+        DisableMouseCapture,
+        DisableFocusChange
     );
     let _ = terminal.show_cursor();
 
@@ -399,8 +417,29 @@ async fn run_app(
         .and_then(|p| crate::config::Settings::load(&p.config_file).ok())
         .and_then(|s| s.tui.theme)
         .unwrap_or_else(|| "default".to_string());
+    // A4: auto-lock + focus handling.
+    let security = crate::config::Paths::resolve()
+        .ok()
+        .and_then(|p| crate::config::Settings::load(&p.config_file).ok())
+        .map(|s| s.security)
+        .unwrap_or_default();
+    let db_path = crate::config::Paths::resolve()
+        .map(|p| p.db_path)
+        .unwrap_or_default();
+    let mut locked = false;
+    let mut lock_input = String::new();
+    let mut last_activity = std::time::Instant::now();
+    let mut unfocused = false;
 
     loop {
+        if !locked
+            && security.auto_lock_secs > 0
+            && matches!(phase, Phase::Idle)
+            && last_activity.elapsed() >= std::time::Duration::from_secs(security.auto_lock_secs)
+        {
+            locked = true;
+            lock_input.clear();
+        }
         if autosave_secs > 0
             && matches!(phase, Phase::Idle)
             && last_autosave.elapsed() >= std::time::Duration::from_secs(autosave_secs)
@@ -463,6 +502,9 @@ async fn run_app(
                 copy.as_ref(),
                 find.as_ref(),
                 search.as_ref(),
+                locked,
+                &lock_input,
+                unfocused,
             )
         })?;
 
@@ -701,6 +743,40 @@ async fn run_app(
             Phase::Idle => {
                 match events.next().await {
                     Some(Ok(Event::Key(key))) => {
+                        last_activity = std::time::Instant::now();
+                        if locked {
+                            if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+                                continue;
+                            }
+                            match (key.code, key.modifiers) {
+                                (KeyCode::Char('c'), KeyModifiers::CONTROL) => return Ok(()),
+                                (KeyCode::Enter, _) => {
+                                    let pw = std::mem::take(&mut lock_input);
+                                    let ok = crate::privacy::Vault::new(&config_dir)
+                                        .derive_key(&pw, false)
+                                        .and_then(|key| {
+                                            crate::privacy::EncryptedMemory::open(&db_path, &key)
+                                                .map(|_| ())
+                                        })
+                                        .is_ok();
+                                    if ok {
+                                        locked = false;
+                                        status = "unlocked".into();
+                                    } else {
+                                        status = "wrong password".into();
+                                    }
+                                    last_activity = std::time::Instant::now();
+                                }
+                                (KeyCode::Backspace, _) => {
+                                    lock_input.pop();
+                                }
+                                (KeyCode::Char(c), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
+                                    lock_input.push(c);
+                                }
+                                _ => {}
+                            }
+                            continue;
+                        }
                         if copy.is_some() {
                             if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
                                 continue;
@@ -1642,6 +1718,41 @@ async fn run_app(
                                             }
                                         }
                                     }
+                                    "ledger" => {
+                                        match engine.memory.verify_egress_chain() {
+                                            Ok(ok) => {
+                                                let n = engine.memory.egress_count().unwrap_or(0);
+                                                let entries =
+                                                    engine.memory.list_egress(20).unwrap_or_default();
+                                                let mut body = format!(
+                                                    "egress ledger · {n} entries · chain {}\n",
+                                                    if ok { "OK" } else { "BROKEN — modified" }
+                                                );
+                                                for e in entries {
+                                                    let sha = e.payload_sha.get(..12).unwrap_or(&e.payload_sha);
+                                                    let red = if e.redactions.is_empty() {
+                                                        String::new()
+                                                    } else {
+                                                        format!("  [{}]", e.redactions)
+                                                    };
+                                                    body.push_str(&format!(
+                                                        "#{} {} {} · sha {}{}\n",
+                                                        e.id, e.provider, e.model, sha, red
+                                                    ));
+                                                }
+                                                body.push_str(
+                                                    "fingerprints only — never payloads or secrets",
+                                                );
+                                                transcript.push(ChatLine {
+                                                    speaker: Speaker::System,
+                                                    text: body,
+                                                });
+                                                status =
+                                                    format!("egress ledger: {n} entries (chain {})", if ok { "OK" } else { "BROKEN" });
+                                            }
+                                            Err(e) => status = format!("error: {e}"),
+                                        }
+                                    }
                                     "remember" => {
                                         let mut words: Vec<String> = Vec::new();
                                         let mut tags: Vec<String> = Vec::new();
@@ -1796,6 +1907,13 @@ async fn run_app(
                                         }
                                         Err(e) => status = format!("error: {e}"),
                                     },
+                                    "panic" => {
+                                        locked = true;
+                                        lock_input.clear();
+                                        transcript.clear();
+                                        scroll = 0;
+                                        status = "panic — locked (enter your master password to resume)".into();
+                                    }
                                     "quit" | "exit" => return Ok(()),
                                     "" => status = "type /help for the command list".into(),
                                     other => {
@@ -1977,6 +2095,12 @@ async fn run_app(
                             }
                             _ => {}
                         }
+                    }
+                    Some(Ok(Event::FocusLost)) => {
+                        unfocused = true;
+                    }
+                    Some(Ok(Event::FocusGained)) => {
+                        unfocused = false;
                     }
                     _ => {}
                 }
@@ -2707,7 +2831,7 @@ fn copy_status(text: &str) -> String {
     if text.is_empty() {
         return "nothing to copy".to_string();
     }
-    match crate::clipboard::copy(text) {
+    match crate::clipboard::copy_with_ttl(text, clip_ttl()) {
         Ok(()) => format!(
             "copied {} line(s), {} chars to the clipboard",
             text.lines().count().max(1),
@@ -2827,8 +2951,9 @@ fn privacy_snapshot(engine: &ChatEngine, guard: &GuardSettings) -> String {
         };
         format!("on({mode})")
     };
+    let egress = engine.memory.egress_count().unwrap_or(0);
     format!(
-        "▮ privacy · encrypted db {size} · {sessions} sessions · {messages} messages · AES-256 (SQLCipher) · guard {guard_label} · telemetry off"
+        "▮ privacy · encrypted db {size} · {sessions} sessions · {messages} messages · egress {egress} · AES-256 (SQLCipher) · guard {guard_label} · telemetry off"
     )
 }
 
@@ -2875,6 +3000,9 @@ fn draw_ui(
     copy: Option<&CopyState>,
     find: Option<&FindState>,
     search: Option<&SessionSearch>,
+    locked: bool,
+    lock_input: &str,
+    unfocused: bool,
 ) {
     let area = f.area();
     // Base background for the whole screen.
@@ -3741,6 +3869,60 @@ fn draw_ui(
             .wrap(Wrap { trim: false });
         f.render_widget(overlay, box_area);
     }
+
+    // A4: lock screen (auto-lock after idle).
+    if locked {
+        f.render_widget(Clear, area);
+        f.render_widget(Block::default().style(Style::default().bg(pal().bg)), area);
+        let w = 46.min(area.width.saturating_sub(2));
+        let box_area = centered_rect(area, w, 6);
+        overlay_bg(f, box_area, pal().accent);
+        let masked = "•".repeat(lock_input.chars().count());
+        let lines = vec![
+            Line::from(Span::styled(
+                "🔒 locked",
+                Style::default()
+                    .fg(pal().accent)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            plain_line(""),
+            Line::from(Span::styled(
+                "  master password",
+                Style::default().fg(pal().dim),
+            )),
+            Line::from(Span::styled(
+                format!("  {masked}"),
+                Style::default().fg(pal().text),
+            )),
+            Line::from(Span::styled(
+                "  Enter to unlock · Ctrl-C to quit",
+                Style::default().fg(pal().dim),
+            )),
+        ];
+        let overlay =
+            Paragraph::new(lines).block(Block::default().padding(Padding::new(2, 1, 0, 0)));
+        f.render_widget(overlay, box_area);
+    }
+
+    // A4: when the window loses focus, obscure everything (drawn last).
+    if unfocused {
+        f.render_widget(Clear, area);
+        f.render_widget(Block::default().style(Style::default().bg(pal().bg)), area);
+        let msg = Rect {
+            x: area.x,
+            y: area.y + area.height / 2,
+            width: area.width,
+            height: 1,
+        };
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "· paused — window not focused ·",
+                Style::default().fg(pal().dim),
+            )))
+            .alignment(Alignment::Center),
+            msg,
+        );
+    }
 }
 
 /// Fill an overlay rectangle with a raised surface colour and a left accent
@@ -3943,6 +4125,7 @@ fn welcome_lines(tools_enabled: bool) -> Vec<Line<'static>> {
         key("/editor", "open the message box in $EDITOR (also Ctrl-O)"),
         key("/init", "generate an AGENTS.md for this project"),
         key("/mcp", "list tools exposed by connected MCP servers"),
+        key("/ledger", "show the encrypted egress ledger (what left the machine)"),
         key("/remember", "save a fact to encrypted memory: /remember text #tag"),
         key("/memory", "list memories (/memory search <q> · /memory pin <id>)"),
         key("/forget", "delete a memory by id or text"),
@@ -3955,6 +4138,7 @@ fn welcome_lines(tools_enabled: bool) -> Vec<Line<'static>> {
         key("/theme", "colour theme: default · nord · gruvbox · solarized · mono"),
         key("/commands", "list your custom .md commands"),
         key("/credits", "show OpenRouter credit / usage / limits"),
+        key("/panic", "lock now: hide the transcript behind the master password"),
         key("/quit", "leave"),
         plain(""),
         Line::from(Span::styled(

@@ -144,3 +144,56 @@ fn search_messages_finds_across_sessions() {
     assert!(memory.search_messages("%", 50).unwrap().is_empty());
     assert!(memory.search_messages("nomatch-xyz", 50).unwrap().is_empty());
 }
+
+#[test]
+fn egress_ledger_records_and_verifies() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("vault.db");
+    let memory = EncryptedMemory::open(&db, &test_key()).unwrap();
+    let sid = memory.create_session("chat").unwrap();
+
+    memory
+        .add_egress(Some(&sid), "openrouter", "model-x", b"hello", "1 EMAIL")
+        .unwrap();
+    memory
+        .add_egress(Some(&sid), "openrouter", "model-x", b"world", "")
+        .unwrap();
+
+    assert_eq!(memory.egress_count().unwrap(), 2);
+    let entries = memory.list_egress(10).unwrap();
+    assert_eq!(entries.len(), 2);
+    // Newest first; fingerprints only (payload sha is hex, never the payload).
+    assert_eq!(entries[0].redactions, "");
+    assert_eq!(entries[1].redactions, "1 EMAIL");
+    assert_eq!(entries[0].payload_bytes, 5);
+    assert!(!entries[0].payload_sha.is_empty());
+    assert_ne!(entries[0].hash, entries[1].hash);
+    assert!(memory.verify_egress_chain().unwrap());
+}
+
+#[test]
+fn egress_chain_detects_tampering() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("vault.db");
+    let memory = EncryptedMemory::open(&db, &test_key()).unwrap();
+    memory
+        .add_egress(None, "ollama", "llama3.1", b"a", "")
+        .unwrap();
+    memory
+        .add_egress(None, "ollama", "llama3.1", b"b", "")
+        .unwrap();
+    assert!(memory.verify_egress_chain().unwrap());
+
+    memory.tamper_last_egress().unwrap();
+    assert!(!memory.verify_egress_chain().unwrap());
+}
+
+#[test]
+fn egress_ledger_is_empty_by_default() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("vault.db");
+    let memory = EncryptedMemory::open(&db, &test_key()).unwrap();
+    assert_eq!(memory.egress_count().unwrap(), 0);
+    assert!(memory.list_egress(10).unwrap().is_empty());
+    assert!(memory.verify_egress_chain().unwrap());
+}

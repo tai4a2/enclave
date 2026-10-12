@@ -11,7 +11,7 @@ use crate::core::builtin_tools::{self, ToolContext};
 use crate::core::message::{Message, ToolCall};
 use crate::core::session::Session;
 use crate::error::{EnclaveError, Result};
-use crate::privacy::guard::{Redactor, redact_messages};
+use crate::privacy::guard::{Redactor, redact_messages, redact_tainted};
 use crate::privacy::keys::SecureCredentials;
 use crate::privacy::memory::EncryptedMemory;
 use crate::providers::{
@@ -157,6 +157,9 @@ pub struct ChatEngine {
     pub mcp: Option<std::sync::Arc<crate::core::mcp::McpRegistry>>,
     /// Persistent memories injected into the system prompt (never `local_only`).
     pub memories: Vec<crate::privacy::Memory>,
+    /// Taint tracking: mark user messages that contain sensitive data and
+    /// re-redact them automatically on later turns.
+    pub taint: bool,
 }
 
 impl ChatEngine {
@@ -185,6 +188,7 @@ impl ChatEngine {
             todos: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             mcp: None,
             memories: Vec::new(),
+            taint: true,
         }
     }
 
@@ -233,6 +237,7 @@ impl ChatEngine {
             todos: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             mcp: None,
             memories: Vec::new(),
+            taint: true,
         })
     }
 
@@ -340,8 +345,33 @@ impl ChatEngine {
         let mut msgs = self.request_messages();
         if let Some(r) = &mut self.redactor {
             redact_messages(&mut msgs, r, skip_system);
+        } else if self.taint && msgs.iter().any(|m| m.tainted) {
+            // Taint tracking: a message that once carried sensitive data is
+            // re-redacted automatically on later turns (no prompt needed).
+            let mut r = Redactor::new();
+            redact_tainted(&mut msgs, &mut r, skip_system);
+            self.redactor = Some(r);
         }
         msgs
+    }
+
+    /// Push a user message, flagging it as tainted when taint tracking is on
+    /// and the content (or a text attachment) contains sensitive data.
+    fn push_user(&mut self, input: &str, attachments: Vec<Attachment>) -> Result<()> {
+        let mut sensitive = crate::privacy::guard::has_sensitive_data(input);
+        if !sensitive {
+            for a in &attachments {
+                if a.kind == crate::core::attachment::AttachmentKind::Text
+                    && crate::privacy::guard::has_sensitive_data(&a.data)
+                {
+                    sensitive = true;
+                    break;
+                }
+            }
+        }
+        let mut m = Message::user_with_attachments(input, attachments);
+        m.tainted = self.taint && sensitive;
+        self.session.push(m, &self.memory)
     }
 
     /// Record an outbound request in the encrypted egress ledger (best-effort:
@@ -388,8 +418,7 @@ impl ChatEngine {
         input: &str,
         attachments: Vec<Attachment>,
     ) -> Result<ChunkStream> {
-        self.session
-            .push(Message::user_with_attachments(input, attachments), &self.memory)?;
+        self.push_user(input, attachments)?;
         let messages = self.outgoing_messages();
         let _ = self.record_egress(&messages);
         let model = self.model.clone();
@@ -432,15 +461,13 @@ impl ChatEngine {
         gate: &mut dyn ToolGate,
         max_iterations: usize,
     ) -> Result<String> {
-        self.session
-            .push(Message::user_with_attachments(input, attachments), &self.memory)?;
+        self.push_user(input, attachments)?;
         let mut approve_all = false;
         let mut seen: HashMap<String, u32> = HashMap::new();
 
         for _ in 0..max_iterations.max(1) {
             let messages = self.outgoing_messages();
             let _ = self.record_egress(&messages);
-        let _ = self.record_egress(&messages);
             let model = self.model.clone();
             let effort = self.reasoning_effort.clone();
             let response = self
@@ -535,8 +562,7 @@ impl ChatEngine {
 
     /// Persist the user's input (with attachments) and prepare an agentic turn.
     pub fn begin_agentic_with(&mut self, input: &str, attachments: Vec<Attachment>) -> Result<()> {
-        self.session
-            .push(Message::user_with_attachments(input, attachments), &self.memory)
+        self.push_user(input, attachments)
     }
 
     /// Ask the provider for the next step. Returns either a final answer or a

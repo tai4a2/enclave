@@ -42,6 +42,16 @@ Tool calls are gated by the `[permissions]` table and the current agent mode
 A denied call is reported back to the model as `[denied by policy]` and never
 executed.
 
+### Command sandbox
+
+On macOS, every approved command runs inside a `sandbox-exec` jail built from
+the `[tools] sandbox` setting: file reads are allowed, writes are limited to the
+workspace plus temporary directories, and network access is blocked in
+`"strict"` mode. Values: `"auto"` (default; strongest available on the
+platform), `"fs"` (file jail), `"strict"` (file jail + no network), `"off"`.
+On other platforms the sandbox is ignored and the command runs normally after
+human approval.
+
 ## Design: proposals, not function calling
 
 The assistant emits fenced ` ```bash ` blocks in its reply. Enclave parses

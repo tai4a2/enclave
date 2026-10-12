@@ -63,6 +63,8 @@ pub struct ToolContext {
     pub todos: Option<std::sync::Arc<std::sync::Mutex<Vec<TodoItem>>>>,
     /// Connected MCP servers, if any (`mcp__server__tool` calls).
     pub mcp: Option<std::sync::Arc<crate::core::mcp::McpRegistry>>,
+    /// OS sandbox applied to `run_shell` commands (macOS only).
+    pub sandbox: Option<crate::core::tools::Sandbox>,
 }
 
 impl Default for ToolContext {
@@ -75,6 +77,7 @@ impl Default for ToolContext {
             ask: None,
             todos: None,
             mcp: None,
+            sandbox: None,
         }
     }
 }
@@ -735,7 +738,7 @@ pub async fn execute_detailed(
         "run_shell" => {
             let command = arg_str("command");
             let timeout = std::time::Duration::from_secs(ctx.shell_timeout_secs.max(1));
-            let out = shell::run(&command, timeout, ctx.max_output_bytes).await?;
+            let out = shell::run_sandboxed(&command, timeout, ctx.max_output_bytes, ctx.sandbox.as_ref()).await?;
             Ok(ToolOutcome {
                 text: out.render(),
                 change: None,

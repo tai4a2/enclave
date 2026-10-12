@@ -18,7 +18,7 @@ impl OpenRouterProvider {
     pub fn new(api_key: String) -> Self {
         let _ = &api_key;
         Self {
-            client: reqwest::Client::new(),
+            client: crate::providers::http::client(),
             api_key,
         }
     }
@@ -42,7 +42,7 @@ impl OpenRouterModel {
     }
 
     pub async fn fetch_all() -> Result<Vec<OpenRouterModel>> {
-        let client = reqwest::Client::new();
+        let client = crate::providers::http::client();
         let value: serde_json::Value = client
             .get("https://openrouter.ai/api/v1/models")
             .send()
@@ -174,7 +174,7 @@ impl OpenRouterAccount {
 /// Fetch account/credit info for `api_key` (best-effort: missing endpoints
 /// degrade to empty fields rather than failing).
 pub async fn fetch_account(api_key: &str) -> Result<OpenRouterAccount> {
-    let client = reqwest::Client::new();
+    let client = crate::providers::http::client();
     let html_headers = |req: reqwest::RequestBuilder| {
         req.header("Authorization", format!("Bearer {api_key}"))
             .header("HTTP-Referer", "https://github.com/enclave")

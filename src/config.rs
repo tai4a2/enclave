@@ -133,6 +133,19 @@ pub struct GuardSettings {
     /// machine verbatim again.
     #[serde(default = "default_true")]
     pub taint: bool,
+    /// Prompt-injection hardening: tool/file output is treated as untrusted
+    /// data (never instructions), a tool call that follows untrusted content
+    /// always needs a fresh approval, and a canary token is used to detect
+    /// attempts to smuggle it out through injected text.
+    #[serde(default = "default_true")]
+    pub injection: bool,
+    /// Local NER heuristics: detect person names, organisations and postal
+    /// addresses next to the regex patterns, entirely offline.
+    #[serde(default = "default_true")]
+    pub ner: bool,
+    /// Local list of sensitive terms to always flag (e.g. a project codename).
+    #[serde(default)]
+    pub entities: Vec<String>,
 }
 
 impl Default for GuardSettings {
@@ -141,8 +154,49 @@ impl Default for GuardSettings {
             enabled: true,
             mode: GuardMode::Ask,
             taint: true,
+            injection: true,
+            ner: true,
+            entities: Vec::new(),
         }
     }
+}
+
+/// Where to route a turn whose content is flagged sensitive by the guard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RoutingMode {
+    /// Send to the configured provider (no change).
+    #[default]
+    Same,
+    /// Route sensitive turns to the local provider (Ollama) automatically.
+    Local,
+}
+
+/// Sensitivity-based routing settings.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct RoutingSettings {
+    /// How to handle turns whose content the guard flags as sensitive.
+    #[serde(default)]
+    pub sensitive: RoutingMode,
+}
+
+/// Network egress settings (proxy, Tor, TLS pinning).
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct NetworkSettings {
+    /// Optional proxy URL applied to every provider request (`http://…`,
+    /// `https://…` or `socks5h://host:port`). `socks5h` resolves DNS through
+    /// the proxy (required by Tor).
+    #[serde(default)]
+    pub proxy: Option<String>,
+    /// When true and no explicit `proxy` is set, route all provider traffic
+    /// through a local Tor SOCKS proxy (`socks5h://127.0.0.1:9050`).
+    #[serde(default)]
+    pub tor: bool,
+    /// Optional TLS pin: the SHA-256 (lowercase hex) of the provider's leaf
+    /// certificate DER. When set, the TLS handshake fails unless the server
+    /// presents exactly this certificate.
+    #[serde(default)]
+    pub tls_pin: Option<String>,
 }
 
 /// Action applied to an outbound message set when the egress policy matches.
@@ -174,6 +228,13 @@ pub struct PolicySettings {
     /// Per-kind rules.
     #[serde(default)]
     pub rules: std::collections::BTreeMap<String, EgressAction>,
+    /// Optional local DLP judge: an Ollama model name. When set, every outbound
+    /// payload is additionally reviewed by that **local** model before sending.
+    #[serde(default)]
+    pub judge: Option<String>,
+    /// Action taken when the local judge flags a payload as sensitive.
+    #[serde(default)]
+    pub judge_action: EgressAction,
 }
 
 /// What the engine may do with a tool call without asking.
@@ -292,11 +353,22 @@ pub struct McpServer {
     pub args: Vec<String>,
     #[serde(default)]
     pub env: std::collections::BTreeMap<String, String>,
+    /// Allowlist of tool names to expose from this server (empty = all).
+    #[serde(default)]
+    pub tools: Vec<String>,
+    /// Names of parent environment variables to pass through to the server.
+    /// The environment is otherwise cleared (only `PATH` is inherited), so
+    /// secrets in the shell environment are never handed to a server by default.
+    #[serde(default)]
+    pub env_allow: Vec<String>,
 }
 
 /// MCP configuration (`[mcp]`). Servers are launched locally over stdio.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct McpSettings {
+    /// Allowlist of server names to connect (empty = all configured servers).
+    #[serde(default)]
+    pub allow: Vec<String>,
     #[serde(default)]
     pub servers: std::collections::BTreeMap<String, McpServer>,
 }
@@ -429,6 +501,15 @@ pub struct Settings {
     /// Id of the session currently in progress (auto-resumed at startup).
     #[serde(default)]
     pub working_session: Option<String>,
+    /// Air-gap mode: refuse to send anything to remote providers (local-only).
+    #[serde(default)]
+    pub air_gap: bool,
+    /// Sensitivity-based routing (route sensitive turns to local Ollama).
+    #[serde(default)]
+    pub routing: RoutingSettings,
+    /// Network egress: proxy, Tor and TLS pinning.
+    #[serde(default)]
+    pub network: NetworkSettings,
 }
 
 fn default_true() -> bool {
@@ -476,6 +557,9 @@ impl Default for Settings {
             memory: MemorySettings::default(),
             security: SecuritySettings::default(),
             working_session: None,
+            air_gap: false,
+            routing: RoutingSettings::default(),
+            network: NetworkSettings::default(),
         }
     }
 }
@@ -517,5 +601,33 @@ mod tests {
         let settings = Settings::default();
         assert_eq!(settings.security.clipboard_clear_secs, 30);
         assert_eq!(settings.security.auto_lock_secs, 0);
+    }
+
+    #[test]
+    fn mcp_hardening_fields_parse() {
+        let toml = r#"
+            allow = ["time"]
+
+            [servers.time]
+            command = "mcp-time"
+            args = ["--stdio"]
+            env_allow = ["TZ"]
+            tools = ["now"]
+            "#;
+        let mcp: McpSettings = toml::from_str(toml).expect("parse");
+        assert_eq!(mcp.allow, vec!["time".to_string()]);
+        let srv = mcp.servers.get("time").expect("server");
+        assert_eq!(srv.command, "mcp-time");
+        assert_eq!(srv.tools, vec!["now".to_string()]);
+        assert_eq!(srv.env_allow, vec!["TZ".to_string()]);
+    }
+
+    #[test]
+    fn settings_parse_without_any_optional_sections() {
+        // A minimal config file (only the required fields) still parses; the
+        // optional sections fall back to their defaults.
+        let settings = Settings::default();
+        assert!(settings.mcp.allow.is_empty());
+        assert!(settings.mcp.servers.is_empty());
     }
 }

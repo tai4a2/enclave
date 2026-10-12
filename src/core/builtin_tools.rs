@@ -251,6 +251,18 @@ pub fn defs(with_delegate: bool) -> Vec<ToolDef> {
                 "required": ["text"]
             }),
         ),
+        ToolDef::new(
+            "rag_search",
+            "Search the user's locally indexed files (encrypted RAG store) and return the most relevant chunks.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "what to look for"},
+                    "limit": {"type": "integer", "description": "max chunks to return (default 5)"}
+                },
+                "required": ["query"]
+            }),
+        ),
     ];
     if with_delegate {
         tools.push(ToolDef::new(
@@ -875,7 +887,7 @@ mod tests {
     #[test]
     fn defs_shape_and_delegate_flag() {
         let base = defs(false);
-        assert_eq!(base.len(), 11);
+        assert_eq!(base.len(), 12);
         assert!(base.iter().all(|d| !d.name.is_empty()));
         assert!(base.iter().any(|d| d.name == "edit_file"));
         assert!(base.iter().any(|d| d.name == "apply_patch"));
@@ -884,9 +896,10 @@ mod tests {
         assert!(base.iter().any(|d| d.name == "todo"));
         assert!(base.iter().any(|d| d.name == "question"));
         assert!(base.iter().any(|d| d.name == "remember"));
+        assert!(base.iter().any(|d| d.name == "rag_search"));
         let with = defs(true);
-        assert_eq!(with.len(), 12);
-        assert_eq!(with[11].name, "delegate");
+        assert_eq!(with.len(), 13);
+        assert_eq!(with[12].name, "delegate");
     }
 
     fn ctx_at(ws: &Path) -> ToolContext {

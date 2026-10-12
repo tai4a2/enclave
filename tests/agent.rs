@@ -255,12 +255,18 @@ async fn tainted_message_is_auto_redacted_on_later_turns() {
     engine.taint = true;
 
     let out = engine.outgoing_messages();
-    assert!(out[0].content.contains("[EMAIL_1]"));
-    assert!(!out[0].content.contains("secret@example.com"));
-    assert_eq!(out[1].content, "and a clean line");
+    assert!(
+        out.iter().any(|m| m.content.contains("[EMAIL_1]")),
+        "the tainted message must be redacted with a stable placeholder"
+    );
+    assert!(
+        !out.iter().any(|m| m.content.contains("secret@example.com")),
+        "the raw email must never leave"
+    );
+    assert!(out.iter().any(|m| m.content == "and a clean line"));
 
     // Redaction stays stable across turns (same persistent redactor).
     let out2 = engine.outgoing_messages();
-    assert!(out2[0].content.contains("[EMAIL_1]"));
-    assert!(!out2[0].content.contains("secret@example.com"));
+    assert!(out2.iter().any(|m| m.content.contains("[EMAIL_1]")));
+    assert!(!out2.iter().any(|m| m.content.contains("secret@example.com")));
 }

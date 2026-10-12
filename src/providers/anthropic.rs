@@ -17,7 +17,7 @@ impl AnthropicProvider {
     pub fn new(api_key: String) -> Self {
         let _ = &api_key;
         Self {
-            client: reqwest::Client::new(),
+            client: crate::providers::http::client(),
             api_key,
         }
     }

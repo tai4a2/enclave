@@ -130,7 +130,7 @@ fn surface() -> Style {
 
 /// Text shown by `/help`.
 const SLASH_HELP: &str =
-    "commands: /help · /new · /switch · /clear · /undo · /redo · /retry · /compact · /find <text> · /search <text> · /model [id] · /effort · /plan · /build · /attach <path> · /detach · /export [md|html|pdf] [path] · /editor · /init · /mcp · /ledger · /remember <text> · /memory [search <q>|pin <id>] · /forget <id|text> · /checkpoint · /theme [name] · /commands · /credits · /panic · /quit   (Ctrl-S picker · Ctrl-R search sessions · Ctrl-Y copy · Ctrl-O editor · Shift+Tab plan/build · @file refs · !shell)";
+    "commands: /help · /new · /switch · /clear · /undo · /redo · /retry · /compact · /find <text> · /search <text> · /model [id] · /effort · /plan · /build · /attach <path> · /detach · /export [md|html|pdf] [path] · /editor · /init · /mcp · /ledger · /rag [index <paths>|search <q>|status|clear] · /airgap [on|off] · /route [on|off] · /remember <text> · /memory [search <q>|pin <id>] · /forget <id|text> · /checkpoint · /theme [name] · /commands · /credits · /panic · /quit   (Ctrl-S picker · Ctrl-R search sessions · Ctrl-Y copy · Ctrl-O editor · Shift+Tab plan/build · @file refs · !shell)";
 
 /// One rendered transcript entry.
 struct ChatLine {
@@ -379,8 +379,11 @@ async fn run_app(
     if engine.mcp.is_none() {
         if let Ok(paths) = crate::config::Paths::resolve() {
             if let Ok(settings) = crate::config::Settings::load(&paths.config_file) {
-                engine.mcp = crate::core::mcp::McpRegistry::connect_all(&settings.mcp)
-                    .map(std::sync::Arc::new);
+                let ws = std::env::current_dir().unwrap_or_default();
+                let mcp_sandbox = crate::core::tools::Sandbox::new(tools_cfg.sandbox, ws);
+                engine.mcp =
+                    crate::core::mcp::McpRegistry::connect_all(&settings.mcp, Some(&mcp_sandbox))
+                        .map(std::sync::Arc::new);
             }
         }
     }
@@ -1752,6 +1755,99 @@ async fn run_app(
                                             }
                                             Err(e) => status = format!("error: {e}"),
                                         }
+                                    }
+                                    "rag" => {
+                                        let mut parts = arg.trim().splitn(2, char::is_whitespace);
+                                        let sub = parts.next().unwrap_or("");
+                                        let rest = parts.next().unwrap_or("").trim();
+                                        match sub {
+                                            "index" => {
+                                                let mut files = Vec::new();
+                                                for p in rest.split_whitespace() {
+                                                    crate::cli::collect_files(
+                                                        std::path::Path::new(p),
+                                                        &mut files,
+                                                        0,
+                                                    );
+                                                }
+                                                let mut total = 0usize;
+                                                for file in &files {
+                                                    let source = file.display().to_string();
+                                                    let Ok(data) = std::fs::read(file) else { continue };
+                                                    let Ok(text) = String::from_utf8(data) else { continue };
+                                                    if text.trim().is_empty() {
+                                                        continue;
+                                                    }
+                                                    engine.memory.clear_rag_source(&source).ok();
+                                                    for (i, chunk) in crate::core::rag::chunk_text(&text, 1200).iter().enumerate() {
+                                                        engine.memory.add_rag_chunk(&source, i as i64, chunk, None).ok();
+                                                        total += 1;
+                                                    }
+                                                }
+                                                let n = engine.memory.rag_count().unwrap_or(0);
+                                                status = format!("indexed {} file(s), {total} chunk(s) — {n} total", files.len());
+                                            }
+                                            "search" => {
+                                                let chunks = engine.memory.all_rag_chunks().unwrap_or_default();
+                                                let readable: Vec<crate::privacy::RagChunk> = chunks
+                                                    .into_iter()
+                                                    .filter(|c| crate::core::rag::is_readable(std::path::Path::new(&c.source)))
+                                                    .collect();
+                                                let hits = crate::core::rag::keyword_search(rest, &readable, 5);
+                                                if hits.is_empty() {
+                                                    status = "no indexed chunks matched".to_string();
+                                                } else {
+                                                    let mut body = format!("rag search · {} hit(s)\n", hits.len());
+                                                    for (i, h) in hits.iter().enumerate() {
+                                                        body.push_str(&format!("\n[{}/{}] {} ({:.2})\n{}\n", i + 1, hits.len(), h.source, h.score, h.text));
+                                                    }
+                                                    transcript.push(ChatLine { speaker: Speaker::System, text: body });
+                                                    status = format!("{} hit(s)", hits.len());
+                                                }
+                                            }
+                                            "status" => {
+                                                let sources = engine.memory.rag_sources().unwrap_or_default();
+                                                if sources.is_empty() {
+                                                    status = "RAG index is empty".to_string();
+                                                } else {
+                                                    let mut body = String::from("rag index\n");
+                                                    for (src, n) in &sources {
+                                                        body.push_str(&format!("{n:>5}  {src}\n"));
+                                                    }
+                                                    transcript.push(ChatLine { speaker: Speaker::System, text: body });
+                                                    status = format!("{} source(s), {} chunk(s)", sources.len(), engine.memory.rag_count().unwrap_or(0));
+                                                }
+                                            }
+                                            "clear" => {
+                                                let n = engine.memory.clear_rag().unwrap_or(0);
+                                                status = format!("cleared {n} chunk(s)");
+                                            }
+                                            _ => status = "usage: /rag index <paths> | /rag search <query> | /rag status | /rag clear".to_string(),
+                                        }
+                                    }
+                                    "airgap" | "air-gap" => {
+                                        engine.air_gap = match arg.trim() {
+                                            "on" | "true" | "1" => true,
+                                            "off" | "false" | "0" => false,
+                                            _ => !engine.air_gap,
+                                        };
+                                        status = if engine.air_gap {
+                                            "air-gap ON — nothing will be sent to remote providers".into()
+                                        } else {
+                                            "air-gap OFF — remote providers allowed".into()
+                                        };
+                                    }
+                                    "route" | "routing" => {
+                                        engine.route_sensitive = match arg.trim() {
+                                            "on" | "true" | "1" | "local" => true,
+                                            "off" | "false" | "0" | "same" => false,
+                                            _ => !engine.route_sensitive,
+                                        };
+                                        status = if engine.route_sensitive {
+                                            "sensitive routing ON — sensitive turns go to local Ollama".into()
+                                        } else {
+                                            "sensitive routing OFF — all turns use the selected provider".into()
+                                        };
                                     }
                                     "remember" => {
                                         let mut words: Vec<String> = Vec::new();
@@ -4132,6 +4228,9 @@ fn welcome_lines(tools_enabled: bool) -> Vec<Line<'static>> {
         key("/init", "generate an AGENTS.md for this project"),
         key("/mcp", "list tools exposed by connected MCP servers"),
         key("/ledger", "show the encrypted egress ledger (what left the machine)"),
+        key("/rag", "local file index: /rag index <paths> · /rag search <q> · /rag status"),
+        key("/airgap", "air-gap mode: refuse to send to remote providers (on|off)"),
+        key("/route", "route sensitive turns to local Ollama (on|off)"),
         key("/remember", "save a fact to encrypted memory: /remember text #tag"),
         key("/memory", "list memories (/memory search <q> · /memory pin <id>)"),
         key("/forget", "delete a memory by id or text"),
@@ -4264,6 +4363,20 @@ fn draw_info_panel(
         Span::raw(if tools_enabled { "on" } else { "off" }),
     ]));
     lines.push(Line::from(vec![label("guard"), Span::raw(guard_state.to_string())]));
+    lines.push(Line::from(vec![
+        label("air-gap"),
+        Span::styled(
+            if engine.air_gap { "on (local only)" } else { "off" },
+            Style::default().fg(if engine.air_gap { pal().yellow } else { pal().dim }),
+        ),
+    ]));
+    lines.push(Line::from(vec![
+        label("routing"),
+        Span::styled(
+            if engine.route_sensitive { "sensitive → local" } else { "off" },
+            Style::default().fg(if engine.route_sensitive { pal().green } else { pal().dim }),
+        ),
+    ]));
     lines.push(plain_line(""));
     lines.push(Line::from(Span::styled(
         "STORAGE",

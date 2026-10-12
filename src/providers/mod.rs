@@ -9,6 +9,7 @@ use crate::core::message::Message;
 use crate::error::{EnclaveError, Result};
 
 pub mod anthropic;
+pub mod http;
 pub mod ollama;
 pub mod openai;
 pub mod openai_compat;

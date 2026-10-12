@@ -29,6 +29,14 @@ pub enum FindingKind {
     Card,
     Secret,
     Ip,
+    /// A person name (local heuristic / custom list).
+    Name,
+    /// An organisation name (local heuristic).
+    Organization,
+    /// A postal address (local heuristic).
+    Address,
+    /// A term from the user's local entity list.
+    Custom,
 }
 
 impl FindingKind {
@@ -42,6 +50,10 @@ impl FindingKind {
             FindingKind::Card => "card number",
             FindingKind::Secret => "API secret",
             FindingKind::Ip => "IP address",
+            FindingKind::Name => "name",
+            FindingKind::Organization => "organization",
+            FindingKind::Address => "address",
+            FindingKind::Custom => "custom term",
         }
     }
 
@@ -55,6 +67,10 @@ impl FindingKind {
             FindingKind::Card => "CARD",
             FindingKind::Secret => "SECRET",
             FindingKind::Ip => "IP",
+            FindingKind::Name => "NAME",
+            FindingKind::Organization => "ORG",
+            FindingKind::Address => "ADDRESS",
+            FindingKind::Custom => "CUSTOM",
         }
     }
 }
@@ -158,6 +174,176 @@ fn patterns() -> &'static Vec<Pattern> {
     })
 }
 
+/// Whether the local NER heuristics are enabled (set from `[guard] ner`).
+static NER_ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// User-declared sensitive terms (local only, never sent anywhere).
+static CUSTOM_ENTITIES: std::sync::RwLock<Vec<String>> = std::sync::RwLock::new(Vec::new());
+
+/// Enable/disable the local NER heuristics (names, organisations, addresses).
+pub fn set_ner(on: bool) {
+    NER_ENABLED.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Replace the local entity list (`[guard] entities`). Terms shorter than two
+/// characters are ignored.
+pub fn set_custom_entities(entities: Vec<String>) {
+    if let Ok(mut guard) = CUSTOM_ENTITIES.write() {
+        *guard = entities
+            .into_iter()
+            .filter(|s| s.trim().chars().count() >= 2)
+            .collect();
+    }
+}
+
+fn ner_enabled() -> bool {
+    NER_ENABLED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Common capitalised words that must not be mistaken for a person name.
+const NAME_STOPWORDS: &[&str] = &[
+    "the", "this", "that", "then", "there", "these", "those", "when", "where", "what", "which",
+    "while", "with", "you", "your", "they", "their", "some", "such", "just", "also", "note",
+    "please", "thanks", "here", "now", "let", "use", "make", "sure", "but", "and", "not", "for",
+    "from", "into", "over", "only", "have", "has", "will", "would", "could", "should", "can",
+    "may", "must", "does", "did", "was", "were", "hello", "world", "ciao", "perche", "perché",
+    "quindi", "quando", "dove", "cosa", "come", "anche", "rust", "cargo", "github", "http",
+    "https", "json", "api", "url", "cli", "tui", "sql", "html", "css", "enclave", "ollama",
+    "openrouter", "openai", "anthropic", "python", "javascript", "linux", "macos", "windows",
+    "google", "amazon", "microsoft", "apple", "lunedì", "martedì", "mercoledì", "giovedì",
+    "venerdì", "sabato", "domenica", "gennaio", "febbraio", "marzo", "aprile", "maggio",
+    "giugno", "luglio", "agosto", "settembre", "ottobre", "novembre", "dicembre",
+];
+
+/// True for a proper-noun-shaped word: initial uppercase, rest lowercase, ≥3 chars.
+fn proper_word(w: &str) -> bool {
+    let mut chars = w.chars();
+    match chars.next() {
+        Some(c) if c.is_uppercase() => w.chars().count() >= 3 && chars.all(|c| c.is_lowercase()),
+        _ => false,
+    }
+}
+
+fn scan_organizations(text: &str) -> Vec<Finding> {
+    use std::sync::OnceLock;
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        Regex::new(
+            r"\b[A-Z][\w&.'\-]*(?:\s+[A-Z][\w&.'\-]*){0,4}\s+(?:Inc\.?|Ltd\.?|LLC|Corp\.?|Corporation|GmbH|S\.?p\.?A\.?|S\.?r\.?l\.?|SRL|SPA|Bank|Banca|University|Università|Hospital|Ospedale)\b",
+        )
+        .unwrap()
+    });
+    re.find_iter(text)
+        .map(|m| Finding {
+            kind: FindingKind::Organization,
+            text: m.as_str().to_string(),
+            start: m.start(),
+            end: m.end(),
+        })
+        .collect()
+}
+
+fn scan_addresses(text: &str) -> Vec<Finding> {
+    use std::sync::OnceLock;
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        Regex::new(
+            r"\b(?:Via|Viale|Piazza|Piazzale|Corso|Largo|Vicolo|Strada|Street|Avenue|Ave\.?|Road|Rd\.?)\s+\p{Lu}[\p{L}'\-]*(?:\s+[\p{L}'\-]+){0,4}?\s+\d{1,4}\b",
+        )
+        .unwrap()
+    });
+    re.find_iter(text)
+        .map(|m| Finding {
+            kind: FindingKind::Address,
+            text: m.as_str().to_string(),
+            start: m.start(),
+            end: m.end(),
+        })
+        .collect()
+}
+
+fn scan_names(text: &str) -> Vec<Finding> {
+    let mut tokens: Vec<(&str, usize, usize)> = Vec::new();
+    let mut i = 0;
+    while i < text.len() {
+        let ch = text[i..].chars().next().unwrap();
+        if ch.is_alphabetic() {
+            let start = i;
+            let mut j = i;
+            for c in text[i..].chars() {
+                if c.is_alphabetic() || c == '\'' || c == '-' {
+                    j += c.len_utf8();
+                } else {
+                    break;
+                }
+            }
+            tokens.push((&text[start..j], start, j));
+            i = j;
+        } else {
+            i += ch.len_utf8();
+        }
+    }
+    let mut out = Vec::new();
+    let mut k = 0;
+    while k < tokens.len() {
+        if !proper_word(tokens[k].0) {
+            k += 1;
+            continue;
+        }
+        let mut end = k;
+        while end + 1 < tokens.len() && proper_word(tokens[end + 1].0) && end - k < 2 {
+            end += 1;
+        }
+        let run = &tokens[k..=end];
+        if run.len() >= 2 {
+            let stop = run
+                .iter()
+                .any(|t| NAME_STOPWORDS.contains(&t.0.to_lowercase().as_str()));
+            let at_sentence_start = run[0].1 == 0
+                || text[..run[0].1]
+                    .chars()
+                    .rev()
+                    .find(|c| !c.is_whitespace())
+                    .map(|c| matches!(c, '.' | '!' | '?' | '\n'))
+                    .unwrap_or(true);
+            if !stop && !at_sentence_start {
+                let start = run[0].1;
+                let end_pos = run.last().unwrap().2;
+                out.push(Finding {
+                    kind: FindingKind::Name,
+                    text: text[start..end_pos].to_string(),
+                    start,
+                    end: end_pos,
+                });
+            }
+        }
+        k = end + 1;
+    }
+    out
+}
+
+fn scan_custom(text: &str) -> Vec<Finding> {
+    let entities = match CUSTOM_ENTITIES.read() {
+        Ok(e) => e,
+        Err(_) => return Vec::new(),
+    };
+    let mut out = Vec::new();
+    for e in entities.iter() {
+        let pattern = format!("(?i){}", regex::escape(e));
+        if let Ok(re) = Regex::new(&pattern) {
+            for m in re.find_iter(text) {
+                out.push(Finding {
+                    kind: FindingKind::Custom,
+                    text: m.as_str().to_string(),
+                    start: m.start(),
+                    end: m.end(),
+                });
+            }
+        }
+    }
+    out
+}
+
 /// Scan a text for sensitive data. Findings are returned in order of
 /// appearance, with overlaps removed (first/longest match wins).
 pub fn scan(text: &str) -> Vec<Finding> {
@@ -176,6 +362,12 @@ pub fn scan(text: &str) -> Vec<Finding> {
             });
         }
     }
+    if ner_enabled() {
+        findings.extend(scan_organizations(text));
+        findings.extend(scan_addresses(text));
+        findings.extend(scan_names(text));
+    }
+    findings.extend(scan_custom(text));
     // Remove overlaps: sort by (start, longest first), keep non-overlapping.
     findings.sort_by(|a, b| a.start.cmp(&b.start).then((b.end - b.start).cmp(&(a.end - a.start))));
     let mut kept: Vec<Finding> = Vec::new();
@@ -266,6 +458,14 @@ pub fn redact_messages(messages: &mut [Message], redactor: &mut Redactor, skip_f
 /// Convenience: true when the text contains at least one finding.
 pub fn has_sensitive_data(text: &str) -> bool {
     !scan(text).is_empty()
+}
+
+/// Hex-encoded SHA-256 of `data` (used for egress commitments).
+pub fn sha256_hex(data: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(data);
+    hex::encode(h.finalize())
 }
 
 /// Redact only the messages flagged as tainted (sensitive). Used by taint
@@ -372,5 +572,62 @@ mod tests {
         assert!(msgs[0].content.contains("clean@example.com")); // clean untouched
         assert!(msgs[1].content.contains("[EMAIL_1]"));
         assert!(!msgs[1].content.contains("secret@example.com"));
+    }
+
+    // Serialise tests that mutate the process-wide NER/entities switches.
+    static NER_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn ner_guard() -> std::sync::MutexGuard<'static, ()> {
+        NER_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    #[test]
+    fn ner_detects_organizations_addresses_and_names() {
+        let _guard = ner_guard();
+        set_ner(true);
+        assert!(scan("we met Acme Robotics Inc yesterday")
+            .iter()
+            .any(|f| f.kind == FindingKind::Organization));
+        assert!(scan("I live at Via Roma 42, come visit")
+            .iter()
+            .any(|f| f.kind == FindingKind::Address));
+        assert!(scan("please call Mario Rossi about the contract")
+            .iter()
+            .any(|f| f.kind == FindingKind::Name));
+    }
+
+    #[test]
+    fn ner_ignores_sentence_starts_and_common_words() {
+        let _guard = ner_guard();
+        set_ner(true);
+        assert!(scan("Hello world this is fine")
+            .iter()
+            .all(|f| f.kind != FindingKind::Name));
+        assert!(scan("The quick brown fox jumps")
+            .iter()
+            .all(|f| f.kind != FindingKind::Name));
+    }
+
+    #[test]
+    fn custom_entities_are_flagged() {
+        let _guard = ner_guard();
+        set_custom_entities(vec!["acmecorp".to_string()]);
+        assert!(scan("the acmecorp launch is secret")
+            .iter()
+            .any(|x| x.kind == FindingKind::Custom));
+        set_custom_entities(Vec::new());
+        assert!(scan("the acmecorp launch is secret")
+            .iter()
+            .all(|x| x.kind != FindingKind::Custom));
+    }
+
+    #[test]
+    fn ner_can_be_disabled() {
+        let _guard = ner_guard();
+        set_ner(false);
+        assert!(scan("please call Mario Rossi")
+            .iter()
+            .all(|f| f.kind != FindingKind::Name));
+        set_ner(true);
     }
 }

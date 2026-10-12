@@ -18,7 +18,7 @@ impl OllamaProvider {
     pub fn new(base_url: String) -> Self {
         let _ = &base_url;
         Self {
-            client: reqwest::Client::new(),
+            client: crate::providers::http::client(),
             base_url,
         }
     }

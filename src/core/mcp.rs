@@ -12,6 +12,7 @@ use std::sync::Mutex;
 use serde_json::{json, Value};
 
 use crate::config::{McpServer, McpSettings};
+use crate::core::tools::Sandbox;
 use crate::error::{EnclaveError, Result};
 use crate::providers::ToolDef;
 
@@ -31,12 +32,34 @@ struct Client {
 }
 
 impl Client {
-    fn connect(name: &str, server: &McpServer) -> Result<Client> {
-        let mut cmd = Command::new(&server.command);
-        cmd.args(&server.args)
-            .stdin(Stdio::piped())
+    fn connect(name: &str, server: &McpServer, sandbox: Option<&Sandbox>) -> Result<Client> {
+        // When a sandbox is active, run the server under the same OS sandbox
+        // used for approved shell commands (filesystem jail, optional no-network).
+        let mut cmd = if let Some(sb) = sandbox.filter(|s| s.is_active()) {
+            let mut c = Command::new("sandbox-exec");
+            c.arg("-p").arg(sb.profile()).arg(&server.command);
+            c.args(&server.args);
+            c
+        } else {
+            let mut c = Command::new(&server.command);
+            c.args(&server.args);
+            c
+        };
+        cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
+        // Hardened environment: start empty (never inherit the whole shell
+        // environment), pass only PATH plus explicitly allowed variables and
+        // the server's own `env` map. Secrets are not forwarded by default.
+        cmd.env_clear();
+        if let Some(path) = std::env::var_os("PATH") {
+            cmd.env("PATH", path);
+        }
+        for key in &server.env_allow {
+            if let Some(val) = std::env::var_os(key) {
+                cmd.env(key, val);
+            }
+        }
         for (k, v) in &server.env {
             cmd.env(k, v);
         }
@@ -160,6 +183,16 @@ impl Drop for Client {
     }
 }
 
+/// Whether a configured server is permitted by the `[mcp] allow` allowlist.
+fn server_allowed(allow: &[String], name: &str) -> bool {
+    allow.is_empty() || allow.iter().any(|a| a == name)
+}
+
+/// Whether a server-advertised tool is permitted by its per-server allowlist.
+fn tool_allowed(allow: &[String], name: &str) -> bool {
+    allow.is_empty() || allow.iter().any(|t| t == name)
+}
+
 /// Live MCP server connections plus the tools they advertise.
 pub struct McpRegistry {
     clients: Vec<Mutex<Client>>,
@@ -169,14 +202,18 @@ pub struct McpRegistry {
 impl McpRegistry {
     /// Connect to every configured server, initialise and discover tools.
     /// Returns `None` when no server is configured.
-    pub fn connect_all(settings: &McpSettings) -> Option<McpRegistry> {
+    pub fn connect_all(settings: &McpSettings, sandbox: Option<&Sandbox>) -> Option<McpRegistry> {
         if settings.servers.is_empty() {
             return None;
         }
+        let allowed = |name: &str| server_allowed(&settings.allow, name);
         let mut clients = Vec::new();
         let mut tools = Vec::new();
         for (name, server) in &settings.servers {
-            let mut client = match Client::connect(name, server) {
+            if !allowed(name) {
+                continue;
+            }
+            let mut client = match Client::connect(name, server, sandbox) {
                 Ok(c) => c,
                 Err(e) => {
                     eprintln!("warning: {e}");
@@ -196,6 +233,9 @@ impl McpRegistry {
                             .unwrap_or("")
                             .to_string();
                         if rname.is_empty() {
+                            continue;
+                        }
+                        if !tool_allowed(&server.tools, &rname) {
                             continue;
                         }
                         let desc = t
@@ -250,5 +290,25 @@ impl McpRegistry {
             .lock()
             .map_err(|_| EnclaveError::other("mcp client poisoned"))?;
         guard.call_tool(&tool.remote_name, args)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{server_allowed, tool_allowed};
+
+    #[test]
+    fn empty_allowlist_permits_everything() {
+        assert!(server_allowed(&[], "anything"));
+        assert!(tool_allowed(&[], "anything"));
+    }
+
+    #[test]
+    fn non_empty_allowlist_is_a_strict_gate() {
+        let allow = vec!["time".to_string(), "git".to_string()];
+        assert!(server_allowed(&allow, "time"));
+        assert!(!server_allowed(&allow, "filesystem"));
+        assert!(tool_allowed(&allow, "git"));
+        assert!(!tool_allowed(&allow, "rm"));
     }
 }

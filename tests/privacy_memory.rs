@@ -153,10 +153,10 @@ fn egress_ledger_records_and_verifies() {
     let sid = memory.create_session("chat").unwrap();
 
     memory
-        .add_egress(Some(&sid), "openrouter", "model-x", b"hello", "1 EMAIL")
+        .add_egress(Some(&sid), "openrouter", "model-x", b"hello", "1 EMAIL", "abc123")
         .unwrap();
     memory
-        .add_egress(Some(&sid), "openrouter", "model-x", b"world", "")
+        .add_egress(Some(&sid), "openrouter", "model-x", b"world", "", "")
         .unwrap();
 
     assert_eq!(memory.egress_count().unwrap(), 2);
@@ -177,10 +177,10 @@ fn egress_chain_detects_tampering() {
     let db = dir.path().join("vault.db");
     let memory = EncryptedMemory::open(&db, &test_key()).unwrap();
     memory
-        .add_egress(None, "ollama", "llama3.1", b"a", "")
+        .add_egress(None, "ollama", "llama3.1", b"a", "", "")
         .unwrap();
     memory
-        .add_egress(None, "ollama", "llama3.1", b"b", "")
+        .add_egress(None, "ollama", "llama3.1", b"b", "", "")
         .unwrap();
     assert!(memory.verify_egress_chain().unwrap());
 

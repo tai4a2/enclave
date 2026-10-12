@@ -56,6 +56,9 @@ pub enum Command {
         /// Plan mode: read-only, mutating tools are refused.
         #[arg(long)]
         plan: bool,
+        /// Air-gap: refuse to send anything to a remote provider (local only).
+        #[arg(long)]
+        air_gap: bool,
     },
     /// Launch the full-screen terminal UI.
     Tui {
@@ -86,6 +89,9 @@ pub enum Command {
         /// Plan mode: read-only, mutating tools are refused.
         #[arg(long)]
         plan: bool,
+        /// Air-gap: refuse to send anything to a remote provider (local only).
+        #[arg(long)]
+        air_gap: bool,
     },
     /// Manage API keys in the OS keychain.
     Keys {
@@ -127,6 +133,14 @@ pub enum Command {
         /// Number of most-recent entries to show.
         #[arg(short, long, default_value = "20")]
         limit: usize,
+        /// Show the proof-of-redaction commitment for a ledger entry id.
+        #[arg(long, value_name = "ID")]
+        proof: Option<i64>,
+    },
+    /// Manage the local encrypted RAG index (index files, search offline).
+    Rag {
+        #[command(subcommand)]
+        action: RagAction,
     },
     /// Show the resolved configuration (no secrets).
     Config,
@@ -234,6 +248,33 @@ pub enum MemoryAction {
     },
 }
 
+/// `enclave rag` sub-commands.
+#[derive(Debug, clap::Subcommand)]
+pub enum RagAction {
+    /// Index files or directories into the encrypted local store.
+    Index {
+        /// Files or directories to index (recursed for directories).
+        #[arg(required = true)]
+        paths: Vec<String>,
+        /// Re-create the index for these sources instead of appending.
+        #[arg(long)]
+        replace: bool,
+    },
+    /// Offline search across the indexed chunks.
+    Search {
+        query: String,
+        #[arg(short, long, default_value = "5")]
+        limit: usize,
+    },
+    /// Show what is currently indexed.
+    Status,
+    /// Delete the whole local index.
+    Clear {
+        #[arg(long)]
+        force: bool,
+    },
+}
+
 /// Entry point invoked by the binary.
 pub fn run(cli: Cli) -> Result<()> {
     // Best-effort hardening: refuse core dumps so a crash cannot spill secrets.
@@ -246,12 +287,20 @@ pub fn run(cli: Cli) -> Result<()> {
         let v = v.trim().to_ascii_lowercase();
         settings.use_keychain = matches!(v.as_str(), "1" | "true" | "yes" | "on");
     }
+    // Apply network settings (proxy/Tor/TLS pinning) to every provider client.
+    crate::providers::http::set_network(settings.network.clone());
+    // Apply local guard heuristics + custom entity list.
+    crate::privacy::guard::set_ner(settings.guard.enabled && settings.guard.ner);
+    crate::privacy::guard::set_custom_entities(settings.guard.entities.clone());
 
     match cli.command {
         Command::Keys { action } => keys_cmd(action),
         Command::Sessions { action } => sessions_cmd(&paths, &settings, action),
         Command::Memory { action } => memory_cmd(&paths, &settings, action),
-        Command::Ledger { verify, limit } => ledger_cmd(&paths, &settings, verify, limit),
+        Command::Ledger { verify, limit, proof } => {
+            ledger_cmd(&paths, &settings, verify, limit, proof)
+        }
+        Command::Rag { action } => rag_cmd(&paths, &settings, action),
         Command::Models {
             search,
             set,
@@ -280,6 +329,7 @@ pub fn run(cli: Cli) -> Result<()> {
             attach,
             auto,
             plan,
+            air_gap,
         } => {
             let mut engine = build_engine(
                 &paths,
@@ -295,6 +345,10 @@ pub fn run(cli: Cli) -> Result<()> {
             let tools = settings.effective_tools(no_tools);
             let guard = settings.effective_guard(no_guard);
             engine.taint = guard.enabled && guard.taint;
+            engine.air_gap = air_gap || settings.air_gap;
+            engine.injection = guard.enabled && guard.injection;
+            engine.arm_canary();
+            engine.route_sensitive = guard.enabled && settings.routing.sensitive == crate::config::RoutingMode::Local;
             let agent_mode = (agent || tools.mode == crate::config::ToolsMode::Agent)
                 && tools.enabled;
             let runner = if agent_mode {
@@ -324,6 +378,7 @@ pub fn run(cli: Cli) -> Result<()> {
             effort,
             auto,
             plan,
+            air_gap,
         } => {
             let mut engine = build_engine(
                 &paths,
@@ -339,6 +394,10 @@ pub fn run(cli: Cli) -> Result<()> {
             let tools = settings.effective_tools(no_tools);
             let guard = settings.effective_guard(no_guard);
             engine.taint = guard.enabled && guard.taint;
+            engine.air_gap = air_gap || settings.air_gap;
+            engine.injection = guard.enabled && guard.injection;
+            engine.arm_canary();
+            engine.route_sensitive = guard.enabled && settings.routing.sensitive == crate::config::RoutingMode::Local;
             let runtime = tokio::runtime::Runtime::new()
                 .map_err(|e| EnclaveError::other(e.to_string()))?;
             runtime.block_on(crate::tui::run(engine, tools, guard, agent))
@@ -491,9 +550,12 @@ fn build_engine(
     if plan {
         engine.mode = crate::core::engine::AgentMode::Plan;
     }
-    engine.mcp = crate::core::mcp::McpRegistry::connect_all(&settings.mcp)
+    let mcp_sandbox = crate::core::tools::Sandbox::new(settings.tools.sandbox, cwd.clone());
+    engine.mcp = crate::core::mcp::McpRegistry::connect_all(&settings.mcp, Some(&mcp_sandbox))
         .map(std::sync::Arc::new);
     engine.policy = crate::privacy::policy::Policy::from_settings(&settings.policy);
+    engine.dlp_judge = settings.policy.judge.clone().filter(|m| !m.trim().is_empty());
+    engine.judge_action = settings.policy.judge_action;
     engine.reload_memories()?;
     persist_working_session(paths, &engine.session.id);
     Ok(engine)
@@ -1183,10 +1245,48 @@ fn memory_cmd(paths: &Paths, settings: &Settings, action: MemoryAction) -> Resul
 }
 
 /// Show or verify the encrypted egress ledger.
-fn ledger_cmd(paths: &Paths, settings: &Settings, verify: bool, limit: usize) -> Result<()> {
+fn ledger_cmd(
+    paths: &Paths,
+    settings: &Settings,
+    verify: bool,
+    limit: usize,
+    proof: Option<i64>,
+) -> Result<()> {
     let vault = Vault::new(&paths.config_dir);
     let key = unlock_master_key(&vault, settings, false)?;
     let memory = EncryptedMemory::open(&paths.db_path, &key)?;
+
+    if let Some(id) = proof {
+        let entries = memory.list_egress(1000)?;
+        let Some(e) = entries.into_iter().find(|e| e.id == id) else {
+            println!("no egress ledger entry #{id}");
+            return Ok(());
+        };
+        println!("proof-of-redaction for egress #{id} ({})", e.ts);
+        println!("  sent to          : {} · {}", e.provider, e.model);
+        println!("  redacted payload : sha256 {}", e.payload_sha);
+        println!(
+            "  original commit  : {}",
+            if e.original_sha.is_empty() {
+                "(nothing was redacted — payload sent as-is)".to_string()
+            } else {
+                format!("sha256 {}", e.original_sha)
+            }
+        );
+        println!(
+            "  redaction map    : {}",
+            if e.redactions.is_empty() {
+                "(none)"
+            } else {
+                &e.redactions
+            }
+        );
+        println!(
+            "\nThe commitment binds what was protected without revealing it: showing the original\n\
+             text later lets anyone recompute sha256 and confirm it matches the commitment above."
+        );
+        return Ok(());
+    }
 
     if verify {
         let ok = memory.verify_egress_chain()?;
@@ -1231,6 +1331,135 @@ fn ledger_cmd(paths: &Paths, settings: &Settings, verify: bool, limit: usize) ->
     }
     println!("\nthe ledger stores fingerprints only — never payloads or secrets");
     Ok(())
+}
+
+fn rag_cmd(paths: &Paths, settings: &Settings, action: RagAction) -> Result<()> {
+    use crate::privacy::EncryptedMemory;
+
+    let vault = Vault::new(&paths.config_dir);
+    let key = unlock_master_key(&vault, settings, false)?;
+    let memory = EncryptedMemory::open(&paths.db_path, &key)?;
+
+    match action {
+        RagAction::Index { paths: inputs, replace } => {
+            let mut files = Vec::new();
+            for input in &inputs {
+                collect_files(std::path::Path::new(input), &mut files, 0);
+            }
+            if files.is_empty() {
+                println!("no indexable text files found");
+                return Ok(());
+            }
+            let mut total = 0usize;
+            for file in &files {
+                let source = file.display().to_string();
+                let data = match std::fs::read(file) {
+                    Ok(d) => d,
+                    Err(_) => continue,
+                };
+                let text = match String::from_utf8(data) {
+                    Ok(t) => t,
+                    Err(_) => continue, // skip binary files
+                };
+                if text.trim().is_empty() {
+                    continue;
+                }
+                if replace {
+                    memory.clear_rag_source(&source)?;
+                }
+                let chunks = crate::core::rag::chunk_text(&text, 1200);
+                for (i, chunk) in chunks.iter().enumerate() {
+                    memory.add_rag_chunk(&source, i as i64, chunk, None)?;
+                    total += 1;
+                }
+                println!("indexed {source} ({} chunk(s))", chunks.len());
+            }
+            println!("\n{} file(s), {} chunk(s) in the index", files.len(), total);
+        }
+        RagAction::Search { query, limit } => {
+            let chunks = memory.all_rag_chunks()?;
+            let readable: Vec<crate::privacy::RagChunk> = chunks
+                .into_iter()
+                .filter(|c| crate::core::rag::is_readable(std::path::Path::new(&c.source)))
+                .collect();
+            let hits = crate::core::rag::keyword_search(&query, &readable, limit);
+            if hits.is_empty() {
+                println!("no indexed chunks matched '{query}'");
+            } else {
+                for (i, h) in hits.iter().enumerate() {
+                    println!(
+                        "\n[{}/{}] {} (score {:.2})\n{}",
+                        i + 1,
+                        hits.len(),
+                        h.source,
+                        h.score,
+                        h.text
+                    );
+                }
+            }
+        }
+        RagAction::Status => {
+            let sources = memory.rag_sources()?;
+            if sources.is_empty() {
+                println!("RAG index is empty (add files with: enclave rag index <paths>)");
+            } else {
+                for (src, n) in &sources {
+                    println!("{n:>5}  {src}");
+                }
+                println!("\n{} source(s), {} chunk(s)", sources.len(), memory.rag_count()?);
+            }
+        }
+        RagAction::Clear { force } => {
+            if !force {
+                print!("delete the entire RAG index? [y/N] ");
+                use std::io::Write;
+                std::io::stdout().flush().ok();
+                let mut answer = String::new();
+                std::io::stdin().read_line(&mut answer).ok();
+                if !matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+                    println!("cancelled");
+                    return Ok(());
+                }
+            }
+            let n = memory.clear_rag()?;
+            println!("deleted {n} chunk(s)");
+        }
+    }
+    Ok(())
+}
+
+/// Collect readable text files under `path` (depth-limited, skipping common
+/// noise directories and oversized files).
+pub(crate) fn collect_files(path: &std::path::Path, out: &mut Vec<std::path::PathBuf>, depth: usize) {
+    if depth > 12 {
+        return;
+    }
+    let meta = match std::fs::metadata(path) {
+        Ok(m) => m,
+        Err(_) => return,
+    };
+    if meta.is_file() {
+        if meta.len() > 1_500_000 {
+            return;
+        }
+        out.push(path.to_path_buf());
+        return;
+    }
+    if !meta.is_dir() {
+        return;
+    }
+    let entries = match std::fs::read_dir(path) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with('.') || matches!(name.as_ref(), "target" | "node_modules" | "dist") {
+            continue;
+        }
+        collect_files(&entry.path(), out, depth + 1);
+    }
 }
 
 fn tags_suffix(tags: &str) -> String {

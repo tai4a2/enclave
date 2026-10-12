@@ -64,16 +64,19 @@ impl AgentRunner {
                 }),
             })
             .collect();
+        let workspace = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let mcp_sandbox =
+            crate::core::tools::Sandbox::new(settings.tools.sandbox, workspace.clone());
         Self {
             personas,
             default_provider: settings.default_provider.clone(),
             ollama_base_url: settings.ollama_base_url.clone(),
-            workspace: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            workspace,
             timeout_secs: settings.tools.timeout_secs,
             max_output_bytes: settings.tools.max_output_bytes,
             mode: settings.tools.mode,
             sandbox: settings.tools.sandbox,
-            mcp: crate::core::mcp::McpRegistry::connect_all(&settings.mcp)
+            mcp: crate::core::mcp::McpRegistry::connect_all(&settings.mcp, Some(&mcp_sandbox))
                 .map(std::sync::Arc::new),
         }
     }

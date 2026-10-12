@@ -110,6 +110,19 @@ like any other text, but they are produced and consumed by third-party code —
 only connect servers you trust, and keep them behind the permission model
 (default `ask`).
 
+Additional hardening applies before a server is ever started:
+
+- **Server allowlist** — `[mcp] allow = [...]`; only the named servers are
+  launched (empty = all configured).
+- **Tool allowlist** — a per-server `tools = [...]` list limits which of the
+  server's tools are exposed to the model.
+- **Cleared environment** — the child process inherits nothing but `PATH` and
+  the variables you list in `env_allow` (plus the server's explicit `env` map),
+  so secrets from your shell are never forwarded to third-party code.
+- **Process isolation** — with `[tools] sandbox` active the server runs under
+  `sandbox-exec` (writes confined to the workspace/temp, network blocked in
+  `strict`).
+
 ### Long-term memory
 
 Memories (`/remember`, the `remember` tool, `/checkpoint`, periodic autosave)
@@ -190,6 +203,104 @@ are exempt. Rules are keyed by the guard's finding kinds (`email`, `phone`,
 `iban`, `tax_id`, `card`, `secret`, `ip`) with a `default` fallback; the
 strictest matching action wins. This turns privacy intent into a verifiable,
 repeatable rule applied by the engine on every request.
+
+### Air-gap
+
+Air-gap mode (`--airgap`, `air_gap = true`, or the `/airgap` toggle) makes the
+engine refuse any request to a remote provider (`ChatEngine::check_air_gap`):
+every send, tool/agentic turn and utility call (`one_shot`, `summarize`,
+`compact`) is blocked with a clear error until you switch to a local provider
+(Ollama). It is the strongest guarantee — even if a policy or guard rule were
+misconfigured, nothing can leave the machine while air-gap is on.
+
+### Prompt-injection hardening
+
+External content — tool outputs, file contents, web text, markdown the model
+produced — is treated as **untrusted data**, never as instructions. When
+`[guard] injection = true` (default):
+
+- The system prompt states that such content must never be obeyed and injects a
+  secret **canary token** (`ChatEngine::arm_canary`). If a reply or a tool result
+  ever contains the canary, `ChatEngine::check_injection` records a security
+  warning in the session and the reply is treated as untrusted.
+- A tool call that immediately follows untrusted output (the last message is a
+  `Tool` result) is **downgraded to `ask`** (`effective_action`), so it always
+  needs a fresh, explicit approval — even under `--auto`.
+
+This blunts "lethal trifecta"-style attacks where text the model reads tries to
+coax it into running commands or exfiltrating data.
+
+### Sensitivity routing
+
+With `[routing] sensitive = "local"` (or the `/route` toggle), each turn is scanned by
+the local guard first. If the outgoing content contains data flagged as sensitive
+(`ChatEngine::has_sensitive`) and the active provider is remote, the turn is
+**automatically routed to the local Ollama provider** (`ChatEngine::route`) for that
+request — nothing sensitive ever reaches the remote endpoint. Non-sensitive turns keep
+using the configured provider. The local provider talks to `ollama_base_url`, so start
+Ollama with the model you want before relying on routing.
+
+### Network (proxy, Tor, TLS pinning)
+
+The `[network]` section shapes every provider connection through a single shared
+HTTP client (`src/providers/http.rs`, applied to all four providers):
+
+* `proxy` — an explicit `http://`, `https://` or `socks5h://host:port` proxy.
+  `socks5h` resolves DNS remotely, so the hostname lookup does not leak.
+* `tor` — when set and no explicit proxy is configured, traffic goes through a
+  local Tor SOCKS proxy (`socks5h://127.0.0.1:9050`). This hides the origin of
+  the connection (it does **not** hide the request contents from the provider).
+* `tls_pin` — the SHA-256 (hex) of the provider's leaf certificate. A custom
+  rustls verifier first performs normal WebPKI validation and then requires the
+  leaf certificate to match the pin, so a compromised CA or MITM cannot
+  impersonate the provider.
+
+### Semantic guard (local NER)
+
+Next to the regex patterns (`src/privacy/guard.rs`) the guard runs a small
+**offline** entity recognizer that catches what regex misses:
+
+* **Names** — runs of proper-noun-shaped words, ignoring sentence starts, common
+  function words and a stop-list of tech/product names.
+* **Organisations** — phrases ending in a legal/org suffix (`Inc`, `Ltd`, `GmbH`,
+  `S.p.A.`, `S.r.l.`, `University`, `Banca`, …).
+* **Addresses** — a street-type word (`Via`, `Piazza`, `Street`, …) followed by a
+  street name and a civic number.
+* **Custom terms** — a local list you declare in `[guard] entities`.
+
+All of this runs locally with no model download and no network: when a kind is
+detected it becomes an ordinary `Finding` (`name`, `org`, `address`, `custom`) and
+flows through the same preview → placeholder / refuse path, and can be gated by the
+egress policy. Disable it with `[guard] ner = false`.
+
+### Local RAG (encrypted file index)
+
+`enclave rag index <paths>` chunks your files and stores the text **encrypted**
+in `vault.db` (a `rag_chunks` table). Retrieval is fully offline: a BM25-style
+keyword ranker scores the stored chunks — no embeddings service, no network.
+A **per-file ACL** is re-checked at query time, so a chunk is returned only if
+its source file is still readable by the current user. Retrieved chunks enter the
+request like any other context and therefore go through the guard, egress policy,
+taint tracking and air-gap. In agentic mode the model can call the `rag_search`
+tool, which is permission-gated and returns at most a few chunks.
+
+### Local DLP judge
+
+Optionally, `[policy] judge` names a **local Ollama model** used as a second-line
+filter: right before a request goes to a *remote* provider, Enclave sends the
+payload text to the local model and asks whether it still looks sensitive, then
+applies `judge_action` (`allow`/`redact`/`block`). The judge call never leaves the
+machine and fails open (an unreachable model does not block you). Local providers
+(Ollama) and air-gap sessions skip it.
+
+### Proof-of-redaction
+
+For every request whose payload was redacted, the encrypted egress ledger stores
+both the SHA-256 of what was actually sent (`payload_sha`) and a commitment —
+SHA-256 — to the original, unredacted text (`original_sha`), alongside the redaction
+map. This lets you later prove exactly what left the machine and that a specific
+original produced it, without storing the original in the clear:
+`enclave ledger --proof <id>`.
 
 ## 5. Telemetry
 

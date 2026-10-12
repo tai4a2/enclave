@@ -187,7 +187,20 @@ pub struct EgressEntry {
     pub payload_sha: String,
     pub payload_bytes: i64,
     pub redactions: String,
+    /// Commitment (SHA-256) to the pre-redaction payload, empty when nothing
+    /// was redacted. Enables later proof-of-redaction.
+    pub original_sha: String,
     pub hash: String,
+}
+
+/// One indexed chunk of the local RAG store.
+#[derive(Debug, Clone)]
+pub struct RagChunk {
+    pub id: i64,
+    pub source: String,
+    pub ord: i64,
+    pub text: String,
+    pub embedding: Option<Vec<f32>>,
 }
 
 /// Handle to the encrypted SQLCipher database.
@@ -278,6 +291,19 @@ impl EncryptedMemory {
              );\
              CREATE INDEX IF NOT EXISTS idx_egress_id ON egress(id);",
         )?;
+        // Encrypted local RAG index (C1): chunks + optional embeddings. Text is
+        // encrypted at rest like everything else in the vault.
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS rag_chunks (\
+                id INTEGER PRIMARY KEY AUTOINCREMENT, \
+                source TEXT NOT NULL, \
+                ord INTEGER NOT NULL, \
+                text TEXT NOT NULL, \
+                embedding BLOB, \
+                created_at TEXT NOT NULL\
+             );\
+             CREATE INDEX IF NOT EXISTS idx_rag_source ON rag_chunks(source);",
+        )?;
         // Migration: tool-call metadata column (added in 0.2).
         let has_meta: i64 = conn.query_row(
             "SELECT COUNT(*) FROM pragma_table_info('messages') WHERE name = 'meta'",
@@ -287,6 +313,17 @@ impl EncryptedMemory {
         if has_meta == 0 {
             conn.execute_batch(
                 "ALTER TABLE messages ADD COLUMN meta TEXT NOT NULL DEFAULT '';",
+            )?;
+        }
+        // Migration (C4): commitment to the pre-redaction payload.
+        let has_orig: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('egress') WHERE name = 'original_sha'",
+            [],
+            |r| r.get(0),
+        )?;
+        if has_orig == 0 {
+            conn.execute_batch(
+                "ALTER TABLE egress ADD COLUMN original_sha TEXT NOT NULL DEFAULT '';",
             )?;
         }
         Ok(Self { conn, path: None })
@@ -688,6 +725,7 @@ impl EncryptedMemory {
         model: &str,
         payload: &[u8],
         redactions: &str,
+        original_sha: &str,
     ) -> Result<()> {
         let payload_sha = sha256_hex(payload);
         let prev_hash: String = self
@@ -702,8 +740,8 @@ impl EncryptedMemory {
         let ts = chrono::Utc::now().to_rfc3339();
         let hash = egress_hash(&prev_hash, &ts, provider, model, &payload_sha, redactions);
         self.conn.execute(
-            "INSERT INTO egress (ts, session_id, provider, model, payload_sha, payload_bytes, redactions, prev_hash, hash) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            "INSERT INTO egress (ts, session_id, provider, model, payload_sha, payload_bytes, redactions, original_sha, prev_hash, hash) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             rusqlite::params![
                 ts,
                 session_id,
@@ -712,6 +750,7 @@ impl EncryptedMemory {
                 payload_sha,
                 payload.len() as i64,
                 redactions,
+                original_sha,
                 prev_hash,
                 hash
             ],
@@ -722,7 +761,7 @@ impl EncryptedMemory {
     /// Most recent ledger entries first.
     pub fn list_egress(&self, limit: usize) -> Result<Vec<EgressEntry>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, ts, session_id, provider, model, payload_sha, payload_bytes, redactions, hash \
+            "SELECT id, ts, session_id, provider, model, payload_sha, payload_bytes, redactions, original_sha, hash \
              FROM egress ORDER BY id DESC LIMIT ?1",
         )?;
         let rows = stmt.query_map(rusqlite::params![limit as i64], |r| {
@@ -735,7 +774,8 @@ impl EncryptedMemory {
                 payload_sha: r.get(5)?,
                 payload_bytes: r.get(6)?,
                 redactions: r.get(7)?,
-                hash: r.get(8)?,
+                original_sha: r.get(8)?,
+                hash: r.get(9)?,
             })
         })?;
         let mut out = Vec::new();
@@ -794,4 +834,101 @@ impl EncryptedMemory {
         )?;
         Ok(())
     }
+
+    /// Store one RAG chunk (encrypted at rest) with an optional embedding.
+    pub fn add_rag_chunk(
+        &self,
+        source: &str,
+        ord: i64,
+        text: &str,
+        embedding: Option<&[f32]>,
+    ) -> Result<i64> {
+        let blob = embedding.map(encode_embedding);
+        let ts = chrono::Utc::now().to_rfc3339();
+        self.conn.execute(
+            "INSERT INTO rag_chunks (source, ord, text, embedding, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![source, ord, text, blob, ts],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Delete every chunk of a given source. Returns rows removed.
+    pub fn clear_rag_source(&self, source: &str) -> Result<usize> {
+        let n = self
+            .conn
+            .execute("DELETE FROM rag_chunks WHERE source = ?1", [source])?;
+        Ok(n)
+    }
+
+    /// Delete the whole RAG index. Returns rows removed.
+    pub fn clear_rag(&self) -> Result<usize> {
+        let n = self.conn.execute("DELETE FROM rag_chunks", [])?;
+        Ok(n)
+    }
+
+    /// Number of indexed chunks.
+    pub fn rag_count(&self) -> Result<i64> {
+        let n: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM rag_chunks", [], |r| r.get(0))?;
+        Ok(n)
+    }
+
+    /// `(source, chunk count)` pairs, ordered by source.
+    pub fn rag_sources(&self) -> Result<Vec<(String, i64)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT source, COUNT(*) FROM rag_chunks GROUP BY source ORDER BY source ASC",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Every chunk in the index (used by the local search).
+    pub fn all_rag_chunks(&self) -> Result<Vec<RagChunk>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, source, ord, text, embedding FROM rag_chunks ORDER BY id ASC")?;
+        let rows = stmt.query_map([], |r| {
+            let blob: Option<Vec<u8>> = r.get(4)?;
+            Ok(RagChunk {
+                id: r.get(0)?,
+                source: r.get(1)?,
+                ord: r.get(2)?,
+                text: r.get(3)?,
+                embedding: blob.map(|b| decode_embedding(&b)),
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+}
+
+fn encode_embedding(values: &[f32]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(values.len() * 4);
+    for v in values {
+        out.extend_from_slice(&v.to_le_bytes());
+    }
+    out
+}
+
+fn decode_embedding(bytes: &[u8]) -> Vec<f32> {
+    let mut out = Vec::with_capacity(bytes.len() / 4);
+    let mut i = 0;
+    while i + 4 <= bytes.len() {
+        out.push(f32::from_le_bytes([
+            bytes[i],
+            bytes[i + 1],
+            bytes[i + 2],
+            bytes[i + 3],
+        ]));
+        i += 4;
+    }
+    out
 }

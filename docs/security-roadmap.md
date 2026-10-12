@@ -92,11 +92,15 @@ Cosa fa: l'opzione offline fa sì che la sessione non usi mai la rete, solo mode
 
 Cosa apporta: garanzia assoluta per i lavori più delicati. Anche in presenza di un bug non può uscire nulla, perché la rete è spenta per quella sessione.
 
+**Stato: implementato.** `enclave tui --airgap` / `enclave chat --airgap` (o `air_gap = true` in `config.toml`, o il toggle `/airgap` nella TUI). Il motore rifiuta ogni invio verso un provider remoto (`ChatEngine::check_air_gap`): copre i turni di chat, il loop agentico e le chiamate di utilità (`one_shot`, `summarize`, `compact`). Con Ollama locale si continua a lavorare normalmente.
+
 ### B5. Hardening contro il prompt injection (Sforzo M)
 
 Cosa fa: tratta output di tool, file e markdown come contenuto non fidato; nessun tool-call originato da contenuto remoto senza una nuova approvazione; canary token per accorgersi di tentativi di esfiltrazione.
 
 Cosa apporta: neutralizza la classe di attacchi più subdola degli agenti AI — istruzioni nascoste dentro documenti o pagine che spingono il modello a fare cose pericolose.
+
+**Stato: implementato.** Con `[guard] injection = true` (default) il system prompt dichiara che tool output, contenuti di file e testo esterno sono dati non fidati e inietta un canary token segreto (`ChatEngine::arm_canary`); se una risposta o un output di tool lo contiene, `ChatEngine::check_injection` registra un avviso di sicurezza nel messaggio e la risposta viene trattata come non fidata. Inoltre un tool-call che segue output non fidato (ultimo messaggio di tipo `Tool`) viene declassato ad `ask` in `effective_action`, quindi richiede sempre una nuova approvazione esplicita anche con `--auto`.
 
 ### B6. Routing per sensibilità (Sforzo M)
 
@@ -104,11 +108,15 @@ Cosa fa: una valutazione locale (regex più riconoscimento entità) instrada aut
 
 Cosa apporta: il dato delicato non esce per default. La scelta di quale modello usare diventa una conseguenza automatica della sensibilità, non un compito dell'utente.
 
+**Stato: implementato.** Config `[routing] sensitive = "same"|"local"` (default `same`). Con `local`, `ChatEngine::has_sensitive` scandisce il turno in uscita e `ChatEngine::route` lo invia al provider Ollama locale quando il provider attivo è remoto; i turni non sensibili restano sul provider configurato. In TUI c'è il toggle `/route [on|off]` e una riga `routing` nella info-panel. Il rilevamento usa il guard locale (regex, nessun invio di dati per la valutazione).
+
 ### B7. MCP hardening (Sforzo M)
 
 Cosa fa: allowlist dei server, capacità dichiarate, nessun passaggio automatico di variabili d'ambiente segrete, processo server isolato.
 
 Cosa apporta: MCP è potente ma apre una porta verso processi esterni. Va reso esplicito e controllato cosa può fare ciascun server.
+
+**Stato: implementato.** `[mcp] allow` = allowlist dei server avviati; `tools` per-server = allowlist degli strumenti esposti; l'ambiente del processo figlio viene **svuotato** (eredita solo `PATH` e le variabili in `env_allow`, più l'`env` esplicito del server), quindi i segreti della shell non vengono mai passati a codice di terze parti; con `[tools] sandbox` attivo il server gira sotto `sandbox-exec`.
 
 ### B8. Proxy, Tor e pinning TLS (Sforzo M)
 
@@ -116,11 +124,15 @@ Cosa fa: supporto a proxy SOCKS5 e indirizzi .onion, e certificato o TLS pinning
 
 Cosa apporta: nasconde l'origine del traffico (Tor) e impedisce attacchi man-in-the-middle (pinning). Utile in contesti ostili, giornalismo o ricerca.
 
+**Stato: implementato.** Sezione `[network]` in `config.toml` (`src/providers/http.rs`, client condiviso da tutti i provider): `proxy = "socks5h://host:porta"` (DNS risolto dal proxy), `tor = true` (proxy SOCKS locale `socks5h://127.0.0.1:9050`), `tls_pin = "<sha256-hex del certificato foglia>"` con verificatore rustls che esegue la validazione WebPKI normale e poi pretende il certificato fissato. Le connessioni SOCKS sono abilitate via feature `socks` di reqwest con TLS rustls.
+
 ### B9. Guard semantico con NER locale (Sforzo M)
 
 Cosa fa: affianca alle espressioni regolari un piccolo modello locale di riconoscimento delle entità (nomi, indirizzi, organizzazioni).
 
 Cosa apporta: riduce i falsi negativi. Cattura dati sensibili che le regex non vedono, senza inviare nulla all'esterno.
+
+**Stato: implementato.** In `src/privacy/guard.rs` il riconoscitore locale (nessun modello scaricato, nessuna rete) rileva nomi propri (`[NAME_n]`), organizzazioni (suffissi `Inc`, `GmbH`, `S.p.A.`, …), indirizzi (ottativo via/piazza/street + numero civico) e termini dichiarati dall'utente in `[guard] entities`. Le nuove categorie (`name`, `org`, `address`, `custom`) passano dallo stesso flusso anteprima → placeholder/rifiuta e sono governabili da `[policy.rules]`. Disattivabile con `[guard] ner = false`.
 
 ### B10. Sblocco hardware-backed (Sforzo S/M)
 
@@ -128,11 +140,30 @@ Cosa fa: usa Secure Enclave, YubiKey o WebAuthn per sbloccare la master key.
 
 Cosa apporta: la chiave non è più solo una password, serve un fattore hardware. Alza molto l'asticella contro il furto del computer.
 
+**Stato: documentato (design, non implementato).** Approccio previsto, tutto locale:
+1. alla creazione del vault, generare una chiave **P-256 nel Secure Enclave** (macOS) tramite
+   `SecKeyCreateRandomKey` con `kSecAttrTokenIDSecureEnclave`; su Linux/portable usare una
+   **YubiKey PIV** (slot 9d) o una credenziale **WebAuthn** con l'estensione `hmac-secret`;
+2. usare una **challenge/response** hardware per derivare un *key-wrapping key* e cifrare
+   (AES-GCM) la master key già derivata con Argon2id; in `keys.toml` resta solo il blob
+   cifrato, inutile senza il token;
+3. sblocco: inserimento del token → unwrap della master key → apertura di `vault.db`.
+   Fallback: se il token non è disponibile, resta la master password (Argon2id) come oggi.
+Le dipendenze necessarie (`security-framework` su macOS, `yubikey`/PCSC, `webauthn-rs`) sono
+tutte locali; nessun dato lascia la macchina. Da implementare in una wave futura.
+
 ### B11. Build riproducibili, release firmate e SBOM (Sforzo M)
 
 Cosa fa: build riproducibili, binari firmati stabilmente, distinta dei materiali (SBOM) e audit della catena di fornitura.
 
 Cosa apporta: garantisce che il binario che esegui sia esattamente il sorgente pubblicato. Collega Enclave alle buone pratiche di settore e alla conformità (anche CRA).
+
+**Stato: implementato (file locali, pronti al publish).**
+- `rust-toolchain.toml` — toolchain fissata a `1.99.0` (+ rustfmt/clippy) per build riproducibili.
+- `deny.toml` — policy `cargo-deny`: advisories (RUSTSEC), licenze permissive, wildcard vietati, sorgenti solo crates.io.
+- `.github/workflows/ci.yml` — CI: `fmt --check`, `clippy -D warnings`, `test`, `cargo-audit`, `cargo-deny check`, generazione **SBOM** CycloneDX come artifact, su push/PR/tag.
+- `scripts/release.sh` — build `--locked` senza incremental, firma (ad-hoc o `ENCLAVE_SIGN_IDENTITY` su macOS), `sha256`, SBOM in `dist/`.
+Il publish su GitHub (tag + release firmata) resta opzionale: i file sono già nel repo.
 
 ## C. Rivoluzionari
 
@@ -142,11 +173,23 @@ Cosa fa: indicizza i tuoi file con embedding calcolati localmente; la ricerca av
 
 Cosa apporta: puoi chiedere del tuo codice o dei tuoi documenti senza spedirli. È il salto che unisce utilità (un vero assistente sul tuo sapere) e privacy (il recupero dei dati non esce mai). Pochi strumenti lo fanno davvero.
 
+**Stato: implementato (versione keyword, embedding opzionali).** I file vengono suddivisi in chunk e salvati cifrati nella tabella `rag_chunks` di `vault.db` (`enclave rag index`, `/rag index`). La ricerca è un ranker BM25 **interamente offline** (`src/core/rag.rs`, `keyword_search`); il percorso con embedding (`semantic_search`, `cosine`) è pronto per un modello Ollama locale. L'**ACL per file** viene rivalutata a ogni ricerca (`rag::is_readable`). In agentic mode è esposto il tool `rag_search` (permission-gated). CLI: `enclave rag index|search|status|clear`.
+
 ### C2. Sync end-to-end encrypted tra dispositivi (Sforzo L)
 
 Cosa fa: sincronizza le sessioni tra i tuoi dispositivi con CRDT sopra cifratura end-to-end.
 
 Cosa apporta: roaming tra computer senza rinunciare alla privacy. Nessun server vede il contenuto. Oggi passando da una macchina all'altra si perde tutto.
+
+**Stato: documentato (design, non implementato).** Design previsto: il vault resta
+cifrato localmente; la sincronizzazione scambia **solo dati già cifrati** — ogni
+dispositivo ha una coppia di chiavi, i record (sessioni, messaggi, memories, rag)
+viaggiano come blob opachi. Conflitti risolti da un **CRDT** (es. LWW-register per
+i campi, RGA per l'ordine dei messaggi) con logica *last-writer-wins* su timestamp
+ibridi. Trasporto: un relay cieco (utente-fornito o git/iperotix) che vede solo
+ciphertext; chiave di gruppo distribuita fuori banda (QR / passphrase) e out-of-scope
+per il relay. Nessuna implementazione in questa wave: richiede un protocollo di merge
+testato contro perdita di dati.
 
 ### C3. DLP con giudice locale (Sforzo M/L)
 
@@ -154,17 +197,30 @@ Cosa fa: un piccolo modello locale rivede ogni payload in uscita e blocca le fug
 
 Cosa apporta: un secondo paio d'occhi automatico prima che qualcosa esca, che unisce la velocità delle regex con la comprensione di un modello.
 
+**Stato: implementato.** `[policy] judge = "<modello Ollama>"` + `judge_action = "allow|redact|block"`: prima di ogni invio verso un provider remoto il payload viene passato a un modello locale (`src/core/dlp.rs`, `enclave_dlp_judge` via `/api/generate`) che risponde se resta sensibile; l'azione scelta viene applicata (`apply_dlp_judge` in `engine.rs`, dopo `apply_egress_policy`). Gira interamente in locale, **fail-open** (se il modello non risponde non blocca) e viene saltato per provider locali e sessioni air-gap.
+
 ### C4. Proof-of-redaction e divulgazione selettiva (Sforzo L)
 
 Cosa fa: impegno crittografico (hash) sul testo originale, invio della versione redatta e, in seguito, possibilità di rivelare in modo verificabile cosa era stato tolto.
 
 Cosa apporta: privacy dimostrabile. Puoi provare a posteriori cosa era stato protetto, senza averlo esposto prima.
 
+**Stato: implementato.** Il ledger cifrato registra, per ogni richiesta redatta, sia lo SHA-256 del payload effettivamente inviato (`payload_sha`) sia un **commitment** SHA-256 al testo originale (`original_sha`, nuova colonna migrata), accanto alla mappa di redazione. `enclave ledger --proof <id>` mostra i due hash e cosa è stato tolto, permettendo di dimostrare a posteriori cosa è uscito senza conservare l'originale in chiaro.
+
 ### C5. Split inference e secret sharing (Sforzo L, sperimentale)
 
 Cosa fa: divide il prompt tra più provider con tecniche di secret sharing, così nessun singolo provider lo vede completo.
 
 Cosa apporta: riduce la fiducia richiesta a un singolo fornitore. Oggi è ricerca, ma indica una direzione interessante.
+
+**Stato: documentato (design, sperimentale, non implementato).** Design esplorativo:
+(1) **sharding del contesto** — dividere i documenti tra più provider e chiedere a
+ciascuno un sotto-risultato, ricomposto in locale (funziona solo per task
+decomponibili, non per una singola inferenza); (2) **secret sharing** — con Shamir
+2-of-3 non si può inviare il testo in chiaro ai provider: servirebbe uno schema
+omomorfico o MPC sulla *query*, tecnicamente possibile ma con costi enormi e nessuna
+API compatibile oggi. Per questo resta ricerca: si documenta la direzione senza
+fingere che sia utilizzabile a breve.
 
 ## Roadmap a ondate
 

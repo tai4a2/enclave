@@ -28,6 +28,10 @@ fn kind_key(kind: FindingKind) -> &'static str {
         FindingKind::Card => "card",
         FindingKind::Secret => "secret",
         FindingKind::Ip => "ip",
+        FindingKind::Name => "name",
+        FindingKind::Organization => "org",
+        FindingKind::Address => "address",
+        FindingKind::Custom => "custom",
     }
 }
 
@@ -120,6 +124,7 @@ mod tests {
                 ("email".to_string(), EgressAction::Redact),
                 ("iban".to_string(), EgressAction::Block),
             ]),
+            ..Default::default()
         };
         let policy = Policy::from_settings(&s).unwrap();
         assert_eq!(
@@ -139,6 +144,7 @@ mod tests {
             enabled: true,
             default: EgressAction::Redact,
             rules: BTreeMap::new(),
+            ..Default::default()
         };
         let policy = Policy::from_settings(&s).unwrap();
         assert_eq!(policy.action_for(FindingKind::Phone), EgressAction::Redact);

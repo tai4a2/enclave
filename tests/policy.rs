@@ -18,6 +18,7 @@ fn policy(email: EgressAction) -> Policy {
         enabled: true,
         default: EgressAction::Allow,
         rules,
+        ..Default::default()
     })
     .unwrap()
 }

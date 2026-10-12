@@ -271,6 +271,75 @@ ip = "allow"
 
 Recognised keys: `email`, `phone`, `iban`, `tax_id`, `card`, `secret`, `ip`.
 
+**Air-gap.** `enclave tui --airgap` (or `air_gap = true` in `config.toml`, or the
+`/airgap` toggle in the TUI) puts the session in air-gap: the engine **refuses to
+send anything to a remote provider**, so no data can leave the machine. Use a local
+provider (Ollama) to keep working. Utility calls (`/compact`, `/checkpoint`, `/init`)
+are blocked too.
+
+**Prompt-injection hardening.** Tool outputs, file contents and any other external
+text are treated as **untrusted data**, never instructions. A secret per-run *canary
+token* is injected into the system prompt: if a reply or tool output ever echoes it,
+Enclave records a security warning and marks the reply untrusted. In addition, a tool
+call that follows untrusted output always needs a **fresh approval** (even under
+`--auto`). Disable with `[guard] injection = false`.
+
+**Sensitivity routing.** With `[routing] sensitive = "local"` (or the `/route` toggle,
+or `--route` semantics in the TUI) a turn whose content the guard flags as sensitive is
+automatically sent to the **local Ollama** provider instead of the remote one, so it
+never leaves the machine. Non-sensitive turns keep using the configured provider.
+
+**Network hardening (proxy / Tor / TLS pinning).** The `[network]` section routes
+every provider request through a proxy and/or pins the provider's TLS certificate:
+
+```toml
+[network]
+tor = true                       # route through a local Tor SOCKS proxy (127.0.0.1:9050)
+# proxy = "socks5h://127.0.0.1:9050"   # or an explicit http/https/socks5h proxy
+# tls_pin = "ab12…"               # SHA-256 (hex) of the provider leaf certificate
+```
+
+`tor = true` (or an explicit `socks5h://` proxy) hides the origin of the connection;
+`socks5h` resolves DNS through the proxy so no lookup leaks. When `tls_pin` is set the
+TLS handshake fails unless the server presents exactly that certificate (defends
+against MITM / a compromised CA).
+
+**Local semantic guard (NER).** Beyond the regex PII patterns, the guard runs a
+small **offline** recognizer for what regex misses — person names, organisations and
+postal addresses — plus a user-defined list of sensitive terms. Nothing is sent
+anywhere: detection is pure local heuristics you can review and placeholders like
+`[NAME_1]`, `[ORG_1]`, `[ADDRESS_1]`, `[CUSTOM_1]` are applied only when you choose to.
+
+```toml
+[guard]
+ner = true                        # local name/organisation/address detection (offline)
+entities = ["Project Phoenix", "Acme S.p.A."]   # your own sensitive terms
+```
+
+Each detected kind can also be gated by the egress policy (`name`, `org`, `address`,
+`custom` keys in `[policy.rules]`). Set `ner = false` to keep only the regex patterns.
+
+**Local DLP judge.** For a second opinion, point `[policy] judge` at a local
+**Ollama** model: before any payload leaves to a *remote* provider, Enclave asks
+that local model whether the text still looks sensitive and applies `judge_action`
+(`allow` / `redact` / `block`). It runs entirely offline and fails open (a judge
+error never blocks you).
+
+```toml
+[policy]
+enabled = true
+judge = "llama3.2:1b"      # Ollama model used as a local DLP judge (remote providers only)
+judge_action = "redact"    # allow | redact | block
+```
+
+**Proof-of-redaction.** The encrypted egress ledger records, for every redacted
+request, the SHA-256 of the payload as sent **and** a commitment (SHA-256) to the
+original text, next to the redaction map. You can later prove what was on the wire:
+
+```bash
+enclave ledger --proof <id>     # show the sent hash, the original commitment and the redaction map
+```
+
 ## Agentic mode (function calling)
 
 Beyond markdown *proposals*, Enclave supports real function calling: the
@@ -539,6 +608,29 @@ the permission model (default: **ask**). `/mcp` lists the connected tools. MCP
 tool results flow through the same privacy guard, but remember they are produced
 by a third-party process — only connect servers you trust.
 
+**Hardening.** MCP servers are locked down by default:
+
+```toml
+[mcp]
+allow = ["filesystem"]            # server allowlist (empty = every configured server)
+
+[mcp.servers.filesystem]
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/Users/me/projects"]
+tools = ["read_file", "list_directory"]   # tool allowlist (empty = all the server's tools)
+env_allow = ["HOME"]              # parent env vars to forward (empty = none)
+```
+
+- Only servers named in `[mcp] allow` are started (an empty list means all
+  configured servers). Only the tools named in a server's `tools` list are
+  exposed.
+- The server process is launched with a **cleared environment**: nothing from
+  your shell is inherited except `PATH` and the variables you explicitly list in
+  `env_allow` (plus the server's own `env` map). API keys sitting in your
+  environment are never handed to a third-party process.
+- When `[tools] sandbox` is active the server runs under `sandbox-exec` too
+  (writes confined to the workspace and temp, network blocked in `strict`).
+
 ### Attachments
 
 Use `/attach <path>` (or `--attach <path>` in the CLI) to add a **file** to
@@ -584,9 +676,30 @@ launch.
 | `enclave sessions vacuum` | Reclaim disk space from deleted ciphertext |
 | `enclave ledger` | Show the encrypted egress ledger — what left the machine (fingerprints only) |
 | `enclave ledger --verify` | Verify the ledger hash chain (exit 2 if tampered) |
+| `enclave ledger --proof <id>` | Proof-of-redaction for one entry: sent hash, original commitment, redaction map |
 | `enclave memory add\|list\|search\|pin\|edit\|forget\|clear` | Manage the local encrypted Supermemory |
+| `enclave rag index <paths>` | Index files/dirs into the encrypted local store (offline) |
+| `enclave rag search <query>` | Search the local index |
+| `enclave rag status` / `enclave rag clear` | Show / delete the index |
 
 Security/privacy audit: see [docs/audit.md](docs/audit.md).
+
+## Local RAG (encrypted file index)
+
+Enclave can index your own files locally and retrieve the relevant chunks when
+you ask, without any external service:
+
+```bash
+enclave rag index ./docs ./src        # chunk + store (encrypted in vault.db)
+enclave rag search "how does the guard work"
+```
+
+- Files are chunked and stored **encrypted at rest** (SQLCipher), like the rest of the vault.
+- Search is a fully **offline BM25-style keyword ranker**; no embedding call, no network.
+- **Per-file ACL**: a chunk is only ever returned if its source file is still readable by you at query time.
+- In the TUI use `/rag index <paths>`, `/rag search <q>`, `/rag status`, `/rag clear`.
+- With `--agent`, the model can call the `rag_search` tool (permission-gated) to pull context itself.
+- Retrieved chunks travel to the provider only as part of the normal, guard-scanned request.
 
 ## Privacy notes
 
@@ -615,6 +728,17 @@ cargo build       # debug build
 ```
 
 Architecture and design details live in [`docs/`](docs/).
+
+### Releases & supply chain
+
+- Toolchain pinned in `rust-toolchain.toml`; build reproducibly with
+  `./scripts/release.sh` (uses `--locked`, no incremental, signs `dist/enclave`
+  and writes `dist/enclave.sha256` + an SBOM when `cargo-cyclonedx` is installed).
+- `cargo deny check` (config in `deny.toml`) enforces permissive licenses,
+  bans wildcard deps and restricts sources to crates.io.
+- CI (`.github/workflows/ci.yml`) runs `fmt --check`, `clippy -D warnings`,
+  tests, `cargo-audit` (RUSTSEC), `cargo-deny` and produces a CycloneDX SBOM.
+- For a real release pass a signing identity: `ENCLAVE_SIGN_IDENTITY="Developer ID Application: …" ./scripts/release.sh`.
 
 ### macOS keychain prompts on every launch
 

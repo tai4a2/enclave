@@ -80,6 +80,8 @@ Cosa apporta: chiude un buco. Una volta che un dato è entrato nel contesto, con
 
 ### B3. Policy-as-code per l'uscita dati (Sforzo M)
 
+**Stato: implementato.** Regole locali `[policy]` per classe di dato (`email`, `phone`, `iban`, `tax_id`, `card`, `secret`, `ip`) con azione `allow`/`redact`/`block` e una `default`; valutate dall'engine prima di ogni invio verso un provider remoto (`ChatEngine::apply_egress_policy`). I provider locali (Ollama) sono esenti; tra le azioni che combaciano vince la più restrittiva. `block` rifiuta il turno con errore, `redact` attiva i placeholder stabili.
+
 Cosa fa: un piccolo linguaggio di regole locali, in stile Cedar o Rego, ad esempio "classi sensibili solo verso ollama", "mai file .env", "nessuna rete nella sessione X".
 
 Cosa apporta: trasforma la privacy da buona intenzione a regola verificabile e ripetibile, scritta una volta e applicata sempre dall'engine.

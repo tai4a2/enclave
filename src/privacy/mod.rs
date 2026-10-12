@@ -5,6 +5,7 @@ pub mod export;
 pub mod guard;
 pub mod keys;
 pub mod memory;
+pub mod policy;
 pub mod secure;
 pub mod vault;
 

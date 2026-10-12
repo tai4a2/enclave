@@ -493,6 +493,7 @@ fn build_engine(
     }
     engine.mcp = crate::core::mcp::McpRegistry::connect_all(&settings.mcp)
         .map(std::sync::Arc::new);
+    engine.policy = crate::privacy::policy::Policy::from_settings(&settings.policy);
     engine.reload_memories()?;
     persist_working_session(paths, &engine.session.id);
     Ok(engine)

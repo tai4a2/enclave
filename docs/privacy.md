@@ -179,6 +179,18 @@ by `ChatEngine::outgoing_messages` and can be turned off with
 `[guard] taint = false`. Tainted data stays fully readable locally; only the
 remote egress is sanitised.
 
+### Egress policy
+
+A declarative, local policy (`[policy]` in `config.toml`) decides how each
+class of sensitive data may leave the machine when the destination is a remote
+provider: `allow`, `redact` or `block`. The engine evaluates it before every
+send (`ChatEngine::apply_egress_policy`); a `block` rule refuses the turn with
+an error, `redact` forces the placeholder redactor. Local (Ollama) providers
+are exempt. Rules are keyed by the guard's finding kinds (`email`, `phone`,
+`iban`, `tax_id`, `card`, `secret`, `ip`) with a `default` fallback; the
+strictest matching action wins. This turns privacy intent into a verifiable,
+repeatable rule applied by the engine on every request.
+
 ## 5. Telemetry
 
 Zero. No analytics, no crash reporting, no update pings, no logging of message content.

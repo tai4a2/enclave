@@ -247,6 +247,30 @@ entered the conversation it can never travel verbatim in a subsequent request.
 Set `[guard] taint = false` to disable this. Local (Ollama) sessions are
 unaffected: nothing leaves the machine.
 
+**Egress policy (policy-as-code).** A local, declarative policy can force how
+each class of sensitive data may leave the machine. Define rules per data kind
+in `[policy]`; before any request to a **remote** provider the engine scans the
+outbound messages and applies the *strictest* matching action — `allow`,
+`redact` (placeholders) or `block` (the turn is refused). Local (Ollama)
+providers are never restricted. Example:
+
+```toml
+[policy]
+enabled = true
+default = "allow"            # action for kinds without a rule
+
+[policy.rules]
+email = "redact"
+phone = "redact"
+iban = "block"
+card = "block"
+secret = "block"
+tax_id = "block"
+ip = "allow"
+```
+
+Recognised keys: `email`, `phone`, `iban`, `tax_id`, `card`, `secret`, `ip`.
+
 ## Agentic mode (function calling)
 
 Beyond markdown *proposals*, Enclave supports real function calling: the

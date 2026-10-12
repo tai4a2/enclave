@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use async_trait::async_trait;
 
-use crate::config::{Action, Permissions};
+use crate::config::{Action, EgressAction, Permissions};
 use crate::core::attachment::Attachment;
 use crate::core::builtin_tools::{self, ToolContext};
 use crate::core::message::{Message, ToolCall};
@@ -160,6 +160,8 @@ pub struct ChatEngine {
     /// Taint tracking: mark user messages that contain sensitive data and
     /// re-redact them automatically on later turns.
     pub taint: bool,
+    /// Data-egress policy (policy-as-code), enforced on remote providers only.
+    pub policy: Option<crate::privacy::policy::Policy>,
 }
 
 impl ChatEngine {
@@ -189,6 +191,7 @@ impl ChatEngine {
             mcp: None,
             memories: Vec::new(),
             taint: true,
+            policy: None,
         }
     }
 
@@ -238,6 +241,7 @@ impl ChatEngine {
             mcp: None,
             memories: Vec::new(),
             taint: true,
+            policy: None,
         })
     }
 
@@ -339,6 +343,41 @@ impl ChatEngine {
         msgs
     }
 
+    /// Enforce the data-egress policy for a remote provider. Local providers
+    /// (Ollama) are never restricted. `Block` refuses the send; `Redact`
+    /// activates the redactor so `outgoing_messages` replaces the values.
+    fn apply_egress_policy(&mut self) -> Result<()> {
+        let Some(policy) = self.policy.clone() else {
+            return Ok(());
+        };
+        if !crate::providers::requires_api_key(self.provider_name()) {
+            return Ok(());
+        }
+        let msgs = self.request_messages();
+        let mut findings = Vec::new();
+        for m in &msgs {
+            findings.extend(crate::privacy::guard::scan(&m.content));
+            for a in &m.attachments {
+                if a.kind == crate::core::attachment::AttachmentKind::Text {
+                    findings.extend(crate::privacy::guard::scan(&a.data));
+                }
+            }
+        }
+        match policy.decide(&findings) {
+            EgressAction::Allow => Ok(()),
+            EgressAction::Redact => {
+                if self.redactor.is_none() {
+                    self.redactor = Some(Redactor::new());
+                }
+                Ok(())
+            }
+            EgressAction::Block => Err(EnclaveError::other(format!(
+                "egress blocked by policy: {} sensitive item(s) detected (see [policy] in config.toml)",
+                findings.len()
+            ))),
+        }
+    }
+
     /// Build the outgoing request, applying privacy-guard redaction when active.
     pub fn outgoing_messages(&mut self) -> Vec<Message> {
         let skip_system = self.system_text().is_some();
@@ -419,6 +458,7 @@ impl ChatEngine {
         attachments: Vec<Attachment>,
     ) -> Result<ChunkStream> {
         self.push_user(input, attachments)?;
+        self.apply_egress_policy()?;
         let messages = self.outgoing_messages();
         let _ = self.record_egress(&messages);
         let model = self.model.clone();
@@ -466,6 +506,7 @@ impl ChatEngine {
         let mut seen: HashMap<String, u32> = HashMap::new();
 
         for _ in 0..max_iterations.max(1) {
+            self.apply_egress_policy()?;
             let messages = self.outgoing_messages();
             let _ = self.record_egress(&messages);
             let model = self.model.clone();
@@ -568,6 +609,7 @@ impl ChatEngine {
     /// Ask the provider for the next step. Returns either a final answer or a
     /// set of tool calls awaiting the caller's decision.
     pub async fn agentic_step(&mut self, defs: &[ToolDef]) -> Result<AgentStep> {
+        self.apply_egress_policy()?;
         let messages = self.outgoing_messages();
         let _ = self.record_egress(&messages);
         let model = self.model.clone();

@@ -145,6 +145,37 @@ impl Default for GuardSettings {
     }
 }
 
+/// Action applied to an outbound message set when the egress policy matches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EgressAction {
+    /// Let the data leave unmodified.
+    #[default]
+    Allow,
+    /// Send, but replace the sensitive values with placeholders.
+    Redact,
+    /// Refuse to send at all.
+    Block,
+}
+
+/// Data-egress policy (policy-as-code): per sensitive-data-kind rules deciding
+/// what may leave the machine for a remote provider. Local providers (Ollama)
+/// are never restricted. `rules` keys are `email`, `phone`, `iban`, `tax_id`,
+/// `card`, `secret`, `ip`; `default` applies to kinds without a specific rule.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct PolicySettings {
+    /// Enable the policy gate (off by default, so egress is unrestricted until
+    /// you opt in).
+    #[serde(default)]
+    pub enabled: bool,
+    /// Action for kinds without a specific rule.
+    #[serde(default)]
+    pub default: EgressAction,
+    /// Per-kind rules.
+    #[serde(default)]
+    pub rules: std::collections::BTreeMap<String, EgressAction>,
+}
+
 /// What the engine may do with a tool call without asking.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -370,6 +401,9 @@ pub struct Settings {
     /// Privacy-guard settings.
     #[serde(default)]
     pub guard: GuardSettings,
+    /// Data-egress policy (policy-as-code).
+    #[serde(default)]
+    pub policy: PolicySettings,
     /// Multi-agent settings.
     #[serde(default)]
     pub agent: AgentSettings,
@@ -433,6 +467,7 @@ impl Default for Settings {
             ollama_base_url: "http://localhost:11434".to_string(),
             tools: ToolsSettings::default(),
             guard: GuardSettings::default(),
+            policy: PolicySettings::default(),
             agent: AgentSettings::default(),
             permissions: Permissions::default(),
             instructions: Vec::new(),

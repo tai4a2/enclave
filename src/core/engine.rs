@@ -283,6 +283,24 @@ impl ChatEngine {
         self.provider_name
     }
 
+    /// Switch to another known provider (lazy: the API key is read on first use).
+    pub fn set_provider(&mut self, name: &str) -> Result<()> {
+        let canonical = crate::providers::known_providers()
+            .iter()
+            .find(|p| **p == name)
+            .copied()
+            .ok_or_else(|| EnclaveError::other(format!("unknown provider '{name}'")))?;
+        self.provider = ProviderSlot::Lazy {
+            name: canonical.to_string(),
+            ollama_base_url: self.ollama_base_url.clone(),
+        };
+        self.provider_name = canonical;
+        if let Some(m) = crate::providers::default_model_for(canonical) {
+            self.model = m.to_string();
+        }
+        Ok(())
+    }
+
     /// Reload the persistent memories that get injected into the system prompt.
     pub fn reload_memories(&mut self) -> Result<()> {
         self.memories = self.memory.injectable_memories(50)?;

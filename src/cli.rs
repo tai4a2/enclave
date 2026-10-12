@@ -142,6 +142,11 @@ pub enum Command {
         #[command(subcommand)]
         action: RagAction,
     },
+    /// OpenRouter account, generation stats and provisioning-key management.
+    Or {
+        #[command(subcommand)]
+        action: OrAction,
+    },
     /// Show the resolved configuration (no secrets).
     Config,
     /// Securely delete the encrypted database, salt and stored keys.
@@ -248,6 +253,51 @@ pub enum MemoryAction {
     },
 }
 
+/// `enclave or` sub-commands (OpenRouter).
+#[derive(Debug, clap::Subcommand)]
+pub enum OrAction {
+    /// Show account credits, usage and limits.
+    Credits,
+    /// Show statistics for a generation id (tokens and cost).
+    Generation { id: String },
+    /// Show daily activity (defaults to today, UTC).
+    Activity {
+        /// Date as YYYY-MM-DD.
+        date: Option<String>,
+    },
+    /// List the provider catalogue.
+    Providers,
+    /// List the providers serving a model (e.g. `openai/gpt-4o-mini`).
+    Endpoints { model: String },
+    /// Manage provisioning API keys (needs a provisioning key).
+    Keys {
+        #[command(subcommand)]
+        action: OrKeysAction,
+    },
+}
+
+/// `enclave or keys` sub-commands.
+#[derive(Debug, clap::Subcommand)]
+pub enum OrKeysAction {
+    List,
+    Create {
+        name: String,
+        #[arg(short, long)]
+        limit: Option<f64>,
+    },
+    Get { hash: String },
+    Update {
+        hash: String,
+        #[arg(short, long)]
+        name: Option<String>,
+        #[arg(long)]
+        disabled: Option<bool>,
+        #[arg(short, long)]
+        limit: Option<f64>,
+    },
+    Delete { hash: String },
+}
+
 /// `enclave rag` sub-commands.
 #[derive(Debug, clap::Subcommand)]
 pub enum RagAction {
@@ -301,6 +351,11 @@ pub fn run(cli: Cli) -> Result<()> {
             ledger_cmd(&paths, &settings, verify, limit, proof)
         }
         Command::Rag { action } => rag_cmd(&paths, &settings, action),
+        Command::Or { action } => {
+            let runtime = tokio::runtime::Runtime::new()
+                .map_err(|e| EnclaveError::other(format!("runtime: {e}")))?;
+            runtime.block_on(or_cmd(action))
+        }
         Command::Models {
             search,
             set,
@@ -1430,6 +1485,115 @@ fn rag_cmd(paths: &Paths, settings: &Settings, action: RagAction) -> Result<()> 
 
 /// Collect readable text files under `path` (depth-limited, skipping common
 /// noise directories and oversized files).
+async fn or_cmd(action: OrAction) -> Result<()> {
+    use crate::privacy::SecureCredentials;
+    use crate::providers::openrouter as or;
+
+    fn key() -> Result<String> {
+        SecureCredentials::local_api_key("openrouter").ok_or_else(|| {
+            EnclaveError::auth("no OpenRouter key — run: enclave keys set openrouter")
+        })
+    }
+    fn prov_key() -> Result<String> {
+        std::env::var("ENCLAVE_OPENROUTER_PROVISIONING_KEY")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| SecureCredentials::local_api_key("openrouter-provisioning"))
+            .ok_or_else(|| {
+                EnclaveError::auth(
+                    "no provisioning key — set ENCLAVE_OPENROUTER_PROVISIONING_KEY",
+                )
+            })
+    }
+
+    match action {
+        OrAction::Credits => {
+            let acc = or::OpenRouterAccount::fetch(&key()?).await?;
+            println!("{}", acc.report());
+        }
+        OrAction::Generation { id } => {
+            let g = or::fetch_generation(&key()?, &id).await?;
+            println!("generation {}", g.id);
+            println!("  model       : {}", g.model);
+            if let Some(p) = g.tokens_prompt {
+                println!("  prompt tok  : {p}");
+            }
+            if let Some(c) = g.tokens_completion {
+                println!("  compl. tok  : {c}");
+            }
+            if let Some(cost) = g.total_cost {
+                println!("  total cost  : ${cost:.6}");
+            }
+        }
+        OrAction::Activity { date } => {
+            let v = or::fetch_activity(&key()?, date.as_deref()).await?;
+            println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
+        }
+        OrAction::Providers => {
+            let names = or::fetch_providers().await?;
+            if names.is_empty() {
+                println!("no providers returned");
+            } else {
+                for n in names {
+                    println!("{n}");
+                }
+            }
+        }
+        OrAction::Endpoints { model } => {
+            let eps = or::fetch_endpoints(&key()?, &model).await?;
+            if eps.is_empty() {
+                println!("no endpoints found for '{model}'");
+            } else {
+                println!("{:<24} {:>10} {:>12} {:>12}  QUANT", "PROVIDER", "CTX", "$PROMPT/M", "$COMPL/M");
+                for e in eps {
+                    println!(
+                        "{:<24} {:>10} {:>12.3} {:>12.3}  {}",
+                        e.name,
+                        e.context_length,
+                        e.prompt_price,
+                        e.completion_price,
+                        e.quantization.unwrap_or_default()
+                    );
+                }
+            }
+        }
+        OrAction::Keys { action } => {
+            let pk = prov_key()?;
+            match action {
+                OrKeysAction::List => {
+                    let v = or::list_keys(&pk).await?;
+                    println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
+                }
+                OrKeysAction::Create { name, limit } => {
+                    let v = or::create_key(&pk, &name, limit).await?;
+                    println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
+                }
+                OrKeysAction::Get { hash } => {
+                    let v = or::get_key(&pk, &hash).await?;
+                    println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
+                }
+                OrKeysAction::Update {
+                    hash,
+                    name,
+                    disabled,
+                    limit,
+                } => {
+                    let v = or::update_key(&pk, &hash, name.as_deref(), disabled, limit).await?;
+                    println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
+                }
+                OrKeysAction::Delete { hash } => {
+                    let v = or::delete_key(&pk, &hash).await?;
+                    println!("deleted {hash}");
+                    if !v.is_null() {
+                        println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn collect_files(path: &std::path::Path, out: &mut Vec<std::path::PathBuf>, depth: usize) {
     if depth > 12 {
         return;

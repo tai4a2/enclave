@@ -332,6 +332,13 @@ pub struct TuiSettings {
     /// finishes or a tool call needs approval. Defaults to `true`.
     #[serde(default = "default_true")]
     pub notify: bool,
+    /// Terminal cursor shape in the input box: `block` (default), `underline`,
+    /// `line`, or `default` to restore the terminal's own cursor.
+    #[serde(default)]
+    pub cursor: Option<String>,
+    /// Whether the input cursor blinks. Defaults to `true`.
+    #[serde(default = "default_true")]
+    pub cursor_blinking: bool,
 }
 
 impl Default for TuiSettings {
@@ -340,6 +347,8 @@ impl Default for TuiSettings {
             theme: None,
             keybinds: std::collections::BTreeMap::new(),
             notify: true,
+            cursor: None,
+            cursor_blinking: true,
         }
     }
 }

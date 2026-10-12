@@ -62,6 +62,15 @@ pub struct Message {
     /// Files attached to this message (images or text).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<Attachment>,
+    /// Taint flag: this message contained sensitive data, so it must never be
+    /// re-sent to a remote provider verbatim — it is always redacted again in
+    /// later turns (see `ChatEngine::outgoing_messages`).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub tainted: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 impl Message {
@@ -72,6 +81,7 @@ impl Message {
             tool_calls: Vec::new(),
             tool_call_id: None,
             attachments: Vec::new(),
+            tainted: false,
         }
     }
 

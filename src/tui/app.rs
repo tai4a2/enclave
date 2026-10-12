@@ -618,7 +618,7 @@ async fn run_app(
                 // "[a]ll" already approved: execute without waiting for keys.
                 if approve_all {
                     if let Some(p) = &proposal {
-                        execute_proposal(engine, &mut transcript, &mut status, p, tools_cfg.timeout_secs, tools_cfg.max_output_bytes).await?;
+                        execute_proposal(engine, &mut transcript, &mut status, p, tools_cfg.timeout_secs, tools_cfg.max_output_bytes, tools_cfg.sandbox).await?;
                     }
                     advance_proposal(&mut phase, &mut status, idx, total);
                     continue;
@@ -636,7 +636,7 @@ async fn run_app(
                         }
                         ProposalAction::ApproveAll => {
                             if let Some(p) = &proposal {
-                                execute_proposal(engine, &mut transcript, &mut status, p, tools_cfg.timeout_secs, tools_cfg.max_output_bytes).await?;
+                                execute_proposal(engine, &mut transcript, &mut status, p, tools_cfg.timeout_secs, tools_cfg.max_output_bytes, tools_cfg.sandbox).await?;
                             }
                             if let Phase::Confirming { approve_all, .. } = &mut phase {
                                 *approve_all = true;
@@ -645,7 +645,7 @@ async fn run_app(
                         }
                         ProposalAction::Approve => {
                             if let Some(p) = &proposal {
-                                execute_proposal(engine, &mut transcript, &mut status, p, tools_cfg.timeout_secs, tools_cfg.max_output_bytes).await?;
+                                execute_proposal(engine, &mut transcript, &mut status, p, tools_cfg.timeout_secs, tools_cfg.max_output_bytes, tools_cfg.sandbox).await?;
                             }
                             advance_proposal(&mut phase, &mut status, idx, total);
                         }
@@ -1947,10 +1947,14 @@ async fn run_app(
                                         speaker: Speaker::User,
                                         text: format!("!{cmd}"),
                                     });
-                                    match tools::run(
+                                    match tools::run_sandboxed(
                                         &cmd,
                                         Duration::from_secs(tools_cfg.timeout_secs),
                                         tools_cfg.max_output_bytes,
+                                        Some(&tools::Sandbox::new(
+                                            tools_cfg.sandbox,
+                                            std::env::current_dir().unwrap_or_default(),
+                                        )),
                                     )
                                     .await
                                     {
@@ -2636,9 +2640,11 @@ async fn execute_proposal(
     p: &Proposal,
     timeout_secs: u64,
     max_output_bytes: usize,
+    sandbox: crate::config::SandboxMode,
 ) -> Result<()> {
     let timeout = Duration::from_secs(timeout_secs.max(1));
-    match tools::run(&p.command, timeout, max_output_bytes).await {
+    let sandbox = tools::Sandbox::new(sandbox, std::env::current_dir().unwrap_or_default());
+    match tools::run_sandboxed(&p.command, timeout, max_output_bytes, Some(&sandbox)).await {
         Ok(output) => {
             for l in output.render().lines() {
                 transcript.push(ChatLine {

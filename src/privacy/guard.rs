@@ -268,6 +268,23 @@ pub fn has_sensitive_data(text: &str) -> bool {
     !scan(text).is_empty()
 }
 
+/// Redact only the messages flagged as tainted (sensitive). Used by taint
+/// tracking so a message that once contained sensitive data is never sent to
+/// a remote provider verbatim again, without touching clean messages.
+pub fn redact_tainted(messages: &mut [Message], redactor: &mut Redactor, skip_first: bool) {
+    for m in messages.iter_mut().skip(usize::from(skip_first)) {
+        if !m.tainted {
+            continue;
+        }
+        m.content = redactor.apply(&m.content);
+        for a in m.attachments.iter_mut() {
+            if a.kind == AttachmentKind::Text {
+                a.data = redactor.apply(&a.data);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -342,5 +359,18 @@ mod tests {
     fn ip_validation_rejects_bad_octets() {
         assert!(scan("host 999.888.1.1").is_empty());
         assert!(scan("host 10.0.0.255").iter().any(|f| f.kind == FindingKind::Ip));
+    }
+
+    #[test]
+    fn redact_tainted_only_touches_flagged_messages() {
+        let clean = Message::user("reach me at clean@example.com".to_string());
+        let mut tainted = Message::user("reach me at secret@example.com".to_string());
+        tainted.tainted = true;
+        let mut msgs = vec![clean, tainted];
+        let mut r = Redactor::new();
+        redact_tainted(&mut msgs, &mut r, false);
+        assert!(msgs[0].content.contains("clean@example.com")); // clean untouched
+        assert!(msgs[1].content.contains("[EMAIL_1]"));
+        assert!(!msgs[1].content.contains("secret@example.com"));
     }
 }

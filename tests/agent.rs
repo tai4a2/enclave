@@ -235,3 +235,32 @@ async fn ephemeral_memory_never_touches_disk() {
     let history = memory.get_history(&sid, 10).unwrap();
     assert_eq!(history[0].content, "secret");
 }
+
+#[tokio::test]
+async fn tainted_message_is_auto_redacted_on_later_turns() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = test_key();
+    let memory = EncryptedMemory::open(&dir.path().join("v.db"), &key).unwrap();
+    let mut session = Session::create(&memory, "taint").unwrap();
+
+    let mut secret = Message::user("my email is secret@example.com".to_string());
+    secret.tainted = true;
+    session.push(secret, &memory).unwrap();
+    session
+        .push(Message::user("and a clean line".to_string()), &memory)
+        .unwrap();
+
+    let provider = Box::new(MockProvider::new(vec![]));
+    let mut engine = ChatEngine::new(provider, "mock-1".into(), memory, session, None);
+    engine.taint = true;
+
+    let out = engine.outgoing_messages();
+    assert!(out[0].content.contains("[EMAIL_1]"));
+    assert!(!out[0].content.contains("secret@example.com"));
+    assert_eq!(out[1].content, "and a clean line");
+
+    // Redaction stays stable across turns (same persistent redactor).
+    let out2 = engine.outgoing_messages();
+    assert!(out2[0].content.contains("[EMAIL_1]"));
+    assert!(!out2[0].content.contains("secret@example.com"));
+}

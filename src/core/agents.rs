@@ -41,6 +41,8 @@ pub struct AgentRunner {
     pub timeout_secs: u64,
     pub max_output_bytes: usize,
     pub mode: ToolsMode,
+    /// OS sandbox mode to apply to approved shell commands.
+    pub sandbox: crate::config::SandboxMode,
     /// Connected MCP servers shared with the agentic loop.
     pub mcp: Option<std::sync::Arc<crate::core::mcp::McpRegistry>>,
 }
@@ -70,6 +72,7 @@ impl AgentRunner {
             timeout_secs: settings.tools.timeout_secs,
             max_output_bytes: settings.tools.max_output_bytes,
             mode: settings.tools.mode,
+            sandbox: settings.tools.sandbox,
             mcp: crate::core::mcp::McpRegistry::connect_all(&settings.mcp)
                 .map(std::sync::Arc::new),
         }
@@ -115,6 +118,10 @@ impl AgentRunner {
             })),
             todos: None,
             mcp: self.mcp.clone(),
+            sandbox: Some(crate::core::tools::Sandbox::new(
+                self.sandbox,
+                self.workspace.clone(),
+            )),
         }
     }
 
@@ -125,6 +132,10 @@ impl AgentRunner {
             shell_timeout_secs: self.timeout_secs,
             max_output_bytes: self.max_output_bytes,
             mcp: self.mcp.clone(),
+            sandbox: Some(crate::core::tools::Sandbox::new(
+                self.sandbox,
+                self.workspace.clone(),
+            )),
             ..Default::default()
         }
     }

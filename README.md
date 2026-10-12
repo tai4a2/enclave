@@ -226,6 +226,27 @@ auto_lock_secs = 300        # lock the TUI after 5 minutes idle (0 = off)
 clipboard_clear_secs = 30   # clear Enclave-copied clipboard text after 30s
 ```
 
+**Command sandbox.** On macOS, the shell commands you approve (markdown
+proposals, the agentic `run_shell` tool, and `!command`) run inside a
+`sandbox-exec` jail: file reads are allowed, but writes are restricted to the
+workspace and temporary directories. Set `[tools] sandbox = "strict"` to also
+block network access, `"fs"` for the file jail only, `"off"` to disable it, or
+`"auto"` (default) to use the strongest sandbox the platform supports.
+
+```toml
+[tools]
+sandbox = "auto"   # auto | off | fs | strict
+```
+
+**Taint tracking.** When the privacy guard detects sensitive data in a message
+you send, that message is flagged *tainted* and stored that way. On every later
+turn the engine automatically re-redacts tainted messages (stable placeholders
+like `[EMAIL_1]`) before they leave for a **remote** provider — without asking
+again and regardless of the per-message guard choice — so once a secret has
+entered the conversation it can never travel verbatim in a subsequent request.
+Set `[guard] taint = false` to disable this. Local (Ollama) sessions are
+unaffected: nothing leaves the machine.
+
 ## Agentic mode (function calling)
 
 Beyond markdown *proposals*, Enclave supports real function calling: the

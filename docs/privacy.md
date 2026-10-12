@@ -156,6 +156,29 @@ opens a **separate decoy vault** at `<config>/decoy/` instead of the real one,
 giving plausible deniability under coercion. When a duress password is configured
 the "unlock once" cache is bypassed, so a password is always required.
 
+### Command sandbox
+
+Approved shell commands (markdown proposals, the agentic `run_shell` tool,
+`!command`) run inside a macOS `sandbox-exec` jail: file reads are allowed,
+writes are limited to the workspace and temporary directories, and — with
+`[tools] sandbox = "strict"` — network access is blocked. Human approval remains
+the primary control; the sandbox reduces the blast radius of an
+approved-but-malicious command or a simple mistake. On non-macOS platforms the
+command runs normally after approval.
+
+### Taint tracking
+
+The privacy guard redacts a message at the moment you choose to send it. Taint
+tracking extends that protection over time: any user message (or text
+attachment) in which the guard found sensitive data is marked *tainted* and
+persisted as such in the encrypted database. On every subsequent turn the engine
+re-applies the redactor to tainted messages automatically — no prompt, stable
+placeholders — so a secret that entered the context once is never transmitted
+verbatim again, even if you would otherwise have sent it as-is. This is enforced
+by `ChatEngine::outgoing_messages` and can be turned off with
+`[guard] taint = false`. Tainted data stays fully readable locally; only the
+remote egress is sanitised.
+
 ## 5. Telemetry
 
 Zero. No analytics, no crash reporting, no update pings, no logging of message content.

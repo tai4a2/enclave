@@ -48,12 +48,19 @@ struct MessageMeta {
     tool_call_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     attachments: Vec<Attachment>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    tainted: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 fn encode_meta(message: &Message) -> Result<String> {
     if message.tool_calls.is_empty()
         && message.tool_call_id.is_none()
         && message.attachments.is_empty()
+        && !message.tainted
     {
         return Ok(String::new());
     }
@@ -61,6 +68,7 @@ fn encode_meta(message: &Message) -> Result<String> {
         tool_calls: message.tool_calls.clone(),
         tool_call_id: message.tool_call_id.clone(),
         attachments: message.attachments.clone(),
+        tainted: message.tainted,
     };
     serde_json::to_string(&meta).map_err(EnclaveError::from)
 }
@@ -72,6 +80,7 @@ fn decode_meta(role: Role, content: String, meta: &str) -> Message {
             message.tool_calls = parsed.tool_calls;
             message.tool_call_id = parsed.tool_call_id;
             message.attachments = parsed.attachments;
+            message.tainted = parsed.tainted;
         }
     }
     message

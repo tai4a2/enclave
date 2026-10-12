@@ -281,7 +281,7 @@ pub fn run(cli: Cli) -> Result<()> {
             auto,
             plan,
         } => {
-            let engine = build_engine(
+            let mut engine = build_engine(
                 &paths,
                 &settings,
                 provider,
@@ -294,6 +294,7 @@ pub fn run(cli: Cli) -> Result<()> {
             )?;
             let tools = settings.effective_tools(no_tools);
             let guard = settings.effective_guard(no_guard);
+            engine.taint = guard.enabled && guard.taint;
             let agent_mode = (agent || tools.mode == crate::config::ToolsMode::Agent)
                 && tools.enabled;
             let runner = if agent_mode {
@@ -324,7 +325,7 @@ pub fn run(cli: Cli) -> Result<()> {
             auto,
             plan,
         } => {
-            let engine = build_engine(
+            let mut engine = build_engine(
                 &paths,
                 &settings,
                 provider,
@@ -337,6 +338,7 @@ pub fn run(cli: Cli) -> Result<()> {
             )?;
             let tools = settings.effective_tools(no_tools);
             let guard = settings.effective_guard(no_guard);
+            engine.taint = guard.enabled && guard.taint;
             let runtime = tokio::runtime::Runtime::new()
                 .map_err(|e| EnclaveError::other(e.to_string()))?;
             runtime.block_on(crate::tui::run(engine, tools, guard, agent))
@@ -580,10 +582,14 @@ async fn chat_loop(
             if cmd.is_empty() {
                 println!("usage: !<shell command>\n");
             } else {
-                match crate::core::tools::run(
+                match crate::core::tools::run_sandboxed(
                     cmd,
                     std::time::Duration::from_secs(tools.timeout_secs),
                     tools.max_output_bytes,
+                    Some(&crate::core::tools::Sandbox::new(
+                        tools.sandbox,
+                        std::env::current_dir().unwrap_or_default(),
+                    )),
                 )
                 .await
                 {
@@ -832,8 +838,17 @@ async fn run_proposal(
     tools: &crate::config::ToolsSettings,
 ) -> Result<()> {
     let timeout = std::time::Duration::from_secs(tools.timeout_secs.max(1));
-    let output =
-        crate::core::tools::run(&proposal.command, timeout, tools.max_output_bytes).await?;
+    let sandbox = crate::core::tools::Sandbox::new(
+        tools.sandbox,
+        std::env::current_dir().unwrap_or_default(),
+    );
+    let output = crate::core::tools::run_sandboxed(
+        &proposal.command,
+        timeout,
+        tools.max_output_bytes,
+        Some(&sandbox),
+    )
+    .await?;
     println!("{}", output.render());
 
     // Feed the result back into the conversation (encrypted at rest; it will

@@ -5,7 +5,7 @@
 //! * a wrong master key cannot open the vault
 //! * no plaintext ever lands on disk
 
-use enclave::core::message::Role;
+use enclave::core::message::{Message, Role};
 use enclave::privacy::memory::EncryptedMemory;
 use enclave::privacy::vault::MasterKey;
 
@@ -196,4 +196,28 @@ fn egress_ledger_is_empty_by_default() {
     assert_eq!(memory.egress_count().unwrap(), 0);
     assert!(memory.list_egress(10).unwrap().is_empty());
     assert!(memory.verify_egress_chain().unwrap());
+}
+
+#[test]
+fn tainted_flag_persists_across_reload() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("vault.db");
+    let key = test_key();
+    let memory = EncryptedMemory::open(&db, &key).unwrap();
+    let sid = memory.create_session("t").unwrap();
+
+    let mut secret = Message::user("my email is x@y.com".to_string());
+    secret.tainted = true;
+    memory.save_message_full(&sid, &secret).unwrap();
+    memory
+        .save_message_full(&sid, &Message::user("plain line".to_string()))
+        .unwrap();
+
+    // Reopen the vault to prove the flag survives a reload.
+    drop(memory);
+    let memory = EncryptedMemory::open(&db, &key).unwrap();
+    let history = memory.get_history(&sid, 10).unwrap();
+    assert_eq!(history.len(), 2);
+    assert!(history[0].tainted);
+    assert!(!history[1].tainted);
 }

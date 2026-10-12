@@ -8,10 +8,12 @@
 //!   (what enters the history may later be sent to the provider).
 //! - `--no-tools` (or `tools.enabled = false`) disables the feature entirely.
 
+use std::path::PathBuf;
 use std::time::Duration;
 
 use tokio::process::Command;
 
+use crate::config::SandboxMode;
 use crate::error::Result;
 
 /// Languages accepted inside fenced blocks.
@@ -119,14 +121,136 @@ fn truncate_utf8(data: &[u8], max_bytes: usize) -> (String, bool) {
     )
 }
 
+/// OS-level sandbox settings for approved shell commands.
+#[derive(Debug, Clone)]
+pub struct Sandbox {
+    pub mode: SandboxMode,
+    pub workspace: PathBuf,
+}
+
+impl Sandbox {
+    /// Create a sandbox for commands run with `workspace` as the writable root.
+    pub fn new(mode: SandboxMode, workspace: impl Into<PathBuf>) -> Self {
+        Self {
+            mode,
+            workspace: workspace.into(),
+        }
+    }
+
+    /// The effective mode on this platform (`Auto` = filesystem jail only on
+    /// macOS, where `sandbox-exec` is available; elsewhere `Off`).
+    pub fn effective(&self) -> SandboxMode {
+        match self.mode {
+            SandboxMode::Auto => {
+                if cfg!(target_os = "macos") {
+                    SandboxMode::Fs
+                } else {
+                    SandboxMode::Off
+                }
+            }
+            other => other,
+        }
+    }
+
+    /// Whether this sandbox actually restricts anything on this platform.
+    pub fn is_active(&self) -> bool {
+        cfg!(target_os = "macos") && self.effective() != SandboxMode::Off
+    }
+
+    /// Build the macOS SBPL profile string.
+    pub fn profile(&self) -> String {
+        let mut p = String::new();
+        p.push_str("(version 1)\n");
+        p.push_str("(deny default)\n");
+        p.push_str("(allow process*)\n");
+        p.push_str("(allow sysctl-read)\n");
+        p.push_str("(allow mach-lookup)\n");
+        p.push_str("(allow file-read*)\n");
+        // Writes are allowed only inside the workspace and temp directories.
+        for dir in sandbox_write_dirs(&self.workspace) {
+            p.push_str(&format!(
+                "(allow file-write* (subpath \"{}\"))\n",
+                escape_sbpl(&dir)
+            ));
+        }
+        p.push_str("(allow file-write* (regex #\"^/dev/(null|stdout|stderr)$\"))\n");
+        match self.effective() {
+            SandboxMode::Strict => p.push_str("(deny network*)\n"),
+            _ => p.push_str("(allow network*)\n"),
+        }
+        p
+    }
+}
+
+/// Directory prefixes where a sandboxed command may write.
+fn sandbox_write_dirs(workspace: &std::path::Path) -> Vec<String> {
+    let mut dirs = vec![workspace.display().to_string()];
+    if let Ok(tmp) = std::env::var("TMPDIR") {
+        if !tmp.is_empty() {
+            dirs.push(tmp);
+        }
+    }
+    for extra in [
+        "/tmp",
+        "/private/tmp",
+        "/var/folders",
+        "/private/var/folders",
+    ] {
+        dirs.push(extra.to_string());
+    }
+    dirs
+}
+
+/// Escape a path for embedding in an SBPL quoted string.
+fn escape_sbpl(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
 /// Run a proposed command under `sh -c` with a hard timeout.
 ///
 /// The child process is killed if the timeout elapses or if the returned
 /// future is dropped. Output is truncated to `max_output_bytes` per stream.
 pub async fn run(command: &str, timeout: Duration, max_output_bytes: usize) -> Result<ToolOutput> {
-    let child = Command::new("sh")
-        .arg("-c")
-        .arg(command)
+    run_with(
+        "sh",
+        &["-c", command],
+        timeout,
+        max_output_bytes,
+    )
+    .await
+}
+
+/// Run a command inside the given sandbox (when one is active on this
+/// platform), falling back to a plain `sh -c` run otherwise.
+pub async fn run_sandboxed(
+    command: &str,
+    timeout: Duration,
+    max_output_bytes: usize,
+    sandbox: Option<&Sandbox>,
+) -> Result<ToolOutput> {
+    match sandbox {
+        Some(sb) if sb.is_active() => {
+            let profile = sb.profile();
+            run_with(
+                "sandbox-exec",
+                &["-p", &profile, "sh", "-c", command],
+                timeout,
+                max_output_bytes,
+            )
+            .await
+        }
+        _ => run(command, timeout, max_output_bytes).await,
+    }
+}
+
+async fn run_with(
+    program: &str,
+    args: &[&str],
+    timeout: Duration,
+    max_output_bytes: usize,
+) -> Result<ToolOutput> {
+    let child = Command::new(program)
+        .args(args)
         .kill_on_drop(true)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -246,5 +370,74 @@ mod tests {
         assert!(msg.starts_with("[tool] $ echo hi"));
         assert!(msg.ends_with("[/tool]"));
         assert!(msg.contains("exit code: 0"));
+    }
+
+    #[test]
+    fn sandbox_effective_mode_follows_the_platform() {
+        let auto = Sandbox::new(SandboxMode::Auto, "/tmp/ws");
+        if cfg!(target_os = "macos") {
+            assert_eq!(auto.effective(), SandboxMode::Fs);
+            assert!(auto.is_active());
+        } else {
+            assert_eq!(auto.effective(), SandboxMode::Off);
+            assert!(!auto.is_active());
+        }
+        assert_eq!(
+            Sandbox::new(SandboxMode::Off, "/tmp/ws").effective(),
+            SandboxMode::Off
+        );
+        assert_eq!(
+            Sandbox::new(SandboxMode::Strict, "/tmp/ws").effective(),
+            SandboxMode::Strict
+        );
+    }
+
+    #[test]
+    fn sandbox_profile_scopes_writes_and_network() {
+        let sb = Sandbox::new(SandboxMode::Fs, "/Users/me/project");
+        let p = sb.profile();
+        assert!(p.contains("(deny default)"));
+        assert!(p.contains("(allow file-read*)"));
+        assert!(p.contains("(allow file-write* (subpath \"/Users/me/project\"))"));
+        assert!(p.contains("(allow network*)"));
+        assert!(!p.contains("(deny network*)"));
+
+        let strict = Sandbox::new(SandboxMode::Strict, "/Users/me/project");
+        assert!(strict.profile().contains("(deny network*)"));
+    }
+
+    #[tokio::test]
+    async fn run_sandboxed_off_matches_plain_run() {
+        let plain = run("echo sandbox-check", Duration::from_secs(10), 8192)
+            .await
+            .unwrap();
+        let sandboxless = run_sandboxed("echo sandbox-check", Duration::from_secs(10), 8192, None)
+            .await
+            .unwrap();
+        assert_eq!(plain.stdout, sandboxless.stdout);
+
+        let off = Sandbox::new(SandboxMode::Off, std::env::temp_dir());
+        let out = run_sandboxed("echo sandbox-check", Duration::from_secs(10), 8192, Some(&off))
+            .await
+            .unwrap();
+        assert_eq!(out.stdout.trim(), "sandbox-check");
+    }
+
+    #[tokio::test]
+    async fn run_sandboxed_allows_writing_inside_workspace() {
+        // Only meaningful on macOS where sandbox-exec is active; elsewhere the
+        // sandbox is a no-op but the command must still run.
+        let ws = std::env::temp_dir().join(format!("enclave-sbx-{}", std::process::id()));
+        std::fs::create_dir_all(&ws).unwrap();
+        let sb = Sandbox::new(SandboxMode::Auto, &ws);
+        if sb.is_active() {
+            let cmd = format!("echo hi > {}", ws.join("out.txt").display());
+            let out = run_sandboxed(&cmd, Duration::from_secs(10), 8192, Some(&sb))
+                .await
+                .unwrap();
+            assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+            assert!(ws.join("out.txt").exists());
+        }
+        let _ = std::fs::remove_dir_all(&ws);
     }
 }

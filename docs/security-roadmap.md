@@ -68,11 +68,15 @@ Cosa fa: esegue i comandi approvati dentro una gabbia: filesystem ristretto alla
 
 Cosa apporta: è il buco più grande oggi. Un comando che approvi gira con i tuoi privilegi pieni. L'approvazione umana resta, ma il raggio d'azione di un comando malevolo o di un semplice errore si riduce moltissimo. È il singolo intervento con il miglior rapporto tra sicurezza e beneficio.
 
+**Stato: implementato.** I comandi approvati (proposte markdown, `run_shell` in modalità agentica, `!command`) girano su macOS dentro `sandbox-exec`: letture consentite, scritture limitate al workspace e alle directory temporanee, rete bloccabile con `[tools] sandbox = "strict"` (valori: `"auto"` predefinito, `"off"`, `"fs"`, `"strict"`). Su altre piattaforme resta l'esecuzione normale con approvazione umana.
+
 ### B2. Taint tracking e classificazione (Sforzo M)
 
 Cosa fa: segna messaggi e allegati come sensibili e garantisce che non vengano mai inviati a un provider remoto nei turni successivi. Oggi la redazione vale per la singola esecuzione.
 
 Cosa apporta: chiude un buco. Una volta che un dato è entrato nel contesto, continuerebbe a viaggiare a ogni turno. Con il taint la protezione persiste per tutta la sessione.
+
+**Stato: implementato.** I messaggi (e gli allegati di testo) in cui il guard rileva dati sensibili vengono marcati `tainted` e salvati così nel database cifrato; a ogni turno successivo il motore ri-redige automaticamente i messaggi tainted (placeholder stabili, senza richiedere conferma) prima dell'invio a un provider remoto. Config `[guard] taint = false` per disattivarlo.
 
 ### B3. Policy-as-code per l'uscita dati (Sforzo M)
 

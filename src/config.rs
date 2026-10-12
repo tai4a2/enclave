@@ -61,6 +61,11 @@ pub struct ToolsSettings {
     /// `agent` (real function calling with the built-in tool set).
     #[serde(default)]
     pub mode: ToolsMode,
+    /// OS sandbox applied to approved shell commands: `auto` (default),
+    /// `off`, `fs` (no writes outside the workspace) or `strict` (also no
+    /// network). macOS-only; ignored elsewhere.
+    #[serde(default)]
+    pub sandbox: SandboxMode,
 }
 
 /// How the assistant may use tools.
@@ -75,6 +80,21 @@ pub enum ToolsMode {
     Agent,
 }
 
+/// Operating-system sandbox for approved shell commands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SandboxMode {
+    /// Use the strongest available sandbox (macOS `sandbox-exec`), else none.
+    #[default]
+    Auto,
+    /// Never sandbox (run the command as-is).
+    Off,
+    /// Block writes outside the workspace and temp dirs.
+    Fs,
+    /// Like `fs`, and also block all network access.
+    Strict,
+}
+
 impl Default for ToolsSettings {
     fn default() -> Self {
         Self {
@@ -82,6 +102,7 @@ impl Default for ToolsSettings {
             timeout_secs: 30,
             max_output_bytes: 8192,
             mode: ToolsMode::Proposals,
+            sandbox: SandboxMode::Auto,
         }
     }
 }
@@ -107,6 +128,11 @@ pub struct GuardSettings {
     pub enabled: bool,
     /// Behaviour when sensitive data is detected.
     pub mode: GuardMode,
+    /// Taint tracking: messages found to contain sensitive data are marked and
+    /// automatically re-redacted on every later turn so they never leave the
+    /// machine verbatim again.
+    #[serde(default = "default_true")]
+    pub taint: bool,
 }
 
 impl Default for GuardSettings {
@@ -114,6 +140,7 @@ impl Default for GuardSettings {
         Self {
             enabled: true,
             mode: GuardMode::Ask,
+            taint: true,
         }
     }
 }

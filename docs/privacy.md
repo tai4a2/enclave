@@ -36,8 +36,14 @@ lives only in your shell environment, not on disk.
 
 ## 3. Master key
 
-- Derived with **PBKDF2-HMAC-SHA256, 600,000 iterations**, random 32-byte salt (`~/.config/enclave/salt.bin`)
-- Held in a `MasterKey` type that is **zeroized on drop**
+- Derived with **Argon2id** (memory-hard, 19 MiB, t=2) by default; **legacy
+  PBKDF2-HMAC-SHA256 (600,000 iterations)** vaults keep working — the algorithm
+  is recorded in the salt file (`ENCLAVE-KDF` header). Pick the default for new
+  vaults with `kdf = "argon2id" | "pbkdf2"` in `config.toml`.
+- Random 32-byte salt (`~/.config/enclave/salt.bin`)
+- Held in a `MasterKey` type that is **zeroized on drop** and, best-effort,
+  `mlock`-ed so it is never written to swap; the process also disables core dumps
+  (`harden_process`)
 - With `use_keychain = true` (default) the derived key is cached in the local
   credentials file (`keys.toml`, mode `0600`): the master password is asked only
   the first time, then later launches skip it with no OS-keychain dialog. With
@@ -120,6 +126,35 @@ The TUI can ring the terminal bell and post a macOS notification when a reply
 or a tool approval is ready (`[tui] notify`, default `true`). This is entirely
 local: the bell writes to the terminal and the macOS path shells out to
 `osascript`; no data is transmitted.
+
+### Egress ledger
+
+Every request that leaves the machine is appended to an **encrypted, tamper-evident
+ledger** inside `vault.db`. Each entry stores only a **SHA-256 fingerprint** of the
+serialized payload, the provider/model, a timestamp, and the guard's redaction map
+(e.g. `2 EMAIL, 1 CARD`) — **never the payload or any secret in clear**, so the
+ledger itself cannot leak data. Entries are chained (`prev_hash` → `hash`), so any
+edit breaks the chain: `enclave ledger --verify` (CLI) or `/ledger` (TUI) detects it
+and exits non-zero. Use it to audit *what* left the machine and *when*, without
+storing *what* was said.
+
+### Auto-lock, blur and clipboard
+
+The TUI can lock itself behind the master password after a period of inactivity
+(`[security] auto_lock_secs`); the transcript is replaced by a masked prompt and
+unlocking re-derives the key and re-opens the encrypted DB. The view is blanked
+when the terminal window loses focus, so nothing is visible in the background.
+Text copied from Enclave with Ctrl-Y/`/copy` is cleared from the clipboard after
+`[security] clipboard_clear_secs` (default 30s) — but only if the clipboard still
+holds exactly that text. `/panic` locks and hides the transcript immediately.
+
+### Duress password
+
+Set `ENCLAVE_DURESS_PASSWORD` in the environment (it is **never** written to
+`config.toml`). If that password is typed at the master-password prompt, Enclave
+opens a **separate decoy vault** at `<config>/decoy/` instead of the real one,
+giving plausible deniability under coercion. When a duress password is configured
+the "unlock once" cache is bypassed, so a password is always required.
 
 ## 5. Telemetry
 

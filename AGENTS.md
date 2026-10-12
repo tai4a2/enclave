@@ -5,7 +5,7 @@ Run the built binary from `./dist/enclave`; the user mostly uses `./dist/enclave
 
 ## Build & verify loop (ALWAYS)
 After every change:
-1. `cargo test` — must stay green (currently 141 tests).
+1. `cargo test` — must stay green (currently 150 tests).
 2. `cargo clippy --all-targets` — must be 0 warnings.
 3. `cargo build --release`
 4. `cp target/release/enclave dist/enclave && codesign --force --sign - dist/enclave`
@@ -15,8 +15,12 @@ macOS re-prompts the keychain on launch.
 
 ## Git
 - Commit ONLY on explicit user request. Do not commit proactively.
-- Branch `main`. Last commit at time of writing: `7c03be8`
-  ("Add clipboard, rules/permissions, Plan/Build and command palette").
+- Branch `main`. Last commit at time of writing: `12868cf`
+  ("Add Wave 3 features and local Supermemory").
+- Working tree (uncommitted): security roadmap Wave A start — A1 Argon2id
+  (configurable `kdf` in config, versioned salt file, legacy PBKDF2 still works)
+  and A2 protected memory (`src/privacy/secure.rs`: `harden_process`,
+  mlock/unlock; `MasterKey` is a locked heap box, zeroized on drop).
 
 ## Environment
 - Config dir: `~/Library/Application Support/dev.enclave.enclave`

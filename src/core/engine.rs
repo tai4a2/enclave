@@ -344,6 +344,24 @@ impl ChatEngine {
         msgs
     }
 
+    /// Record an outbound request in the encrypted egress ledger (best-effort:
+    /// never blocks a send). Stores only a fingerprint and the redaction summary.
+    pub fn record_egress(&mut self, messages: &[Message]) -> Result<()> {
+        let payload = serde_json::to_vec(messages).unwrap_or_default();
+        let redactions = self
+            .redactor
+            .as_ref()
+            .map(|r| r.summary())
+            .unwrap_or_default();
+        self.memory.add_egress(
+            Some(&self.session.id),
+            self.provider_name(),
+            &self.model,
+            &payload,
+            &redactions,
+        )
+    }
+
     /// Effective permission for a tool call: Plan mode refuses mutations, the
     /// `external_directory` rule tightens out-of-workspace paths, and `auto`
     /// turns `ask` into `allow` (denied tools stay denied).
@@ -373,6 +391,7 @@ impl ChatEngine {
         self.session
             .push(Message::user_with_attachments(input, attachments), &self.memory)?;
         let messages = self.outgoing_messages();
+        let _ = self.record_egress(&messages);
         let model = self.model.clone();
         let effort = self.reasoning_effort.clone();
         let provider = self.provider.get().await?;
@@ -420,6 +439,8 @@ impl ChatEngine {
 
         for _ in 0..max_iterations.max(1) {
             let messages = self.outgoing_messages();
+            let _ = self.record_egress(&messages);
+        let _ = self.record_egress(&messages);
             let model = self.model.clone();
             let effort = self.reasoning_effort.clone();
             let response = self
@@ -522,6 +543,7 @@ impl ChatEngine {
     /// set of tool calls awaiting the caller's decision.
     pub async fn agentic_step(&mut self, defs: &[ToolDef]) -> Result<AgentStep> {
         let messages = self.outgoing_messages();
+        let _ = self.record_egress(&messages);
         let model = self.model.clone();
         let effort = self.reasoning_effort.clone();
         let response = {

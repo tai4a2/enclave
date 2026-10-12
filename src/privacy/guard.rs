@@ -215,6 +215,21 @@ impl Redactor {
         ph
     }
 
+    /// A short, secret-free summary of what was redacted so far
+    /// (e.g. `2 EMAIL, 1 CARD`). Suitable for the egress ledger.
+    pub fn summary(&self) -> String {
+        if self.counters.is_empty() {
+            return String::new();
+        }
+        let mut parts: Vec<String> = self
+            .counters
+            .iter()
+            .map(|(kind, n)| format!("{n} {kind}"))
+            .collect();
+        parts.sort();
+        parts.join(", ")
+    }
+
     /// Replace every detected finding in `text` with its placeholder.
     pub fn apply(&mut self, text: &str) -> String {
         let findings = scan(text);

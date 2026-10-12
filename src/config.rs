@@ -276,6 +276,37 @@ impl Default for MemorySettings {
     }
 }
 
+/// Lock-screen and clipboard hardening.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SecuritySettings {
+    /// Lock the TUI after this many seconds of inactivity (0 = disabled).
+    #[serde(default)]
+    pub auto_lock_secs: u64,
+    /// Clear the clipboard this many seconds after Enclave put something on it
+    /// (0 = disabled).
+    #[serde(default = "default_clipboard_clear")]
+    pub clipboard_clear_secs: u64,
+    /// Optional duress password. When set, typing it at the master-password
+    /// prompt is meant to open a decoy vault; reserved for the decoy-vault
+    /// feature.
+    #[serde(default)]
+    pub duress_password: Option<String>,
+}
+
+fn default_clipboard_clear() -> u64 {
+    30
+}
+
+impl Default for SecuritySettings {
+    fn default() -> Self {
+        Self {
+            auto_lock_secs: 0,
+            clipboard_clear_secs: 30,
+            duress_password: None,
+        }
+    }
+}
+
 /// Persisted, non-sensitive application settings.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Settings {
@@ -293,6 +324,11 @@ pub struct Settings {
     /// stored).
     #[serde(default = "default_true")]
     pub use_keychain: bool,
+    /// Key-derivation function for new vaults: `argon2id` (default) or
+    /// `pbkdf2`. Ignored for existing vaults, which keep the algorithm recorded
+    /// in their salt file.
+    #[serde(default)]
+    pub kdf: Option<String>,
     /// Optional system prompt prepended to every conversation.
     pub system_prompt: Option<String>,
     /// Optional reasoning effort hint (`low`/`medium`/`high`) sent to
@@ -326,6 +362,9 @@ pub struct Settings {
     /// Local encrypted supermemory.
     #[serde(default)]
     pub memory: MemorySettings,
+    /// Lock screen, clipboard and duress hardening.
+    #[serde(default)]
+    pub security: SecuritySettings,
     /// Id of the session currently in progress (auto-resumed at startup).
     #[serde(default)]
     pub working_session: Option<String>,
@@ -361,6 +400,7 @@ impl Default for Settings {
             default_provider: "openrouter".to_string(),
             default_model: "mistralai/mistral-large-4-0".to_string(),
             use_keychain: true,
+            kdf: None,
             system_prompt: None,
             reasoning_effort: None,
             ollama_base_url: "http://localhost:11434".to_string(),
@@ -372,6 +412,7 @@ impl Default for Settings {
             tui: TuiSettings::default(),
             mcp: McpSettings::default(),
             memory: MemorySettings::default(),
+            security: SecuritySettings::default(),
             working_session: None,
         }
     }
@@ -396,5 +437,23 @@ impl Settings {
         let raw = toml::to_string_pretty(self).map_err(|e| EnclaveError::Other(e.to_string()))?;
         std::fs::write(path, raw)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn security_defaults_are_sane() {
+        let s = SecuritySettings::default();
+        assert_eq!(s.auto_lock_secs, 0);
+        assert_eq!(s.clipboard_clear_secs, 30);
+        assert!(s.duress_password.is_none());
+
+        // Defaults survive a real Settings value.
+        let settings = Settings::default();
+        assert_eq!(settings.security.clipboard_clear_secs, 30);
+        assert_eq!(settings.security.auto_lock_secs, 0);
     }
 }

@@ -65,3 +65,30 @@ fn cached_key_verification_rejects_wrong_password() {
     assert!(!vault.cached_key_matches("wrong-guess", &cached).unwrap());
     assert!(!vault.cached_key_matches("", &cached).unwrap());
 }
+
+#[test]
+fn new_vault_writes_a_versioned_salt_record() {
+    let dir = tempfile::tempdir().unwrap();
+    let vault = Vault::new(dir.path());
+    vault.load_or_create_salt().unwrap();
+    let raw = std::fs::read(vault.salt_path()).unwrap();
+    assert!(raw.starts_with(b"ENCLAVE-KDF"), "salt file must be versioned");
+    // magic + version + kdf id + 32-byte salt
+    assert_eq!(raw.len(), 11 + 1 + 1 + 32);
+}
+
+#[test]
+fn legacy_pbkdf2_salt_is_still_supported() {
+    // A bare 32-byte salt file is the old PBKDF2 format; it must keep working.
+    let dir = tempfile::tempdir().unwrap();
+    let vault = Vault::new(dir.path());
+    let legacy_salt = [7u8; 32];
+    std::fs::write(vault.salt_path(), legacy_salt).unwrap();
+
+    let salt = vault.load_or_create_salt().unwrap();
+    assert_eq!(salt, legacy_salt.to_vec(), "legacy salt must be preserved");
+
+    let a = vault.derive_key("pw", false).unwrap();
+    let b = vault.derive_key("pw", false).unwrap();
+    assert_eq!(a.expose(), b.expose());
+}

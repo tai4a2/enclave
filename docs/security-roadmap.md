@@ -20,6 +20,8 @@ Questa roadmap raccoglie le idee per alzare ancora l'asticella su privacy e sicu
 
 ### A1. Argon2id per la master key (Sforzo S)
 
+**Stato: implementato.** La derivazione usa Argon2id di default (19 MiB, t=2); i vault esistenti restano su PBKDF2 perché l'algoritmo è registrato nell'header del file salt (`ENCLAVE-KDF`). Configurabile con `kdf = "argon2id" | "pbkdf2"` in `config.toml`.
+
 Cosa fa: sostituisce, o affianca, PBKDF2 con Argon2id per derivare la chiave dalla password.
 
 Cosa apporta: Argon2id è *memory-hard*, cioè richiede molta memoria per ogni tentativo. Questo rende gli attacchi a forza bruta via GPU molto più costosi e alza la resistenza del punto più critico di tutto il sistema: la chiave che protegge i dati.
@@ -27,6 +29,8 @@ Cosa apporta: Argon2id è *memory-hard*, cioè richiede molta memoria per ogni t
 Nota: va reso configurabile per non rompere i vault già esistenti.
 
 ### A2. Memoria protetta (Sforzo S)
+
+**Stato: implementato.** `src/privacy/secure.rs`: `harden_process` disabilita i core dump (e su Linux rende il processo non-dumpable); la `MasterKey` è una box su heap `mlock`-ata e azzerata al drop.
 
 Cosa fa: tiene la master key bloccata in RAM (mlock) e impedisce che finisca nel file di swap o nei core dump di un crash (MADV_DONTDUMP).
 
@@ -38,17 +42,23 @@ Cosa fa: registra in modo cifrato e a prova di manomissione (catena di hash) ogn
 
 Cosa apporta: diventa un registro doganale di tutto ciò che lascia la macchina. Non contiene nulla in chiaro, ma ti permette in ogni momento di verificare cosa è uscito e di dimostrarlo. Rende tangibile la promessa di privacy.
 
+**Stato: implementato.** Tabella `egress` cifrata in `vault.db` con catena di hash (`prev_hash` + `hash`), verifica di integrità (`enclave ledger --verify`, `/ledger`) e conteggio nella barra privacy della TUI. Registra solo impronte (SHA-256 del payload), modello, data/ora e la mappa di redazione — mai payload o segreti in chiaro.
+
 ### A4. Auto-lock, blur e clipboard (Sforzo S)
 
 Cosa fa: blocca l'app dopo un periodo di inattività, sfoca la vista quando la finestra perde il focus e svuota gli appunti dopo N secondi (con un controllo che evita di cancellare dati copiati da te nel frattempo).
 
 Cosa apporta: riduce i rischi da scrivania — qualcuno che passa, uno screenshot, il contenuto degli appunti che resta in giro. Sono accorgimenti piccoli ma con un effetto percepito molto forte.
 
+**Stato: implementato.** `SecuritySettings.auto_lock_secs` blocca la TUI dopo inattività dietro la master password; la vista si sfuoca quando la finestra perde il focus; il clipboard si svuota dopo `clipboard_clear_secs` (default 30s) solo se il contenuto è ancora quello copiato da Enclave.
+
 ### A5. Panic e duress password (Sforzo S)
 
 Cosa fa: una scorciatoia che chiude e blocca subito l'app, e una *duress password* che apre un vault civetta invece di quello reale.
 
 Cosa apporta: negabilità plausibile. Sotto costrizione mostri una conversazione innocua. È una feature tipica dei prodotti di sicurezza seri.
+
+**Stato: implementato.** `/panic` blocca subito la TUI e nasconde il transcript; se la variabile d'ambiente `ENCLAVE_DURESS_PASSWORD` è impostata, digitando quella password all'avvio si apre un vault civetta separato (`<config>/decoy/`) invece di quello reale.
 
 ## B. Upgrade robusti
 

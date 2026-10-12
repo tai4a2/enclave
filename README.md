@@ -12,7 +12,7 @@ Existing AI CLIs store your history in plaintext and your API keys in plain file
 |--------|----------------|---------|
 | Chat history | ❌ Plaintext on disk | ✅ AES-256 (SQLCipher) |
 | API keys | ❌ Plaintext file (`auth.json`) | ✅ OS Keychain |
-| Master key | ❌ None | ✅ PBKDF2-SHA256, 600k iterations |
+| Master key | ❌ None | ✅ Argon2id (or PBKDF2) + mlock/no-swap |
 | Telemetry | ⚠️ Unclear | ✅ Zero by default |
 | Local models | ⚠️ Limited | ✅ Ollama (100% offline) |
 
@@ -20,7 +20,7 @@ Existing AI CLIs store your history in plaintext and your API keys in plain file
 
 - **Zero plaintext at rest** — chat history lives in a SQLCipher database (AES-256, HMAC-SHA512, 256k KDF iterations). Nothing readable without the master key.
 - **API keys in the OS keychain** — macOS Keychain, Windows Credential Manager, Linux Secret Service. Never in a file.
-- **Password-derived master key** — PBKDF2-HMAC-SHA256 with 600,000 iterations and a random 32-byte salt, zeroized from memory when dropped.
+- **Password-derived master key** — Argon2id (memory-hard) by default, PBKDF2-HMAC-SHA256 (600k) for legacy vaults, with a random 32-byte salt. The key is zeroized on drop and `mlock`-ed so it never hits swap; core dumps are disabled.
 - **Zero telemetry** — no data leaves the machine unless you chat with a remote provider. For sensitive content, use Ollama: fully offline.
 
 ## Install
@@ -182,6 +182,49 @@ working_session = "9f3c1a2b-…"
   `remember` tool (permission-gated).
 - **Working session**: Enclave remembers which session you were in and reopens
   it on the next launch.
+
+## Security hardening
+
+Wave A of the [security roadmap](docs/security-roadmap.md) is implemented.
+
+**Master key.** New vaults derive the master key with **Argon2id** (memory-hard).
+Legacy PBKDF2 vaults keep working (the algorithm is recorded in the salt header).
+Set the default for *new* vaults with `kdf = "argon2id" | "pbkdf2"`. The key is
+held in a `mlock`-ed heap buffer (never swapped) and zeroized on drop; core dumps
+are disabled at startup.
+
+**Egress ledger.** Every request that leaves the machine is recorded — in the
+encrypted `vault.db` — as a SHA-256 fingerprint plus the model, timestamp and the
+guard's redaction map. **No payload or secret is ever stored in clear.** The chain
+is tamper-evident:
+
+```bash
+enclave ledger            # list recent egresses (fingerprints only)
+enclave ledger --verify   # verify the hash chain (exit 2 if tampered)
+```
+
+In the TUI the privacy bar shows the egress count and `/ledger` opens the list.
+
+**Locking and clipboard.** In the TUI:
+
+| Behaviour | Config | Default |
+|-----------|--------|---------|
+| Auto-lock after inactivity (hides the transcript behind the master password) | `[security] auto_lock_secs` | `0` (off) |
+| Clipboard auto-clear after copying from Enclave | `[security] clipboard_clear_secs` | `30` s |
+| Blur the view when the window loses focus | always on | — |
+| Instant lock + hide | `/panic` | — |
+
+The clipboard is cleared only if it still holds the text Enclave copied.
+
+**Duress password.** Set `ENCLAVE_DURESS_PASSWORD` in your environment; typing
+that password at the master-password prompt opens a **separate decoy vault**
+(`<config>/decoy/`) instead of the real one. It is never written to `config.toml`.
+
+```toml
+[security]
+auto_lock_secs = 300        # lock the TUI after 5 minutes idle (0 = off)
+clipboard_clear_secs = 30   # clear Enclave-copied clipboard text after 30s
+```
 
 ## Agentic mode (function calling)
 
@@ -494,6 +537,9 @@ launch.
 | `enclave sessions delete <id> --purge` | Delete a session **and** compact the DB (freed ciphertext removed) |
 | `enclave sessions wipe-all` | Delete ALL sessions + compact (asks confirmation) |
 | `enclave sessions vacuum` | Reclaim disk space from deleted ciphertext |
+| `enclave ledger` | Show the encrypted egress ledger — what left the machine (fingerprints only) |
+| `enclave ledger --verify` | Verify the ledger hash chain (exit 2 if tampered) |
+| `enclave memory add\|list\|search\|pin\|edit\|forget\|clear` | Manage the local encrypted Supermemory |
 
 Security/privacy audit: see [docs/audit.md](docs/audit.md).
 

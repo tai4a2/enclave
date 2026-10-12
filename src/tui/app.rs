@@ -8,6 +8,7 @@ use crossterm::event::{
     DisableFocusChange, DisableMouseCapture, EnableFocusChange, EnableMouseCapture, Event,
     EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
 };
+use crossterm::cursor::SetCursorStyle;
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -130,7 +131,49 @@ fn surface() -> Style {
 
 /// Text shown by `/help`.
 const SLASH_HELP: &str =
-    "commands: /help · /new · /switch · /clear · /undo · /redo · /retry · /compact · /find <text> · /search <text> · /model [id] · /effort · /plan · /build · /attach <path> · /detach · /export [md|html|pdf] [path] · /editor · /init · /mcp · /ledger · /rag [index <paths>|search <q>|status|clear] · /airgap [on|off] · /route [on|off] · /remember <text> · /memory [search <q>|pin <id>] · /forget <id|text> · /checkpoint · /theme [name] · /commands · /credits · /panic · /quit   (Ctrl-S picker · Ctrl-R search sessions · Ctrl-Y copy · Ctrl-O editor · Shift+Tab plan/build · @file refs · !shell)";
+    "commands: /help · /new · /switch · /clear · /undo · /redo · /retry · /compact · /find <text> · /search <text> · /model [id] · /effort · /connect [provider] · /thinking · /details · /plan · /build · /attach <path> · /detach · /export [md|html|pdf] [path] · /editor · /init · /mcp · /ledger · /rag [index <paths>|search <q>|status|clear] · /airgap [on|off] · /route [on|off] · /remember <text> · /memory [search <q>|pin <id>] · /forget <id|text> · /checkpoint · /theme [name] · /commands · /credits · /panic · /quit   (Ctrl-P palette · Ctrl-S picker · Ctrl-R search sessions · Ctrl-Y copy · Ctrl-O editor · Shift+Tab plan/build · @file refs · !shell)";
+
+/// Command palette entries (Ctrl-P): (command, one-line description).
+const PALETTE_COMMANDS: &[(&str, &str)] = &[
+    ("/help", "show all commands"),
+    ("/new", "start a new session"),
+    ("/switch", "open the session picker"),
+    ("/clear", "wipe the current session history"),
+    ("/model", "pick a model (saved for next launches)"),
+    ("/models", "alias of /model"),
+    ("/effort", "pick the reasoning effort"),
+    ("/connect", "switch provider / add a key"),
+    ("/provider", "alias of /connect"),
+    ("/thinking", "toggle reasoning detail blocks"),
+    ("/details", "toggle tool detail blocks"),
+    ("/theme", "pick a colour theme"),
+    ("/plan", "switch to read-only Plan mode"),
+    ("/build", "switch to Build mode"),
+    ("/undo", "remove the last turn"),
+    ("/redo", "restore the last undone turn"),
+    ("/retry", "re-send the last message"),
+    ("/compact", "summarise and shrink the session"),
+    ("/find", "search inside this conversation (Ctrl-F)"),
+    ("/search", "search across all sessions (Ctrl-R)"),
+    ("/export", "export the chat as md/html/pdf"),
+    ("/attach", "attach a file or image to the next message"),
+    ("/detach", "drop all pending attachments"),
+    ("/editor", "edit the message box in $EDITOR (Ctrl-O)"),
+    ("/init", "generate an AGENTS.md for this project"),
+    ("/rag", "local file index (index/search/status/clear)"),
+    ("/ledger", "show the encrypted egress ledger"),
+    ("/airgap", "toggle air-gap (local only)"),
+    ("/route", "toggle routing of sensitive turns to Ollama"),
+    ("/remember", "save a fact to encrypted memory"),
+    ("/memory", "list / search / pin memories"),
+    ("/forget", "delete a memory"),
+    ("/checkpoint", "summarise this session into memory"),
+    ("/commands", "list custom .md commands"),
+    ("/credits", "show OpenRouter credits / usage"),
+    ("/mcp", "list tools exposed by MCP servers"),
+    ("/panic", "lock now (hide the transcript)"),
+    ("/quit", "exit Enclave"),
+];
 
 /// One rendered transcript entry.
 struct ChatLine {
@@ -220,6 +263,8 @@ enum KeyAction {
     EditInput,
     /// Ctrl+F: search inside the current conversation.
     Find,
+    /// Ctrl+P: open the command palette.
+    Palette,
 }
 
 /// Visual line-selection state for copy mode (Ctrl+Y).
@@ -270,6 +315,8 @@ pub async fn run(
     agent: bool,
 ) -> Result<()> {
     // Apply the theme and key bindings from config.toml (best effort).
+    let mut cursor_spec: Option<String> = None;
+    let mut cursor_blinking = true;
     if let Ok(paths) = crate::config::Paths::resolve() {
         if let Ok(settings) = crate::config::Settings::load(&paths.config_file) {
             if let Some(name) = &settings.tui.theme {
@@ -280,6 +327,8 @@ pub async fn run(
             set_keybinds(Keybinds::from_settings(&settings.tui));
             set_notify(settings.tui.notify);
             set_clipboard_ttl(settings.security.clipboard_clear_secs);
+            cursor_spec = settings.tui.cursor.clone();
+            cursor_blinking = settings.tui.cursor_blinking;
         }
     }
     enable_raw_mode()?;
@@ -290,6 +339,18 @@ pub async fn run(
         EnableMouseCapture,
         EnableFocusChange
     )?;
+    if let Some(spec) = cursor_spec.as_deref() {
+        let style = match (spec, cursor_blinking) {
+            ("block", true) => SetCursorStyle::BlinkingBlock,
+            ("block", false) => SetCursorStyle::SteadyBlock,
+            ("underline", true) => SetCursorStyle::BlinkingUnderScore,
+            ("underline", false) => SetCursorStyle::SteadyUnderScore,
+            ("line", true) => SetCursorStyle::BlinkingBar,
+            ("line", false) => SetCursorStyle::SteadyBar,
+            _ => SetCursorStyle::DefaultUserShape,
+        };
+        let _ = execute!(out, style);
+    }
     let backend = CrosstermBackend::new(out);
     let mut terminal = Terminal::new(backend)?;
 
@@ -407,6 +468,34 @@ async fn run_app(
     // Search overlays: local transcript (/find) and cross-session (Ctrl-R).
     let mut find: Option<FindState> = None;
     let mut search: Option<SessionSearch> = None;
+    // Command palette (Ctrl-P), theme picker (/theme), provider picker (/connect).
+    let mut palette = false;
+    let mut palette_sel: usize = 0;
+    let mut theme_picker = false;
+    let mut theme_sel: usize = 0;
+    let mut provider_picker = false;
+    let mut provider_sel: usize = 0;
+    // Whether tool/output detail lines are shown in the transcript (/details).
+    let mut details = true;
+    // `@file` fuzzy completion popup: (matches, sel).
+    let mut at_files: Vec<String> = Vec::new();
+    let mut at_sel: usize = 0;
+    // Full workspace file list for `@` completion (built once at startup).
+    let at_all: Vec<String> = {
+        let mut files = Vec::new();
+        crate::cli::collect_files(&ctx.workspace, &mut files, 0);
+        let mut rel: Vec<String> = files
+            .into_iter()
+            .filter_map(|p| {
+                p.strip_prefix(&ctx.workspace)
+                    .ok()
+                    .map(|r| r.to_string_lossy().to_string())
+            })
+            .collect();
+        rel.sort();
+        rel.truncate(5000);
+        rel
+    };
     // Optional periodic memory checkpoint (opt-in via `[memory] autosave_secs`).
     let autosave_secs = crate::config::Paths::resolve()
         .ok()
@@ -415,7 +504,7 @@ async fn run_app(
         .unwrap_or(0);
     let mut last_autosave = std::time::Instant::now();
     let mut autosave_mark = engine.session.messages.len();
-    let theme_current = crate::config::Paths::resolve()
+    let mut theme_current = crate::config::Paths::resolve()
         .ok()
         .and_then(|p| crate::config::Settings::load(&p.config_file).ok())
         .and_then(|s| s.tui.theme)
@@ -474,6 +563,20 @@ async fn run_app(
                 GuardDecision::Redacted => "placeholders",
             }
         };
+        // Refresh `@file` completion candidates from the current input.
+        if let Some(q) = at_query(&input) {
+            at_files = at_all
+                .iter()
+                .filter(|p| p.to_lowercase().contains(&q.to_lowercase()))
+                .take(50)
+                .cloned()
+                .collect();
+            if at_sel >= at_files.len() {
+                at_sel = 0;
+            }
+        } else {
+            at_files.clear();
+        }
         terminal.draw(|f| {
             let atts_label = attachments_label(&pending);
             draw_ui(
@@ -508,6 +611,16 @@ async fn run_app(
                 locked,
                 &lock_input,
                 unfocused,
+                details,
+                palette,
+                palette_sel,
+                theme_picker,
+                theme_sel,
+                &theme_current,
+                provider_picker,
+                provider_sel,
+                &at_files,
+                at_sel,
             )
         })?;
 
@@ -775,6 +888,135 @@ async fn run_app(
                                 }
                                 (KeyCode::Char(c), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
                                     lock_input.push(c);
+                                }
+                                _ => {}
+                            }
+                            continue;
+                        }
+                        // `@file` completion popup: intercept navigation keys.
+                        if !at_files.is_empty()
+                            && matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
+                        {
+                            match key.code {
+                                KeyCode::Up => {
+                                    at_sel = at_sel.saturating_sub(1);
+                                    continue;
+                                }
+                                KeyCode::Down => {
+                                    at_sel = (at_sel + 1).min(at_files.len().saturating_sub(1));
+                                    continue;
+                                }
+                                KeyCode::Esc => {
+                                    at_files.clear();
+                                    continue;
+                                }
+                                KeyCode::Enter | KeyCode::Tab => {
+                                    if let Some(sel) = at_files.get(at_sel).cloned() {
+                                        if let Some(q) = at_query(&input) {
+                                            input = replace_at_token(&input, &q, &sel);
+                                        }
+                                    }
+                                    at_files.clear();
+                                    at_sel = 0;
+                                    continue;
+                                }
+                                _ => {}
+                            }
+                        }
+                        if palette {
+                            if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+                                continue;
+                            }
+                            match key.code {
+                                KeyCode::Up => palette_sel = palette_sel.saturating_sub(1),
+                                KeyCode::Down => {
+                                    palette_sel =
+                                        (palette_sel + 1).min(PALETTE_COMMANDS.len().saturating_sub(1));
+                                }
+                                KeyCode::Home => palette_sel = 0,
+                                KeyCode::End => palette_sel = PALETTE_COMMANDS.len().saturating_sub(1),
+                                KeyCode::Enter => {
+                                    if let Some((cmd, _)) = PALETTE_COMMANDS.get(palette_sel) {
+                                        input = format!("{cmd} ");
+                                    }
+                                    palette = false;
+                                    status = "command palette — edit then Enter to run".into();
+                                }
+                                KeyCode::Esc => {
+                                    palette = false;
+                                    status = "ready".into();
+                                }
+                                KeyCode::Char('c')
+                                    if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                                {
+                                    return Ok(());
+                                }
+                                _ => {}
+                            }
+                            continue;
+                        }
+                        if theme_picker {
+                            if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+                                continue;
+                            }
+                            let names = crate::tui::theme::names();
+                            match key.code {
+                                KeyCode::Up => theme_sel = theme_sel.saturating_sub(1),
+                                KeyCode::Down => {
+                                    theme_sel = (theme_sel + 1).min(names.len().saturating_sub(1));
+                                }
+                                KeyCode::Enter => {
+                                    if let Some(name) = names.get(theme_sel) {
+                                        if let Some(p) = crate::tui::theme::by_name(name) {
+                                            set_palette(p);
+                                            persist_theme(name);
+                                            theme_current = (*name).to_string();
+                                            status = format!("theme: {name} (saved)");
+                                        }
+                                    }
+                                    theme_picker = false;
+                                    privacy = privacy_snapshot(engine, &guard_cfg);
+                                }
+                                KeyCode::Esc => {
+                                    theme_picker = false;
+                                    status = "ready".into();
+                                }
+                                _ => {}
+                            }
+                            continue;
+                        }
+                        if provider_picker {
+                            if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+                                continue;
+                            }
+                            let names = crate::providers::known_providers();
+                            match key.code {
+                                KeyCode::Up => provider_sel = provider_sel.saturating_sub(1),
+                                KeyCode::Down => {
+                                    provider_sel =
+                                        (provider_sel + 1).min(names.len().saturating_sub(1));
+                                }
+                                KeyCode::Enter => {
+                                    if let Some(name) = names.get(provider_sel) {
+                                        match engine.set_provider(name) {
+                                            Ok(()) => {
+                                                persist_settings(|s| {
+                                                    s.default_provider = (*name).to_string()
+                                                });
+                                                status = format!(
+                                                    "provider: {name} (model {}) — set a key with `enclave keys set {name}` if needed",
+                                                    engine.model
+                                                );
+                                            }
+                                            Err(e) => status = format!("error: {e}"),
+                                        }
+                                    }
+                                    provider_picker = false;
+                                    privacy = privacy_snapshot(engine, &guard_cfg);
+                                }
+                                KeyCode::Esc => {
+                                    provider_picker = false;
+                                    status = "ready".into();
                                 }
                                 _ => {}
                             }
@@ -1276,6 +1518,10 @@ async fn run_app(
                                 );
                                 privacy = privacy_snapshot(engine, &guard_cfg);
                             }
+                            KeyAction::Palette => {
+                                palette = true;
+                                palette_sel = 0;
+                            }
                             KeyAction::None => {}
                         }
 
@@ -1302,7 +1548,7 @@ async fn run_app(
                                             "new session — type a name (empty = 'chat'), Enter confirms, Esc cancels"
                                                 .into();
                                     }
-                                    "switch" => {
+                                    "switch" | "sessions" | "resume" | "continue" => {
                                         sessions =
                                             engine.memory.list_sessions().unwrap_or_default();
                                         picker = true;
@@ -1532,7 +1778,7 @@ async fn run_app(
                                         Ok(None) => status = "nothing to retry".into(),
                                         Err(e) => status = format!("error: {e}"),
                                     },
-                                    "compact" => {
+                                    "compact" | "summarize" => {
                                         match engine.compact().await {
                                             Ok(summary) => {
                                                 transcript = transcript_from(engine);
@@ -1570,12 +1816,19 @@ async fn run_app(
                                                 format!("{} custom command(s)", custom.len());
                                         }
                                     }
-                                    "theme" => {
+                                    "theme" | "themes" => {
                                         let all = crate::tui::theme::names().join(", ");
                                         let want = arg.trim();
                                         if want.is_empty() {
-                                            status =
-                                                format!("theme: {theme_current} (available: {all})");
+                                            let names = crate::tui::theme::names();
+                                            theme_sel = names
+                                                .iter()
+                                                .position(|n| *n == theme_current)
+                                                .unwrap_or(0);
+                                            theme_picker = true;
+                                            status = format!(
+                                                "theme picker — ↑/↓ select, Enter choose, Esc close (current: {theme_current})"
+                                            );
                                         } else if let Some(p) =
                                             crate::tui::theme::by_name(want)
                                         {
@@ -2010,7 +2263,27 @@ async fn run_app(
                                         scroll = 0;
                                         status = "panic — locked (enter your master password to resume)".into();
                                     }
-                                    "quit" | "exit" => return Ok(()),
+                                    "palette" => {
+                                        palette = true;
+                                        palette_sel = 0;
+                                    }
+                                    "connect" | "provider" | "providers" => {
+                                        let names = crate::providers::known_providers();
+                                        provider_sel = names
+                                            .iter()
+                                            .position(|n| *n == engine.provider_name())
+                                            .unwrap_or(0);
+                                        provider_picker = true;
+                                        status = "provider picker — ↑/↓ select, Enter switch, Esc close".into();
+                                    }
+                                    "details" | "thinking" => {
+                                        details = !details;
+                                        status = format!(
+                                            "details: {}",
+                                            if details { "shown" } else { "hidden" }
+                                        );
+                                    }
+                                    "quit" | "exit" | "q" => return Ok(()),
                                     "" => status = "type /help for the command list".into(),
                                     other => {
                                         if let Some(c) =
@@ -2440,6 +2713,27 @@ fn list_window(len: usize, sel: usize, visible: usize) -> (usize, usize) {
     (start, (start + visible).min(len))
 }
 
+/// The current `@file` completion query (text after a trailing `@` token).
+fn at_query(input: &str) -> Option<String> {
+    let token = input.rsplit(|c: char| c.is_whitespace()).next().unwrap_or("");
+    token.strip_prefix('@').map(|q| q.to_string())
+}
+
+/// Replace a trailing `@<query>` token with `@<sel> `.
+fn replace_at_token(input: &str, query: &str, sel: &str) -> String {
+    let old = format!("@{query}");
+    if let Some(pos) = input.rfind(&old) {
+        if pos + old.len() == input.len() {
+            let mut s = input[..pos].to_string();
+            s.push('@');
+            s.push_str(sel);
+            s.push(' ');
+            return s;
+        }
+    }
+    input.to_string()
+}
+
 /// Open the selected sidebar session (no-op when already active).
 fn switch_session(
     engine: &mut ChatEngine,
@@ -2833,8 +3127,9 @@ fn handle_key(key: KeyEvent, input: &mut String) -> KeyAction {
         (KeyCode::Char('o'), KeyModifiers::CONTROL) => KeyAction::EditInput,
         (KeyCode::Char('f'), KeyModifiers::CONTROL) => KeyAction::Find,
         (KeyCode::Char('y'), KeyModifiers::CONTROL) => KeyAction::CopyMode,
-        (KeyCode::Char('p'), KeyModifiers::CONTROL) => KeyAction::HistoryPrev,
+        (KeyCode::Char('p'), KeyModifiers::CONTROL) => KeyAction::Palette,
         (KeyCode::Char('n'), KeyModifiers::CONTROL) => KeyAction::HistoryNext,
+        (KeyCode::Char('p'), KeyModifiers::ALT) => KeyAction::HistoryPrev,
         (KeyCode::Tab, _) => KeyAction::ToggleSidebar,
         (KeyCode::BackTab, _) => KeyAction::ToggleMode,
         (KeyCode::Enter, KeyModifiers::ALT) => KeyAction::Newline,
@@ -3105,6 +3400,16 @@ fn draw_ui(
     locked: bool,
     lock_input: &str,
     unfocused: bool,
+    details: bool,
+    palette: bool,
+    palette_sel: usize,
+    theme_picker: bool,
+    theme_sel: usize,
+    theme_current: &str,
+    provider_picker: bool,
+    provider_sel: usize,
+    at_files: &[String],
+    at_sel: usize,
 ) {
     let area = f.area();
     // Base background for the whole screen.
@@ -3217,6 +3522,9 @@ fn draw_ui(
     let inner_w = chat_area.width.saturating_sub(2).max(1);
     let mut cards: Vec<Card> = Vec::new();
     for entry in transcript {
+        if !details && entry.speaker == Speaker::Tool {
+            continue;
+        }
         let card = match entry.speaker {
             Speaker::User => Card {
                 lines: entry
@@ -3739,6 +4047,189 @@ fn draw_ui(
             .block(Block::default().padding(Padding::new(2, 1, 0, 0)));
         f.render_widget(overlay, box_area);
     }
+    // Command palette (Ctrl-P): pick a slash command to insert into the input.
+    if palette {
+        let w = 72.min(area.width.saturating_sub(4));
+        let max_rows = (area.height.saturating_sub(8) as usize).clamp(5, 24);
+        let visible = PALETTE_COMMANDS.len().min(max_rows);
+        let (start, end) = list_window(PALETTE_COMMANDS.len(), palette_sel, visible);
+        let mut lines: Vec<Line> = Vec::new();
+        lines.push(Line::from(Span::styled(
+            format!("command palette · {}/{}", palette_sel + 1, PALETTE_COMMANDS.len()),
+            Style::default().fg(pal().accent).add_modifier(Modifier::BOLD),
+        )));
+        for (j, (cmd, desc)) in PALETTE_COMMANDS[start..end].iter().enumerate() {
+            let i = start + j;
+            let selected = i == palette_sel;
+            let cmd_style = if selected {
+                Style::default().fg(pal().bg).bg(pal().accent).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(pal().accent)
+            };
+            let desc_style = if selected {
+                Style::default().fg(pal().bg).bg(pal().accent)
+            } else {
+                Style::default().fg(pal().dim)
+            };
+            lines.push(Line::from(vec![
+                Span::styled(format!("{:<16}", cmd), cmd_style),
+                Span::styled(desc.to_string(), desc_style),
+            ]));
+        }
+        lines.push(Line::from(
+            [chip("↑↓", "move"), chip("Enter", "insert"), chip("Esc", "close")]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<Span>>(),
+        ));
+        let h = (lines.len() as u16 + 2).min(area.height.saturating_sub(1));
+        let box_area = Rect {
+            x: area.width.saturating_sub(w) / 2,
+            y: area.height.saturating_sub(h) / 2,
+            width: w,
+            height: h,
+        };
+        overlay_bg(f, box_area, pal().accent);
+        f.render_widget(
+            Paragraph::new(lines).block(Block::default().padding(Padding::new(2, 1, 0, 0))),
+            box_area,
+        );
+    }
+    // Theme picker (/theme with no argument).
+    if theme_picker {
+        let names = crate::tui::theme::names();
+        let w = 46.min(area.width.saturating_sub(4));
+        let mut lines: Vec<Line> = vec![Line::from(Span::styled(
+            "theme",
+            Style::default().fg(pal().accent).add_modifier(Modifier::BOLD),
+        ))];
+        for (i, name) in names.iter().enumerate() {
+            let selected = i == theme_sel;
+            let bullet = if *name == theme_current { "●" } else { "○" };
+            let style = if selected {
+                Style::default().fg(pal().bg).bg(pal().accent).add_modifier(Modifier::BOLD)
+            } else if *name == theme_current {
+                Style::default().fg(pal().green)
+            } else {
+                Style::default().fg(pal().text)
+            };
+            lines.push(Line::from(Span::styled(
+                format!("{} {bullet} {name}", if selected { "›" } else { " " }),
+                style,
+            )));
+        }
+        lines.push(Line::from(
+            [chip("↑↓", "move"), chip("Enter", "choose"), chip("Esc", "close")]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<Span>>(),
+        ));
+        let h = (lines.len() as u16 + 2).min(area.height.saturating_sub(1));
+        let box_area = Rect {
+            x: area.width.saturating_sub(w) / 2,
+            y: area.height.saturating_sub(h) / 2,
+            width: w,
+            height: h,
+        };
+        overlay_bg(f, box_area, pal().accent);
+        f.render_widget(
+            Paragraph::new(lines).block(Block::default().padding(Padding::new(2, 1, 0, 0))),
+            box_area,
+        );
+    }
+    // Provider picker (/connect).
+    if provider_picker {
+        let names = crate::providers::known_providers();
+        let w = 56.min(area.width.saturating_sub(4));
+        let mut lines: Vec<Line> = vec![Line::from(Span::styled(
+            "provider — switch model backend",
+            Style::default().fg(pal().accent).add_modifier(Modifier::BOLD),
+        ))];
+        for (i, name) in names.iter().enumerate() {
+            let selected = i == provider_sel;
+            let bullet = if *name == engine.provider_name() { "●" } else { "○" };
+            let hint = if crate::providers::requires_api_key(name) {
+                "needs an API key"
+            } else {
+                "local (no key)"
+            };
+            let style = if selected {
+                Style::default().fg(pal().bg).bg(pal().accent).add_modifier(Modifier::BOLD)
+            } else if *name == engine.provider_name() {
+                Style::default().fg(pal().green)
+            } else {
+                Style::default().fg(pal().text)
+            };
+            let hint_style = if selected {
+                Style::default().fg(pal().bg).bg(pal().accent)
+            } else {
+                Style::default().fg(pal().dim)
+            };
+            lines.push(Line::from(vec![
+                Span::styled(format!("{} {bullet} {name:<10}", if selected { "›" } else { " " }), style),
+                Span::styled(hint.to_string(), hint_style),
+            ]));
+        }
+        lines.push(Line::from(
+            [chip("↑↓", "move"), chip("Enter", "switch"), chip("Esc", "close")]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<Span>>(),
+        ));
+        let h = (lines.len() as u16 + 2).min(area.height.saturating_sub(1));
+        let box_area = Rect {
+            x: area.width.saturating_sub(w) / 2,
+            y: area.height.saturating_sub(h) / 2,
+            width: w,
+            height: h,
+        };
+        overlay_bg(f, box_area, pal().accent);
+        f.render_widget(
+            Paragraph::new(lines).block(Block::default().padding(Padding::new(2, 1, 0, 0))),
+            box_area,
+        );
+    }
+    // `@file` completion popup (anchored above the input box).
+    if !at_files.is_empty() {
+        let rows = at_files.len().min(8);
+        let h = (rows as u16) + 2;
+        let w = area.width.saturating_sub(4).min(64);
+        let y = main[2].y.saturating_sub(h);
+        let box_area = Rect {
+            x: area.x + 2,
+            y,
+            width: w,
+            height: h,
+        };
+        overlay_bg(f, box_area, pal().accent);
+        let (start, end) = list_window(at_files.len(), at_sel, rows);
+        let mut lines: Vec<Line> = Vec::new();
+        lines.push(Line::from(Span::styled(
+            format!(" @files · {}/{}", at_sel + 1, at_files.len()),
+            Style::default()
+                .fg(pal().accent)
+                .add_modifier(Modifier::BOLD),
+        )));
+        for (i, file) in at_files.iter().enumerate().take(end).skip(start) {
+            let selected = i == at_sel;
+            let style = if selected {
+                Style::default()
+                    .fg(pal().bg)
+                    .bg(pal().accent)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(pal().text)
+            };
+            lines.push(Line::from(Span::styled(
+                format!("  {}", truncate(file, 56)),
+                style,
+            )));
+        }
+        f.render_widget(
+            Paragraph::new(lines).block(Block::default().padding(Padding::new(1, 1, 0, 0))),
+            box_area,
+        );
+    }
     // Copy-mode overlay (Ctrl+Y): visual line selection yanked to the clipboard.
     if let Some(cs) = copy {
         let w = area.width.saturating_sub(8).clamp(24, 100);
@@ -4253,7 +4744,8 @@ fn welcome_lines(tools_enabled: bool) -> Vec<Line<'static>> {
         key("@file", "include a file in your message: @src/main.rs or @notes.md"),
         key("!cmd", "run a shell command locally — the output never leaves the machine"),
         key("Ctrl-Y", "copy mode: select transcript lines and yank to clipboard"),
-        key("Ctrl-P / Ctrl-N", "previous / next message from your input history"),
+        key("Ctrl-P", "command palette (pick any /command)"),
+        key("Ctrl-N", "next message from your input history"),
         key("Ctrl-S", "session picker: new · rename · delete · open"),
         key("Tab", "sessions sidebar (↑/↓ select · Enter open · r rename · d delete)"),
         key("Alt+Enter", "newline in the message box"),

@@ -461,7 +461,8 @@ you> use the researcher agent to summarize the state of encrypted messaging, the
 | `Alt+Enter` | New line in the input box (multiline) |
 | `Esc` / `Ctrl-C` | Quit |
 | `Ctrl-Y` | Copy mode: select transcript lines (↑/↓, PgUp/PgDn, Home/End) and press `y` to copy to the clipboard — `a` selects all, `e` copies the last reply |
-| `Ctrl-P` / `Ctrl-N` | Recall previous / next message from the input history |
+| `Ctrl-P` | Command palette — pick any `/command` from a searchable list |
+| `Ctrl-N` / `Alt+P` | Recall next / previous message from the input history |
 | `Ctrl-F` | Find text in the current conversation (type to search, Enter copies the line) |
 | `Ctrl-R` | Search text across **all** saved sessions (Enter opens the session) |
 | `Ctrl-O` | Edit the message box in `$EDITOR` (`$VISUAL` → `vi`) |
@@ -473,6 +474,7 @@ you> use the researcher agent to summarize the state of encrypted messaging, the
 | `Tab` | Toggle focus between chat and the sessions sidebar |
 | `Shift+Tab` | Toggle Plan / Build mode |
 | `Ctrl-S` | Open the session picker overlay (works at any terminal size) |
+| `@file` in the input | Fuzzy file completion popup (↑/↓ + `Enter`/`Tab` to insert the path) |
 | `↑`/`↓` + `Enter` (sidebar or picker) | Switch to another encrypted session |
 | `n` (sidebar or picker) | Create a new session — asks for a name first |
 | `r` (sidebar or picker) | Rename the selected session (inline prompt) |
@@ -487,7 +489,7 @@ Slash commands (typed in the message box, executed locally, never sent to the pr
 |---------|--------|
 | `/help` | Command list |
 | `/new` | Create a new session (asks for a name) |
-| `/switch` | Open the session picker overlay (also `Ctrl-S`) |
+| `/switch` | Open the session picker overlay (also `Ctrl-S`) — aliases `/sessions`, `/resume`, `/continue` |
 | `/clear` | Wipe the current session history |
 | `/model` | Open the model picker (type to filter, ↑/↓/PgUp/PgDn select, Enter choose, Esc close) — the choice is saved for next launches |
 | `/model <id>` | Switch model directly (saved for next launches) |
@@ -501,15 +503,19 @@ Slash commands (typed in the message box, executed locally, never sent to the pr
 | `/undo` | Remove the last user turn and put it back in the input box |
 | `/redo` | Restore the text removed by the last `/undo` |
 | `/retry` | Undo the last turn and resend the same message |
-| `/compact` | Summarise the conversation and replace the history with the summary |
+| `/compact` | Summarise the conversation and replace the history with the summary (alias `/summarize`) |
 | `/commands` | List your custom commands (see below) |
 | `/find <text>` | Search the current conversation (also `Ctrl-F`) |
 | `/search <text>` | Search across all saved sessions (also `Ctrl-R`) |
-| `/export [md\|html\|pdf] [path]` | Export this conversation (HTML/Markdown native; PDF needs `pandoc`/`wkhtmltopdf`) |
+| `/export [md\|html\|pdf] [path]` | Export this conversation (all three formats rendered natively, offline) |
 | `/editor` | Open the message box in `$EDITOR` (also `Ctrl-O`) |
 | `/init` | Generate an `AGENTS.md` for this project from its files |
 | `/mcp` | List tools exposed by connected MCP servers |
-| `/theme [name]` | Show or switch the colour theme (`default` · `nord` · `gruvbox` · `solarized` · `mono`) — saved |
+| `/theme [name]` | Show or switch the colour theme (`default` · `nord` · `gruvbox` · `solarized` · `mono`); with no argument opens a theme picker — saved |
+| `/connect [provider]` | Pick / switch the provider (`/provider`, `/providers`); the choice is saved |
+| `/thinking` | Toggle showing the model's reasoning / tool-detail blocks |
+| `/details` | Toggle showing tool execution details in the transcript |
+| `/palette` | Open the command palette (also `Ctrl-P`) |
 | `/credits` | Show OpenRouter credit / usage / limits (also `/usage`) |
 | `/quit` | Exit Enclave |
 
@@ -681,6 +687,12 @@ launch.
 | `enclave rag index <paths>` | Index files/dirs into the encrypted local store (offline) |
 | `enclave rag search <query>` | Search the local index |
 | `enclave rag status` / `enclave rag clear` | Show / delete the index |
+| `enclave or credits` | OpenRouter credits / usage / limits |
+| `enclave or generation <id>` | Token counts and cost for one generation |
+| `enclave or activity [date]` | Daily OpenRouter activity (defaults to today) |
+| `enclave or providers` | List upstream provider names |
+| `enclave or endpoints <model>` | Provider endpoints, context and prices for a model |
+| `enclave or keys list\|create\|get\|update\|delete` | Manage OpenRouter provisioning keys (needs `ENCLAVE_OPENROUTER_PROVISIONING_KEY`) |
 
 Security/privacy audit: see [docs/audit.md](docs/audit.md).
 

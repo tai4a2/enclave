@@ -232,6 +232,191 @@ pub fn parse_account(
     acc
 }
 
+/// A provider endpoint that serves a given model
+/// (`GET /models/{author}/{slug}/endpoints`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct OpenRouterEndpoint {
+    pub name: String,
+    pub context_length: u64,
+    pub prompt_price: f64,
+    pub completion_price: f64,
+    pub quantization: Option<String>,
+}
+
+/// Parse the per-model endpoints response.
+pub fn parse_endpoints(value: &serde_json::Value) -> Vec<OpenRouterEndpoint> {
+    let mut out = Vec::new();
+    let Some(entries) = value["data"]["endpoints"].as_array() else {
+        return out;
+    };
+    for e in entries {
+        let price = |field: &str| -> f64 {
+            e["pricing"][field]
+                .as_str()
+                .and_then(|s| s.parse::<f64>().ok())
+                .unwrap_or(0.0)
+        };
+        out.push(OpenRouterEndpoint {
+            name: e["name"].as_str().unwrap_or_default().to_string(),
+            context_length: e["context_length"].as_u64().unwrap_or(0),
+            prompt_price: price("prompt") * 1_000_000.0,
+            completion_price: price("completion") * 1_000_000.0,
+            quantization: e["quantization"].as_str().map(str::to_string),
+        });
+    }
+    out
+}
+
+/// Statistics for a single generation (`GET /generation?id=`).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct OpenRouterGeneration {
+    pub id: String,
+    pub model: String,
+    pub tokens_prompt: Option<u64>,
+    pub tokens_completion: Option<u64>,
+    pub total_cost: Option<f64>,
+}
+
+/// Parse the generation stats response.
+pub fn parse_generation(value: &serde_json::Value) -> OpenRouterGeneration {
+    let d = &value["data"];
+    OpenRouterGeneration {
+        id: d["id"].as_str().unwrap_or_default().to_string(),
+        model: d["model"].as_str().unwrap_or_default().to_string(),
+        tokens_prompt: d["tokens_prompt"].as_u64(),
+        tokens_completion: d["tokens_completion"].as_u64(),
+        total_cost: d["total_cost"].as_f64(),
+    }
+}
+
+/// Parse the provider catalogue response into display names.
+pub fn parse_providers(value: &serde_json::Value) -> Vec<String> {
+    let mut out = Vec::new();
+    let Some(entries) = value["data"].as_array() else {
+        return out;
+    };
+    for e in entries {
+        if let Some(name) = e["name"].as_str() {
+            out.push(name.to_string());
+        }
+    }
+    out.sort();
+    out
+}
+
+fn auth(req: reqwest::RequestBuilder, api_key: &str) -> reqwest::RequestBuilder {
+    req.header("Authorization", format!("Bearer {api_key}"))
+        .header("HTTP-Referer", "https://github.com/enclave")
+        .header("X-Title", "Enclave CLI")
+}
+
+/// Provider endpoints that serve `model` (author/slug).
+pub async fn fetch_endpoints(api_key: &str, model: &str) -> Result<Vec<OpenRouterEndpoint>> {
+    let url = format!("https://openrouter.ai/api/v1/models/{model}/endpoints");
+    let r = auth(crate::providers::http::client().get(url), api_key).send().await?.error_for_status()?;
+    Ok(parse_endpoints(&r.json().await?))
+}
+
+/// Stats for a single generation id.
+pub async fn fetch_generation(api_key: &str, id: &str) -> Result<OpenRouterGeneration> {
+    let url = format!("https://openrouter.ai/api/v1/generation?id={id}");
+    let r = auth(crate::providers::http::client().get(url), api_key).send().await?.error_for_status()?;
+    Ok(parse_generation(&r.json().await?))
+}
+
+/// Daily activity (`date` = YYYY-MM-DD, defaults to today).
+pub async fn fetch_activity(api_key: &str, date: Option<&str>) -> Result<serde_json::Value> {
+    let date = date
+        .map(str::to_string)
+        .unwrap_or_else(|| chrono::Utc::now().format("%Y-%m-%d").to_string());
+    let url = format!("https://openrouter.ai/api/v1/activity?date={date}");
+    let r = auth(crate::providers::http::client().get(url), api_key).send().await?.error_for_status()?;
+    Ok(r.json().await?)
+}
+
+/// Provider catalogue (public, no key needed).
+pub async fn fetch_providers() -> Result<Vec<String>> {
+    let v: serde_json::Value = crate::providers::http::client()
+        .get("https://openrouter.ai/api/v1/providers")
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    Ok(parse_providers(&v))
+}
+
+/// Provisioning-key management. These calls require a *provisioning* key, not a
+/// regular inference key.
+pub async fn list_keys(provisioning_key: &str) -> Result<serde_json::Value> {
+    let r = auth(crate::providers::http::client().get("https://openrouter.ai/api/v1/keys"), provisioning_key)
+        .send()
+        .await?
+        .error_for_status()?;
+    Ok(r.json().await?)
+}
+
+pub async fn create_key(
+    provisioning_key: &str,
+    name: &str,
+    limit: Option<f64>,
+) -> Result<serde_json::Value> {
+    let mut body = serde_json::json!({ "name": name });
+    if let Some(l) = limit {
+        body["limit"] = serde_json::json!(l);
+    }
+    let r = auth(crate::providers::http::client().post("https://openrouter.ai/api/v1/keys"), provisioning_key)
+        .json(&body)
+        .send()
+        .await?
+        .error_for_status()?;
+    Ok(r.json().await?)
+}
+
+pub async fn get_key(provisioning_key: &str, hash: &str) -> Result<serde_json::Value> {
+    let url = format!("https://openrouter.ai/api/v1/keys/{hash}");
+    let r = auth(crate::providers::http::client().get(url), provisioning_key)
+        .send()
+        .await?
+        .error_for_status()?;
+    Ok(r.json().await?)
+}
+
+pub async fn update_key(
+    provisioning_key: &str,
+    hash: &str,
+    name: Option<&str>,
+    disabled: Option<bool>,
+    limit: Option<f64>,
+) -> Result<serde_json::Value> {
+    let mut body = serde_json::json!({});
+    if let Some(n) = name {
+        body["name"] = serde_json::json!(n);
+    }
+    if let Some(d) = disabled {
+        body["disabled"] = serde_json::json!(d);
+    }
+    if let Some(l) = limit {
+        body["limit"] = serde_json::json!(l);
+    }
+    let url = format!("https://openrouter.ai/api/v1/keys/{hash}");
+    let r = auth(crate::providers::http::client().patch(url), provisioning_key)
+        .json(&body)
+        .send()
+        .await?
+        .error_for_status()?;
+    Ok(r.json().await?)
+}
+
+pub async fn delete_key(provisioning_key: &str, hash: &str) -> Result<serde_json::Value> {
+    let url = format!("https://openrouter.ai/api/v1/keys/{hash}");
+    let r = auth(crate::providers::http::client().delete(url), provisioning_key)
+        .send()
+        .await?
+        .error_for_status()?;
+    Ok(r.json().await.unwrap_or(serde_json::json!({})))
+}
+
 #[async_trait]
 impl Provider for OpenRouterProvider {
     fn name(&self) -> &'static str {
@@ -433,5 +618,42 @@ mod tests {
         let acc = parse_account(None, Some(&key_only));
         assert_eq!(acc.key_remaining(), None);
         assert!(acc.summary().contains("free tier"));
+    }
+
+    #[test]
+    fn parse_endpoints_extracts_providers() {
+        let json = serde_json::json!({
+            "data": {"endpoints": [
+                {"name": "Together", "context_length": 32768,
+                 "pricing": {"prompt": "0.0000002", "completion": "0.0000004"},
+                 "quantization": "fp16"},
+                {"name": "DeepInfra", "context_length": 8192, "pricing": {}}
+            ]}
+        });
+        let eps = parse_endpoints(&json);
+        assert_eq!(eps.len(), 2);
+        assert_eq!(eps[0].name, "Together");
+        assert!((eps[0].prompt_price - 0.2).abs() < 1e-9);
+        assert!((eps[0].completion_price - 0.4).abs() < 1e-9);
+        assert_eq!(eps[0].quantization.as_deref(), Some("fp16"));
+    }
+
+    #[test]
+    fn parse_generation_reads_stats() {
+        let json = serde_json::json!({
+            "data": {"id": "gen-1", "model": "openai/gpt-4o-mini",
+                     "tokens_prompt": 100, "tokens_completion": 40, "total_cost": 0.0021}
+        });
+        let g = parse_generation(&json);
+        assert_eq!(g.id, "gen-1");
+        assert_eq!(g.tokens_prompt, Some(100));
+        assert_eq!(g.tokens_completion, Some(40));
+        assert_eq!(g.total_cost, Some(0.0021));
+    }
+
+    #[test]
+    fn parse_providers_sorts_names() {
+        let json = serde_json::json!({"data": [{"name": "B"}, {"name": "A"}, {"nope": 1}]});
+        assert_eq!(parse_providers(&json), vec!["A".to_string(), "B".to_string()]);
     }
 }

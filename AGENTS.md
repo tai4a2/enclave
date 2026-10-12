@@ -5,7 +5,7 @@ Run the built binary from `./dist/enclave`; the user mostly uses `./dist/enclave
 
 ## Build & verify loop (ALWAYS)
 After every change:
-1. `cargo test` — must stay green (currently 150 tests).
+1. `cargo test` — must stay green (currently 199 tests).
 2. `cargo clippy --all-targets` — must be 0 warnings.
 3. `cargo build --release`
 4. `cp target/release/enclave dist/enclave && codesign --force --sign - dist/enclave`
@@ -15,12 +15,9 @@ macOS re-prompts the keychain on launch.
 
 ## Git
 - Commit ONLY on explicit user request. Do not commit proactively.
-- Branch `main`. Last commit at time of writing: `12868cf`
-  ("Add Wave 3 features and local Supermemory").
-- Working tree (uncommitted): security roadmap Wave A start — A1 Argon2id
-  (configurable `kdf` in config, versioned salt file, legacy PBKDF2 still works)
-  and A2 protected memory (`src/privacy/secure.rs`: `harden_process`,
-  mlock/unlock; `MasterKey` is a locked heap box, zeroized on drop).
+- Branch `main`. Last commit at time of writing: `8e0709d`
+  ("Add security Waves B–C: sandbox, taint, egress policy, air-gap, injection,
+  routing, MCP hardening, NER, Tor/pinning, DLP judge, RAG, proof-of-redaction").
 
 ## Environment
 - Config dir: `~/Library/Application Support/dev.enclave.enclave`
@@ -30,49 +27,38 @@ macOS re-prompts the keychain on launch.
   (`use_keychain` defaults to true).
 - Ollama installed and running on `localhost:11434` (no models pulled by default).
 - The user has an OpenRouter key (previously 403 "PII detected" — server-side, avoid PII).
+- Toolchain pinned in `rust-toolchain.toml` (1.99.0).
 
-## State at 7c03be8
-Everything through "Wave 3" is implemented and tested (141 tests green, clippy 0):
-crypto/vault/SQLCipher memory, 4 providers (openrouter/openai/anthropic/ollama) with
-streaming + real function calling, privacy guard (regex PII + placeholders), encrypted
-export/import, shell proposals (ask-always), agentic mode (`--agent`) with builtin tools
-(read_file, write_file, edit_file, apply_patch, list_dir, glob, grep, run_shell, todo,
-question) + MCP stdio client, Plans/Build modes, permissions (allow/ask/deny, bash_rules,
-external_directory, doom_loop, `--auto`), local AGENTS.md rules, custom `.md` commands,
-`@file` refs, `!shell`, `/undo /redo /retry /compact`, configurable themes + keybindings,
-search (`/find`, `/search`), `/init`, `/export md|html|pdf`, external editor (Ctrl-O),
-notifications. TUI is an opencode-style borderless dark layout with a right info panel,
+## State (all committed at 8e0709d)
+Everything through security Waves A–C is implemented and tested (199 tests green,
+clippy 0): crypto/vault/SQLCipher memory; 4 providers (openrouter/openai/anthropic/ollama)
+with streaming + real function calling; privacy guard (regex PII + local NER + placeholders)
+with taint tracking, egress policy-as-code, air-gap, prompt-injection canary, sensitivity
+routing, DLP local judge; encrypted export/import; shell proposals + agentic mode (`--agent`)
+with builtin tools (read_file, write_file, edit_file, apply_patch, list_dir, glob, grep,
+run_shell, todo, question, remember, rag_search) + MCP stdio client (hardened); Plan/Build
+modes, permissions (allow/ask/deny, bash_rules, external_directory, doom_loop, `--auto`),
+local AGENTS.md rules, custom `.md` commands, `@file` refs, `!shell`; `/undo /redo /retry
+/compact`, themes + keybindings, `/find`, `/search`, `/init`, `/export md|html|pdf`, external
+editor (Ctrl-O), notifications; command sandbox (sandbox-exec); proxy/Tor/TLS pinning;
+encrypted egress ledger (`enclave ledger`, `--verify`, `--proof`); local Supermemory
+(`enclave memory …`, `/remember /memory /forget /checkpoint`); encrypted local RAG
+(`enclave rag index|search|status|clear`, `/rag`, `rag_search` tool); auto-lock/blur/clipboard
+TTL; duress + `/panic`. Build/supply-chain: `deny.toml`, `.github/workflows/ci.yml`,
+`scripts/release.sh`. TUI is an opencode-style borderless dark layout with right info panel,
 cards transcript and inline diffs.
 
 Docs: `README.md`, `docs/{architecture,privacy,tools,audit,jev-idea,security-roadmap}.md`,
-and `docs/Security-Roadmap.pdf` (generated locally with Python + reportlab, since
-pandoc/wkhtmltopdf are not installed).
+and `docs/Security-Roadmap.pdf`.
 
-## NEXT WORK (decided with the user)
-STATUS: items 1–3 below are now **IMPLEMENTED** (uncommitted; HEAD still `7c03be8`):
-local encrypted Supermemory (`/remember /memory /forget /checkpoint` + `enclave memory
-add|list|search|pin|edit|forget|clear`, `remember` agent tool, `[memory]` config,
-`working_session` resume, periodic autosave). 144 tests green, clippy 0.
-
-The user wants a **local Supermemory built INTO Enclave** (not an external service):
-an encrypted, persistent memory of facts/preferences/notes that survives across
-sessions and is injected into context — plus the related autoload/checkpoint ideas.
-
-1. **Local Supermemory.** Encrypted `memories` table in `vault.db` (text, tags, kind,
-   source session, pinned). Capture manually (`/remember`, `/memory`, `/forget`) and/or
-   automatically (summarize a session into memories, opt-in). Inject pinned + recent
-   memories into the system prompt (bounded). A `remember` tool lets the agent save
-   memories itself (permission-gated). Memories are encrypted at rest; when injected they
-   travel to the provider like any context, so the guard applies; allow some memories to
-   be local-only. CLI: `enclave memory add|list|search|forget|export`.
-2. **Autoload the in-progress session at startup.** On launch, automatically resume the
-   session currently "in work" (keep an explicit current/working-session pointer rather
-   than just "most recent with messages").
-3. **Session-memory checkpoint.** A command that records/saves the session memory either
-   on a timer (periodic autosave) or on explicit command (`/checkpoint`).
+## NEXT WORK
+Security roadmap Waves A–C complete (C2 E2EE sync and C5 split inference are documented
+design only). Open items / ideas:
+- OpenRouter feature parity: implement the remaining official API surface as CLI commands
+  (generation stats, activity, key management, model endpoints, etc.) and richer TUI pickers.
+- [DONE] Native Rust PDF renderer (`src/core/export.rs::render_pdf`) so `/export pdf` works without pandoc/wkhtmltopdf.
+- TUI graphic polish toward opencode's latest look (see opencode docs/screenshots).
 
 ## Ideas backlog
-See `docs/security-roadmap.md` for the privacy/security roadmap. Top picks discussed:
-sandbox for approved commands (fs jail + no network), Argon2id + protected memory
-(mlock/no-swap), encrypted egress ledger + taint tracking, local encrypted RAG with
-per-file ACL. Also: a native Rust PDF renderer so `/export pdf` works without pandoc.
+See `docs/security-roadmap.md` for the full privacy/security roadmap. Top remaining picks:
+hardware-backed unlock (B10, design only), E2EE sync (C2), split inference (C5).

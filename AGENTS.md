@@ -5,7 +5,7 @@ Run the built binary from `./dist/enclave`; the user mostly uses `./dist/enclave
 
 ## Build & verify loop (ALWAYS)
 After every change:
-1. `cargo test` — must stay green (currently 199 tests).
+1. `cargo test` — must stay green (currently 204 tests).
 2. `cargo clippy --all-targets` — must be 0 warnings.
 3. `cargo build --release`
 4. `cp target/release/enclave dist/enclave && codesign --force --sign - dist/enclave`
@@ -15,9 +15,8 @@ macOS re-prompts the keychain on launch.
 
 ## Git
 - Commit ONLY on explicit user request. Do not commit proactively.
-- Branch `main`. Last commit at time of writing: `8e0709d`
-  ("Add security Waves B–C: sandbox, taint, egress policy, air-gap, injection,
-  routing, MCP hardening, NER, Tor/pinning, DLP judge, RAG, proof-of-redaction").
+- Branch `main`. Last commit: `8e98117`
+  ("Add native PDF export, OpenRouter commands and opencode-style TUI popups").
 
 ## Environment
 - Config dir: `~/Library/Application Support/dev.enclave.enclave`
@@ -29,8 +28,8 @@ macOS re-prompts the keychain on launch.
 - The user has an OpenRouter key (previously 403 "PII detected" — server-side, avoid PII).
 - Toolchain pinned in `rust-toolchain.toml` (1.99.0).
 
-## State (all committed at 8e0709d)
-Everything through security Waves A–C is implemented and tested (199 tests green,
+## State (all committed at 8e98117)
+Everything through security Waves A–C is implemented and tested (204 tests green,
 clippy 0): crypto/vault/SQLCipher memory; 4 providers (openrouter/openai/anthropic/ollama)
 with streaming + real function calling; privacy guard (regex PII + local NER + placeholders)
 with taint tracking, egress policy-as-code, air-gap, prompt-injection canary, sensitivity
@@ -53,11 +52,25 @@ and `docs/Security-Roadmap.pdf`.
 
 ## NEXT WORK
 Security roadmap Waves A–C complete (C2 E2EE sync and C5 split inference are documented
-design only). Open items / ideas:
-- OpenRouter feature parity: implement the remaining official API surface as CLI commands
-  (generation stats, activity, key management, model endpoints, etc.) and richer TUI pickers.
-- [DONE] Native Rust PDF renderer (`src/core/export.rs::render_pdf`) so `/export pdf` works without pandoc/wkhtmltopdf.
-- TUI graphic polish toward opencode's latest look (see opencode docs/screenshots).
+design only). OpenRouter parity, TUI popups (command palette Ctrl-P, provider/theme/model
+pickers, `@file` fuzzy completion, slash `/` auto-popup, thinking/details toggles, cursor
+style) and the native Rust PDF renderer are all DONE and committed.
+
+### Session recap (for resuming the next day)
+The user asked for a "revolutionary" CLI/TUI idea with real added value. The proposal
+(agreed to revisit tomorrow) is:
+
+- **FLAGSHIP — "Conversation Git"**: treat the conversation as a content-addressed,
+  encrypted DAG stored in `vault.db` (git for chats). Commands `/branch`, `/checkout`,
+  `/merge`, `/diff`, `/blame`, `/log`; the TUI draws the graph instead of a flat list.
+  Ties into the existing egress ledger + proof-of-redaction for verifiable provenance
+  (which model saw what, what was redacted). Reuses the crypto already in the project.
+- Runner-up ideas: "Privacy Blast-Radius" (live map of every datum + a recall that
+  re-redacts) and "Local Model Committee" (several local Ollama models debate; a verifier
+  cross-checks consensus + dissents).
+- Offered next step: prototype a minimal branch/checkout/diff on the encrypted DAG.
+
+DECISION PENDING: whether to build "Conversation Git" or pick another idea.
 
 ## Ideas backlog
 See `docs/security-roadmap.md` for the full privacy/security roadmap. Top remaining picks:

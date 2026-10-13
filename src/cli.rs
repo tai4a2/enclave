@@ -186,6 +186,22 @@ pub enum SessionsAction {
     },
     /// Rename a session.
     Rename { id: String, name: String },
+    /// Fork a session into a new branch (Conversation Git).
+    Branch {
+        /// Parent session id (defaults to the most recent session with messages).
+        #[arg(long)]
+        from: Option<String>,
+        /// Branch name (defaults to "<parent>~N").
+        #[arg(short, long)]
+        name: Option<String>,
+        /// Copy only the first N messages of the parent (default: all).
+        #[arg(long)]
+        keep: Option<usize>,
+    },
+    /// Show the conversation branch tree.
+    Log,
+    /// Diff two sessions (by name or id).
+    Diff { a: String, b: String },
     /// Export a session to an encrypted file.
     Export { id: String, path: String },
     /// Import a session from an encrypted export file.
@@ -1634,6 +1650,56 @@ fn tags_suffix(tags: &str) -> String {
     }
 }
 
+/// ASCII tree of the stored conversation branches.
+fn branch_tree(nodes: &[crate::privacy::BranchNode]) -> String {
+    use std::collections::{BTreeMap, HashSet};
+    let ids: HashSet<&str> = nodes.iter().map(|n| n.id.as_str()).collect();
+    let mut children: BTreeMap<Option<String>, Vec<&crate::privacy::BranchNode>> = BTreeMap::new();
+    for node in nodes {
+        let parent = node.parent.clone().filter(|p| ids.contains(p.as_str()));
+        children.entry(parent).or_default().push(node);
+    }
+    fn walk(
+        children: &BTreeMap<Option<String>, Vec<&crate::privacy::BranchNode>>,
+        parent: Option<String>,
+        prefix: &str,
+        out: &mut String,
+    ) {
+        if let Some(list) = children.get(&parent) {
+            let total = list.len();
+            for (i, node) in list.iter().enumerate() {
+                let last = i + 1 == total;
+                let connector = if last { "└─ " } else { "├─ " };
+                let from = if node.parent.is_some() && node.from >= 0 {
+                    format!("  <- @{}", node.from)
+                } else {
+                    String::new()
+                };
+                out.push_str(&format!(
+                    "{prefix}{connector}{}  ({} msg){from}\n",
+                    node.name, node.message_count
+                ));
+                let next_prefix = format!("{prefix}{}", if last { "   " } else { "|  " });
+                walk(children, Some(node.id.clone()), &next_prefix, out);
+            }
+        }
+    }
+    let mut out = String::new();
+    walk(&children, None, "", &mut out);
+    out
+}
+
+/// Flatten a stored session into plain text for diffing.
+fn session_text(memory: &EncryptedMemory, id: &str) -> String {
+    memory
+        .get_history(id, 100_000)
+        .unwrap_or_default()
+        .iter()
+        .map(|m| format!("{}: {}", m.role.as_str(), m.content))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn flags_suffix(pinned: bool, local_only: bool) -> String {
     let mut marks = Vec::new();
     if pinned {
@@ -1702,6 +1768,66 @@ fn sessions_cmd(paths: &Paths, settings: &Settings, action: SessionsAction) -> R
         SessionsAction::Rename { id, name } => {
             memory.rename_session(&id, &name)?;
             println!("renamed session '{id}' to '{name}'");
+            Ok(())
+        }
+        SessionsAction::Branch { from, name, keep } => {
+            let sessions = memory.list_sessions()?;
+            let parent = match from {
+                Some(id) => sessions
+                    .iter()
+                    .find(|s| s.id == id)
+                    .map(|s| (s.id.clone(), s.name.clone()))
+                    .ok_or_else(|| EnclaveError::other(format!("session '{id}' not found")))?,
+                None => sessions
+                    .iter()
+                    .find(|s| s.message_count > 0)
+                    .map(|s| (s.id.clone(), s.name.clone()))
+                    .ok_or_else(|| EnclaveError::other("no session has messages yet"))?,
+            };
+            let keep = keep.unwrap_or(usize::MAX);
+            let branch_name = name.unwrap_or_else(|| {
+                let n = memory
+                    .branch_nodes()
+                    .map(|ns| ns.iter().filter(|x| x.name.starts_with(&format!("{}~", parent.1))).count() + 1)
+                    .unwrap_or(1);
+                format!("{}~{n}", parent.1)
+            });
+            let child = crate::core::session::Session::fork(&memory, &parent.0, &branch_name, keep)?;
+            println!(
+                "branched '{}' -> '{}' ({} messages copied)",
+                parent.1,
+                child.name,
+                child.messages.len()
+            );
+            Ok(())
+        }
+        SessionsAction::Log => {
+            let nodes = memory.branch_nodes()?;
+            if nodes.is_empty() {
+                println!("no sessions stored");
+                return Ok(());
+            }
+            println!("{}", branch_tree(&nodes));
+            Ok(())
+        }
+        SessionsAction::Diff { a, b } => {
+            let nodes = memory.branch_nodes()?;
+            let resolve = |q: &str| {
+                nodes
+                    .iter()
+                    .find(|n| n.id == q || n.name == q || n.id.starts_with(q))
+                    .map(|n| (n.id.clone(), n.name.clone()))
+            };
+            let (ia, na) = resolve(&a)
+                .ok_or_else(|| EnclaveError::other(format!("no session matches '{a}'")))?;
+            let (ib, nb) = resolve(&b)
+                .ok_or_else(|| EnclaveError::other(format!("no session matches '{b}'")))?;
+            let ta = session_text(&memory, &ia);
+            let tb = session_text(&memory, &ib);
+            let d = crate::core::diff::lines(&ta, &tb);
+            let (added, removed) = crate::core::diff::stats(&d);
+            println!("diff {na} -> {nb}   (+{added} −{removed})");
+            println!("{}", crate::core::diff::render(&d, 200));
             Ok(())
         }
         SessionsAction::Export { id, path } => {

@@ -45,6 +45,32 @@ impl Session {
         })
     }
 
+    /// Fork another session into a fresh branch (Conversation Git): a new session
+    /// is created copying the first `keep` messages of `parent_id` (clamped to the
+    /// parent's length), and its branch lineage is recorded.
+    pub fn fork(
+        memory: &EncryptedMemory,
+        parent_id: &str,
+        name: &str,
+        keep: usize,
+    ) -> Result<Self> {
+        let history = memory.get_history(parent_id, 100_000)?;
+        let take = keep.min(history.len());
+        let id = memory.create_session(name)?;
+        let mut messages = Vec::new();
+        for message in history.into_iter().take(take) {
+            memory.save_message_full(&id, &message)?;
+            messages.push(message);
+        }
+        memory.set_branch(&id, parent_id, take)?;
+        Ok(Session {
+            id,
+            name: name.to_string(),
+            messages,
+            ephemeral: false,
+        })
+    }
+
     /// Load an existing session and its history.
     pub fn load(memory: &EncryptedMemory, id: &str) -> Result<Self> {
         if !memory.session_exists(id)? {

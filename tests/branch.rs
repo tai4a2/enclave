@@ -79,6 +79,37 @@ fn fork_handles_empty_parent() {
 }
 
 #[test]
+fn merge_appends_only_new_messages() {
+    let (_dir, memory) = memory();
+    let mut root = Session::create(&memory, "root").unwrap();
+    root.add_user(&memory, "a").unwrap();
+    root.add_user(&memory, "b").unwrap();
+
+    let mut left = Session::fork(&memory, &root.id, "left", 2).unwrap();
+    left.add_user(&memory, "left-only").unwrap();
+    let mut right = Session::fork(&memory, &root.id, "right", 2).unwrap();
+    right.add_user(&memory, "right-only").unwrap();
+
+    let added = left.merge_from(&memory, &right.id).unwrap();
+    assert_eq!(added, 1);
+    assert_eq!(left.messages.len(), 4);
+    assert_eq!(left.messages[3].content, "right-only");
+    // right is untouched by the merge.
+    assert_eq!(Session::load(&memory, &right.id).unwrap().messages.len(), 3);
+}
+
+#[test]
+fn merge_of_identical_branches_adds_nothing() {
+    let (_dir, memory) = memory();
+    let mut root = Session::create(&memory, "root").unwrap();
+    root.add_user(&memory, "x").unwrap();
+    let child = Session::fork(&memory, &root.id, "copy", 1).unwrap();
+    let mut target = Session::load(&memory, &child.id).unwrap();
+    assert_eq!(target.merge_from(&memory, &root.id).unwrap(), 0);
+    assert_eq!(target.messages.len(), 1);
+}
+
+#[test]
 fn fork_preserves_tool_metadata() {
     let (_dir, memory) = memory();
     let mut root = Session::create(&memory, "root").unwrap();
@@ -88,4 +119,24 @@ fn fork_preserves_tool_metadata() {
     let child = Session::fork(&memory, &root.id, "alt", 1).unwrap();
     assert_eq!(child.messages.len(), 1);
     assert_eq!(child.messages[0].role, enclave::core::message::Role::Assistant);
+}
+
+#[test]
+fn egress_provenance_filters_by_session() {
+    let (_dir, memory) = memory();
+    let a = Session::create(&memory, "a").unwrap();
+    let b = Session::create(&memory, "b").unwrap();
+    memory
+        .add_egress(Some(&a.id), "openrouter", "m1", b"payload-a", "", "")
+        .unwrap();
+    memory
+        .add_egress(Some(&b.id), "openai", "m2", b"payload-b", "", "")
+        .unwrap();
+
+    let pa = memory.list_egress_for_session(&a.id, 50).unwrap();
+    assert_eq!(pa.len(), 1);
+    assert_eq!(pa[0].provider, "openrouter");
+    let pb = memory.list_egress_for_session(&b.id, 50).unwrap();
+    assert_eq!(pb.len(), 1);
+    assert_eq!(pb[0].provider, "openai");
 }

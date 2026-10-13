@@ -202,6 +202,19 @@ pub enum SessionsAction {
     Log,
     /// Diff two sessions (by name or id).
     Diff { a: String, b: String },
+    /// Merge a branch's new turns into a session (Conversation Git).
+    Merge {
+        /// Branch to merge from (name or id).
+        source: String,
+        /// Target session (name or id; defaults to the most recent with messages).
+        #[arg(long)]
+        into: Option<String>,
+    },
+    /// Show what left the machine for a session (egress-ledger provenance).
+    Provenance {
+        /// Session id (omit for the most recent session that has messages).
+        id: Option<String>,
+    },
     /// Export a session to an encrypted file.
     Export { id: String, path: String },
     /// Import a session from an encrypted export file.
@@ -1828,6 +1841,82 @@ fn sessions_cmd(paths: &Paths, settings: &Settings, action: SessionsAction) -> R
             let (added, removed) = crate::core::diff::stats(&d);
             println!("diff {na} -> {nb}   (+{added} −{removed})");
             println!("{}", crate::core::diff::render(&d, 200));
+            Ok(())
+        }
+        SessionsAction::Merge { source, into } => {
+            let nodes = memory.branch_nodes()?;
+            let resolve = |q: &str| {
+                nodes
+                    .iter()
+                    .find(|n| n.id == q || n.name == q || n.id.starts_with(q))
+                    .map(|n| (n.id.clone(), n.name.clone()))
+            };
+            let (src_id, src_name) = resolve(&source)
+                .ok_or_else(|| EnclaveError::other(format!("no session matches '{source}'")))?;
+            let (target_id, target_name) = match &into {
+                Some(q) => resolve(q)
+                    .ok_or_else(|| EnclaveError::other(format!("no session matches '{q}'")))?,
+                None => memory
+                    .list_sessions()?
+                    .into_iter()
+                    .find(|s| s.message_count > 0)
+                    .map(|s| (s.id, s.name))
+                    .ok_or_else(|| EnclaveError::other("no session has messages yet"))?,
+            };
+            if src_id == target_id {
+                return Err(EnclaveError::other(
+                    "cannot merge a session into itself",
+                ));
+            }
+            let mut session = crate::core::session::Session::load(&memory, &target_id)?;
+            let added = session.merge_from(&memory, &src_id)?;
+            println!("merged '{src_name}' into '{target_name}' (+{added} messages)");
+            Ok(())
+        }
+        SessionsAction::Provenance { id } => {
+            let sessions = memory.list_sessions()?;
+            let sid = match id {
+                Some(id) => id,
+                None => sessions
+                    .iter()
+                    .find(|s| s.message_count > 0)
+                    .map(|s| s.id.clone())
+                    .ok_or_else(|| EnclaveError::other("no session has messages yet"))?,
+            };
+            let name = sessions
+                .iter()
+                .find(|s| s.id == sid)
+                .map(|s| s.name.clone())
+                .unwrap_or_else(|| "?".into());
+            let entries = memory.list_egress_for_session(&sid, 200)?;
+            if entries.is_empty() {
+                println!("no egress recorded for session '{name}' ({sid})");
+                return Ok(());
+            }
+            println!("provenance for '{name}' ({sid}) — {} send(s)", entries.len());
+            for e in entries.iter().rev() {
+                let red = if e.redactions.is_empty() {
+                    String::new()
+                } else {
+                    format!("  [redacted: {}]", e.redactions)
+                };
+                let commit = if e.original_sha.is_empty() {
+                    String::new()
+                } else {
+                    format!("  commit {}", &e.original_sha[..12.min(e.original_sha.len())])
+                };
+                println!(
+                    "  #{} {} {}-{}  {} B  sha {}{}{}",
+                    e.id,
+                    e.ts,
+                    e.provider,
+                    e.model,
+                    e.payload_bytes,
+                    &e.payload_sha[..12.min(e.payload_sha.len())],
+                    red,
+                    commit
+                );
+            }
             Ok(())
         }
         SessionsAction::Export { id, path } => {

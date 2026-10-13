@@ -846,6 +846,33 @@ impl EncryptedMemory {
         Ok(out)
     }
 
+    /// Egress entries for one session, newest first (provenance per conversation).
+    pub fn list_egress_for_session(&self, session_id: &str, limit: usize) -> Result<Vec<EgressEntry>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, ts, session_id, provider, model, payload_sha, payload_bytes, redactions, original_sha, hash \
+             FROM egress WHERE session_id = ?1 ORDER BY id DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![session_id, limit as i64], |r| {
+            Ok(EgressEntry {
+                id: r.get(0)?,
+                ts: r.get(1)?,
+                session_id: r.get(2)?,
+                provider: r.get(3)?,
+                model: r.get(4)?,
+                payload_sha: r.get(5)?,
+                payload_bytes: r.get(6)?,
+                redactions: r.get(7)?,
+                original_sha: r.get(8)?,
+                hash: r.get(9)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
     /// Number of ledger entries.
     pub fn egress_count(&self) -> Result<i64> {
         let n: i64 = self

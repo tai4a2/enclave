@@ -12,5 +12,5 @@ pub mod vault;
 pub use crypto::{Kdf, decrypt, derive_key_pbkdf2, encrypt, random_bytes};
 pub use guard::{Finding, FindingKind, Redactor, scan};
 pub use keys::SecureCredentials;
-pub use memory::{DbStats, EgressEntry, EncryptedMemory, Memory, RagChunk, SearchHit, SessionInfo};
+pub use memory::{BranchNode, DbStats, EgressEntry, EncryptedMemory, Memory, RagChunk, SearchHit, SessionInfo};
 pub use vault::{MasterKey, Vault};

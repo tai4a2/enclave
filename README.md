@@ -183,6 +183,32 @@ working_session = "9f3c1a2b-…"
 - **Working session**: Enclave remembers which session you were in and reopens
   it on the next launch.
 
+## Conversation branches (Conversation Git)
+
+Enclave can treat a conversation like **git treats code**: instead of a single
+linear timeline you can fork it, explore alternatives in parallel, and compare
+branches — all stored encrypted in the vault.
+
+| Command | What it does |
+|---------|--------------|
+| `/branch [name]` | Fork the current conversation into a new branch at its current head. The parent is left untouched. Default name `<parent>~N`. |
+| `/log` | Show the ASCII branch tree (roots, forks, message counts, `●` = current). |
+| `/checkout <name\|id>` | Open a branch directly by name or id. |
+| `/diff <a> <b>` | Show a line-diff between two sessions (branches). |
+
+CLI equivalents:
+
+```bash
+enclave sessions log                         # print the branch tree
+enclave sessions branch --from <id> --name alt --keep 4
+enclave sessions diff <branch-a> <branch-b>  # name or id prefix
+```
+
+Each forked session records its **parent** and **fork point** (`branches` lineage
+in `vault.db`), so the tree is reconstructed locally and never leaves the machine.
+The fork copies the first `keep` messages (all by default), so a branch can start
+from any earlier point of the conversation.
+
 ## Security hardening
 
 Wave A of the [security roadmap](docs/security-roadmap.md) is implemented.

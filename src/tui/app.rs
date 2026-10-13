@@ -131,13 +131,17 @@ fn surface() -> Style {
 
 /// Text shown by `/help`.
 const SLASH_HELP: &str =
-    "commands: /help · /new · /switch · /clear · /undo · /redo · /retry · /compact · /find <text> · /search <text> · /model [id] · /effort · /connect [provider] · /thinking · /details · /plan · /build · /attach <path> · /detach · /export [md|html|pdf] [path] · /editor · /init · /mcp · /ledger · /rag [index <paths>|search <q>|status|clear] · /airgap [on|off] · /route [on|off] · /remember <text> · /memory [search <q>|pin <id>] · /forget <id|text> · /checkpoint · /theme [name] · /commands · /credits · /panic · /quit   (Ctrl-P palette · Ctrl-S picker · Ctrl-R search sessions · Ctrl-Y copy · Ctrl-O editor · Shift+Tab plan/build · @file refs · !shell)";
+    "commands: /help · /new · /switch · /branch [name] · /log · /checkout <name> · /diff <a> <b> · /clear · /undo · /redo · /retry · /compact · /find <text> · /search <text> · /model [id] · /effort · /connect [provider] · /thinking · /details · /plan · /build · /attach <path> · /detach · /export [md|html|pdf] [path] · /editor · /init · /mcp · /ledger · /rag [index <paths>|search <q>|status|clear] · /airgap [on|off] · /route [on|off] · /remember <text> · /memory [search <q>|pin <id>] · /forget <id|text> · /checkpoint · /theme [name] · /commands · /credits · /panic · /quit   (Ctrl-P palette · Ctrl-S picker · Ctrl-R search sessions · Ctrl-Y copy · Ctrl-O editor · Shift+Tab plan/build · @file refs · !shell)";
 
 /// Command palette entries (Ctrl-P): (command, one-line description).
 const PALETTE_COMMANDS: &[(&str, &str)] = &[
     ("/help", "show all commands"),
     ("/new", "start a new session"),
     ("/switch", "open the session picker"),
+    ("/branch", "fork this conversation into a new branch"),
+    ("/log", "show the conversation branch tree"),
+    ("/checkout", "switch to a branch by name"),
+    ("/diff", "compare two sessions (branch diff)"),
     ("/clear", "wipe the current session history"),
     ("/model", "pick a model (saved for next launches)"),
     ("/models", "alias of /model"),
@@ -1615,6 +1619,166 @@ async fn run_app(
                                         picker = true;
                                         status = "session picker — ↑/↓ select, Enter open, n new, r rename, d delete, Esc close".into();
                                     }
+                                    "branch" => {
+                                        let keep = engine.session.messages.len();
+                                        let name = if arg.is_empty() {
+                                            let base = engine.session.name.clone();
+                                            let n = engine
+                                                .memory
+                                                .branch_nodes()
+                                                .map(|ns| {
+                                                    ns.iter()
+                                                        .filter(|x| {
+                                                            x.name
+                                                                .starts_with(&format!("{base}~"))
+                                                        })
+                                                        .count()
+                                                        + 1
+                                                })
+                                                .unwrap_or(1);
+                                            format!("{base}~{n}")
+                                        } else {
+                                            arg.clone()
+                                        };
+                                        match crate::core::session::Session::fork(
+                                            &engine.memory,
+                                            &engine.session.id,
+                                            &name,
+                                            keep,
+                                        ) {
+                                            Ok(sess) => {
+                                                engine.session = sess;
+                                                transcript = transcript_from(engine);
+                                                scroll = 0;
+                                                sessions = engine
+                                                    .memory
+                                                    .list_sessions()
+                                                    .unwrap_or_default();
+                                                sel = 0;
+                                                persist_settings(|s| {
+                                                    s.working_session =
+                                                        Some(engine.session.id.clone())
+                                                });
+                                                privacy = privacy_snapshot(engine, &guard_cfg);
+                                                status = format!(
+                                                    "branched to '{name}' ({} messages copied) — parent untouched",
+                                                    engine.session.messages.len()
+                                                );
+                                            }
+                                            Err(e) => status = format!("error: {e}"),
+                                        }
+                                    }
+                                    "checkout" => {
+                                        let target = arg.trim();
+                                        if target.is_empty() {
+                                            status = "usage: /checkout <session name or id>".into();
+                                        } else {
+                                            let nodes =
+                                                engine.memory.branch_nodes().unwrap_or_default();
+                                            let found = nodes.iter().find(|n| {
+                                                n.id == target
+                                                    || n.name == target
+                                                    || n.id.starts_with(target)
+                                            });
+                                            match found
+                                                .map(|n| n.id.clone())
+                                                .map(|id| {
+                                                    crate::core::session::Session::load(
+                                                        &engine.memory,
+                                                        &id,
+                                                    )
+                                                }) {
+                                                Some(Ok(sess)) => {
+                                                    engine.session = sess;
+                                                    transcript = transcript_from(engine);
+                                                    scroll = 0;
+                                                    sessions = engine
+                                                        .memory
+                                                        .list_sessions()
+                                                        .unwrap_or_default();
+                                                    persist_settings(|s| {
+                                                        s.working_session =
+                                                            Some(engine.session.id.clone())
+                                                    });
+                                                    privacy =
+                                                        privacy_snapshot(engine, &guard_cfg);
+                                                    status = format!(
+                                                        "checked out '{}'",
+                                                        engine.session.name
+                                                    );
+                                                }
+                                                Some(Err(e)) => status = format!("error: {e}"),
+                                                None => status =
+                                                    format!("no session matches '{target}'"),
+                                            }
+                                        }
+                                    }
+                                    "log" => {
+                                        let nodes =
+                                            engine.memory.branch_nodes().unwrap_or_default();
+                                        let text =
+                                            branch_tree_text(&nodes, &engine.session.id);
+                                        transcript.push(ChatLine {
+                                            speaker: Speaker::System,
+                                            text,
+                                        });
+                                        scroll = 0;
+                                        status = "conversation branch tree".into();
+                                    }
+                                    "diff" => {
+                                        let mut parts = arg.split_whitespace();
+                                        let a = parts.next().map(str::to_string);
+                                        let b = parts.next().map(str::to_string);
+                                        match (a, b) {
+                                            (Some(a), Some(b)) => {
+                                                let nodes = engine
+                                                    .memory
+                                                    .branch_nodes()
+                                                    .unwrap_or_default();
+                                                let resolve = |q: &str| {
+                                                    nodes
+                                                        .iter()
+                                                        .find(|n| {
+                                                            n.id == q
+                                                                || n.name == q
+                                                                || n.id.starts_with(q)
+                                                        })
+                                                        .map(|n| n.id.clone())
+                                                };
+                                                match (resolve(&a), resolve(&b)) {
+                                                    (Some(ia), Some(ib)) => {
+                                                        let ta = session_text(
+                                                            &engine.memory, &ia,
+                                                        );
+                                                        let tb = session_text(
+                                                            &engine.memory, &ib,
+                                                        );
+                                                        let d = crate::core::diff::lines(&ta, &tb);
+                                                        let (added, removed) =
+                                                            crate::core::diff::stats(&d);
+                                                        let body = crate::core::diff::render(
+                                                            &d, 200,
+                                                        );
+                                                        transcript.push(ChatLine {
+                                                            speaker: Speaker::System,
+                                                            text: format!(
+                                                                "diff {a} → {b}   (+{added} −{removed})\n{body}"
+                                                            ),
+                                                        });
+                                                        scroll = 0;
+                                                        status = format!(
+                                                            "diff +{added} −{removed}"
+                                                        );
+                                                    }
+                                                    _ => status =
+                                                        "one or both sessions not found"
+                                                            .into(),
+                                                }
+                                            }
+                                            _ => status =
+                                                "usage: /diff <session a> <session b>".into(),
+                                        }
+                                    }
                                     "clear" => match engine.session.clear(&engine.memory) {
                                         Ok(()) => {
                                             transcript.clear();
@@ -2851,6 +3015,61 @@ fn transcript_from(engine: &ChatEngine) -> Vec<ChatLine> {
             text: m.content.clone(),
         })
         .collect()
+}
+
+/// ASCII tree of the conversation branches (strongly-connected by lineage).
+fn branch_tree_text(nodes: &[crate::privacy::BranchNode], current: &str) -> String {
+    use std::collections::{BTreeMap, HashSet};
+    let ids: HashSet<&str> = nodes.iter().map(|n| n.id.as_str()).collect();
+    let mut children: BTreeMap<Option<String>, Vec<&crate::privacy::BranchNode>> = BTreeMap::new();
+    for node in nodes {
+        let parent = node.parent.clone().filter(|p| ids.contains(p.as_str()));
+        children.entry(parent).or_default().push(node);
+    }
+    fn walk(
+        children: &BTreeMap<Option<String>, Vec<&crate::privacy::BranchNode>>,
+        parent: Option<String>,
+        prefix: &str,
+        current: &str,
+        out: &mut String,
+    ) {
+        if let Some(list) = children.get(&parent) {
+            let total = list.len();
+            for (i, node) in list.iter().enumerate() {
+                let last = i + 1 == total;
+                let connector = if last { "└─ " } else { "├─ " };
+                let marker = if node.id == current { "●" } else { "○" };
+                let from = if node.parent.is_some() && node.from >= 0 {
+                    format!(" ← @{}", node.from)
+                } else {
+                    String::new()
+                };
+                out.push_str(&format!(
+                    "{prefix}{connector}{marker} {}  ({} msg){from}\n",
+                    node.name, node.message_count
+                ));
+                let next_prefix = format!("{prefix}{}", if last { "   " } else { "│  " });
+                walk(children, Some(node.id.clone()), &next_prefix, current, out);
+            }
+        }
+    }
+    let mut out = String::from("conversation branch tree:\n");
+    walk(&children, None, "", current, &mut out);
+    if nodes.is_empty() {
+        out.push_str("(no sessions)");
+    }
+    out
+}
+
+/// Flatten a stored session into plain text for diffing.
+fn session_text(memory: &crate::privacy::EncryptedMemory, id: &str) -> String {
+    memory
+        .get_history(id, 100_000)
+        .unwrap_or_default()
+        .iter()
+        .map(|m| format!("{}: {}", m.role.as_str(), m.content))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Footer label summarising pending attachments (empty when none).
@@ -4814,6 +5033,10 @@ fn welcome_lines(tools_enabled: bool) -> Vec<Line<'static>> {
         key("/help", "show this help"),
         key("/new", "start a new session (asks for a name)"),
         key("/switch", "open the session picker (also Ctrl-S)"),
+        key("/branch", "fork this conversation into a new branch"),
+        key("/log", "show the conversation branch tree"),
+        key("/checkout", "switch to a branch by name or id"),
+        key("/diff", "compare two sessions (branch diff)"),
         key("/clear", "wipe the current session"),
         key("/model", "pick a model from the list (saved for next launches)"),
         key("/effort", "reasoning effort (a picker opens right after /model)"),

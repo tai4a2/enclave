@@ -138,6 +138,20 @@ pub struct SessionInfo {
     pub message_count: i64,
 }
 
+/// A session together with its branch lineage (Conversation Git).
+///
+/// `parent` is the id of the session this one forked from (`None` for roots);
+/// `from` is how many of the parent's messages were copied at fork time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BranchNode {
+    pub id: String,
+    pub name: String,
+    pub parent: Option<String>,
+    pub from: i64,
+    pub message_count: i64,
+    pub updated_at: String,
+}
+
 /// Database statistics (all counts refer to decrypted content).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DbStats {
@@ -326,6 +340,19 @@ impl EncryptedMemory {
                 "ALTER TABLE egress ADD COLUMN original_sha TEXT NOT NULL DEFAULT '';",
             )?;
         }
+        // Migration (Conversation Git): branch lineage. A session may fork from
+        // another one; `branch_from` records how many messages were copied.
+        let has_branch: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'branch_parent'",
+            [],
+            |r| r.get(0),
+        )?;
+        if has_branch == 0 {
+            conn.execute_batch(
+                "ALTER TABLE sessions ADD COLUMN branch_parent TEXT NOT NULL DEFAULT '';\
+                 ALTER TABLE sessions ADD COLUMN branch_from INTEGER NOT NULL DEFAULT -1;",
+            )?;
+        }
         Ok(Self { conn, path: None })
     }
 
@@ -453,6 +480,40 @@ impl EncryptedMemory {
             sessions.push(row?);
         }
         Ok(sessions)
+    }
+
+    /// Record branch lineage for a forked session (Conversation Git).
+    pub fn set_branch(&self, id: &str, parent: &str, from: usize) -> Result<()> {
+        self.conn.execute(
+            "UPDATE sessions SET branch_parent = ?1, branch_from = ?2 WHERE id = ?3",
+            rusqlite::params![parent, from as i64, id],
+        )?;
+        Ok(())
+    }
+
+    /// All sessions with their branch lineage, most recently updated first.
+    pub fn branch_nodes(&self) -> Result<Vec<BranchNode>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT s.id, s.name, s.branch_parent, s.branch_from, COUNT(m.id), s.updated_at \
+             FROM sessions s LEFT JOIN messages m ON m.session_id = s.id \
+             GROUP BY s.id ORDER BY s.updated_at DESC",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![], |row| {
+            let parent: String = row.get(2)?;
+            Ok(BranchNode {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                parent: if parent.is_empty() { None } else { Some(parent) },
+                from: row.get(3)?,
+                message_count: row.get(4)?,
+                updated_at: row.get(5)?,
+            })
+        })?;
+        let mut nodes = Vec::new();
+        for row in rows {
+            nodes.push(row?);
+        }
+        Ok(nodes)
     }
 
     /// Delete a session and all of its messages.

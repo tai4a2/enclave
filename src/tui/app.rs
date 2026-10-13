@@ -480,6 +480,9 @@ async fn run_app(
     // `@file` fuzzy completion popup: (matches, sel).
     let mut at_files: Vec<String> = Vec::new();
     let mut at_sel: usize = 0;
+    // Slash-command autocomplete candidates (derived from the current input).
+    let mut slash_matches: Vec<(String, String)> = Vec::new();
+    let mut slash_sel: usize = 0;
     // Full workspace file list for `@` completion (built once at startup).
     let at_all: Vec<String> = {
         let mut files = Vec::new();
@@ -577,6 +580,23 @@ async fn run_app(
         } else {
             at_files.clear();
         }
+        // Refresh slash-command autocomplete from the current input.
+        slash_matches.clear();
+        if let Some(rest) = input.strip_prefix('/') {
+            if !rest.contains(char::is_whitespace) {
+                let q = rest.to_ascii_lowercase();
+                for (cmd, desc) in PALETTE_COMMANDS {
+                    let name = cmd.trim_start_matches('/').to_ascii_lowercase();
+                    if q.is_empty() || name.contains(&q) {
+                        slash_matches.push((cmd.to_string(), desc.to_string()));
+                    }
+                }
+                slash_matches.truncate(50);
+            }
+        }
+        if slash_sel >= slash_matches.len() {
+            slash_sel = 0;
+        }
         terminal.draw(|f| {
             let atts_label = attachments_label(&pending);
             draw_ui(
@@ -621,6 +641,8 @@ async fn run_app(
                 provider_sel,
                 &at_files,
                 at_sel,
+                &slash_matches,
+                slash_sel,
             )
         })?;
 
@@ -892,6 +914,45 @@ async fn run_app(
                                 _ => {}
                             }
                             continue;
+                        }
+                        // Slash-command autocomplete: navigate/complete.
+                        if !slash_matches.is_empty()
+                            && matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
+                        {
+                            match key.code {
+                                KeyCode::Up => {
+                                    slash_sel = slash_sel.saturating_sub(1);
+                                    continue;
+                                }
+                                KeyCode::Down => {
+                                    slash_sel =
+                                        (slash_sel + 1).min(slash_matches.len().saturating_sub(1));
+                                    continue;
+                                }
+                                KeyCode::Esc => {
+                                    input.clear();
+                                    slash_matches.clear();
+                                    continue;
+                                }
+                                KeyCode::Tab => {
+                                    if let Some((cmd, _)) = slash_matches.get(slash_sel) {
+                                        input = format!("{cmd} ");
+                                    }
+                                    slash_matches.clear();
+                                    continue;
+                                }
+                                KeyCode::Enter => {
+                                    let sel = slash_matches.get(slash_sel).map(|(c, _)| c.clone());
+                                    if let Some(cmd) = sel {
+                                        if input.trim() != cmd.trim() {
+                                            input = format!("{cmd} ");
+                                            slash_matches.clear();
+                                            continue;
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
                         }
                         // `@file` completion popup: intercept navigation keys.
                         if !at_files.is_empty()
@@ -3410,6 +3471,8 @@ fn draw_ui(
     provider_sel: usize,
     at_files: &[String],
     at_sel: usize,
+    slash_matches: &[(String, String)],
+    slash_sel: usize,
 ) {
     let area = f.area();
     // Base background for the whole screen.
@@ -4190,6 +4253,52 @@ fn draw_ui(
         );
     }
     // `@file` completion popup (anchored above the input box).
+    // Slash-command autocomplete popup (appears as soon as you type `/`).
+    if !slash_matches.is_empty() && !palette {
+        let rows = slash_matches.len().min(10);
+        let h = (rows as u16) + 2;
+        let w = area.width.saturating_sub(4).min(72);
+        let y = main[2].y.saturating_sub(h);
+        let box_area = Rect {
+            x: area.x + 2,
+            y,
+            width: w,
+            height: h,
+        };
+        overlay_bg(f, box_area, pal().accent);
+        let (start, end) = list_window(slash_matches.len(), slash_sel, rows);
+        let mut lines: Vec<Line> = Vec::new();
+        lines.push(Line::from(Span::styled(
+            format!(" commands · {}/{}", slash_sel + 1, slash_matches.len()),
+            Style::default()
+                .fg(pal().accent)
+                .add_modifier(Modifier::BOLD),
+        )));
+        for (i, (cmd, desc)) in slash_matches.iter().enumerate().take(end).skip(start) {
+            let selected = i == slash_sel;
+            let style = if selected {
+                Style::default()
+                    .fg(pal().bg)
+                    .bg(pal().accent)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(pal().text)
+            };
+            let desc_style = if selected {
+                Style::default().fg(pal().bg)
+            } else {
+                Style::default().fg(pal().dim)
+            };
+            lines.push(Line::from(vec![
+                Span::styled(format!("  {:<16}", cmd), style),
+                Span::styled(truncate(desc, 46), desc_style),
+            ]));
+        }
+        f.render_widget(
+            Paragraph::new(lines).block(Block::default().padding(Padding::new(1, 1, 0, 0))),
+            box_area,
+        );
+    }
     if !at_files.is_empty() {
         let rows = at_files.len().min(8);
         let h = (rows as u16) + 2;

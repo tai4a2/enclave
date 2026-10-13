@@ -195,6 +195,10 @@ branches — all stored encrypted in the vault.
 | `/log` | Show the ASCII branch tree (roots, forks, message counts, `●` = current). |
 | `/checkout <name\|id>` | Open a branch directly by name or id. |
 | `/diff <a> <b>` | Show a line-diff between two sessions (branches). |
+| `/merge <branch>` | Append the turns a branch has beyond the common prefix into the current session. |
+| `/graph` | Navigable branch graph overlay (↑/↓ select, Enter opens a branch). |
+| `/blame <text>` | Locate which turns contain some text and whether it was inherited from the parent branch or introduced here. |
+| `/provenance` | What left the machine for this session (from the encrypted egress ledger). |
 
 CLI equivalents:
 
@@ -202,6 +206,8 @@ CLI equivalents:
 enclave sessions log                         # print the branch tree
 enclave sessions branch --from <id> --name alt --keep 4
 enclave sessions diff <branch-a> <branch-b>  # name or id prefix
+enclave sessions merge <source> --into <target>
+enclave sessions provenance [id]             # egress ledger for a session
 ```
 
 Each forked session records its **parent** and **fork point** (`branches` lineage

@@ -131,7 +131,7 @@ fn surface() -> Style {
 
 /// Text shown by `/help`.
 const SLASH_HELP: &str =
-    "commands: /help · /new · /switch · /branch [name] · /log · /checkout <name> · /diff <a> <b> · /clear · /undo · /redo · /retry · /compact · /find <text> · /search <text> · /model [id] · /effort · /connect [provider] · /thinking · /details · /plan · /build · /attach <path> · /detach · /export [md|html|pdf] [path] · /editor · /init · /mcp · /ledger · /rag [index <paths>|search <q>|status|clear] · /airgap [on|off] · /route [on|off] · /remember <text> · /memory [search <q>|pin <id>] · /forget <id|text> · /checkpoint · /theme [name] · /commands · /credits · /panic · /quit   (Ctrl-P palette · Ctrl-S picker · Ctrl-R search sessions · Ctrl-Y copy · Ctrl-O editor · Shift+Tab plan/build · @file refs · !shell)";
+    "commands: /help · /new · /switch · /branch [name] · /log · /graph · /checkout <name> · /diff <a> <b> · /merge <branch> · /blame <text> · /provenance · /clear · /undo · /redo · /retry · /compact · /find <text> · /search <text> · /model [id] · /effort · /connect [provider] · /thinking · /details · /plan · /build · /attach <path> · /detach · /export [md|html|pdf] [path] · /editor · /init · /mcp · /ledger · /rag [index <paths>|search <q>|status|clear] · /airgap [on|off] · /route [on|off] · /remember <text> · /memory [search <q>|pin <id>] · /forget <id|text> · /checkpoint · /theme [name] · /commands · /credits · /panic · /quit   (Ctrl-P palette · Ctrl-S picker · Ctrl-R search sessions · Ctrl-Y copy · Ctrl-O editor · Shift+Tab plan/build · @file refs · !shell)";
 
 /// Command palette entries (Ctrl-P): (command, one-line description).
 const PALETTE_COMMANDS: &[(&str, &str)] = &[
@@ -142,6 +142,10 @@ const PALETTE_COMMANDS: &[(&str, &str)] = &[
     ("/log", "show the conversation branch tree"),
     ("/checkout", "switch to a branch by name"),
     ("/diff", "compare two sessions (branch diff)"),
+    ("/merge", "merge a branch's new turns into this one"),
+    ("/graph", "navigable branch graph (Enter to open)"),
+    ("/blame", "locate which turn/branch introduced some text"),
+    ("/provenance", "what left the machine for this session (ledger)"),
     ("/clear", "wipe the current session history"),
     ("/model", "pick a model (saved for next launches)"),
     ("/models", "alias of /model"),
@@ -183,6 +187,13 @@ const PALETTE_COMMANDS: &[(&str, &str)] = &[
 struct ChatLine {
     speaker: Speaker,
     text: String,
+}
+
+/// One row of the flattened conversation-branch tree (graph view).
+struct GraphRow {
+    id: String,
+    label: String,
+    is_current: bool,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -487,6 +498,9 @@ async fn run_app(
     // Slash-command autocomplete candidates (derived from the current input).
     let mut slash_matches: Vec<(String, String)> = Vec::new();
     let mut slash_sel: usize = 0;
+    let mut graph = false;
+    let mut graph_rows: Vec<GraphRow> = Vec::new();
+    let mut graph_sel: usize = 0;
     // Full workspace file list for `@` completion (built once at startup).
     let at_all: Vec<String> = {
         let mut files = Vec::new();
@@ -647,6 +661,9 @@ async fn run_app(
                 at_sel,
                 &slash_matches,
                 slash_sel,
+                graph,
+                &graph_rows,
+                graph_sel,
             )
         })?;
 
@@ -987,6 +1004,64 @@ async fn run_app(
                                 }
                                 _ => {}
                             }
+                        }
+                        if graph {
+                            if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+                                continue;
+                            }
+                            match key.code {
+                                KeyCode::Up => graph_sel = graph_sel.saturating_sub(1),
+                                KeyCode::Down => {
+                                    graph_sel =
+                                        (graph_sel + 1).min(graph_rows.len().saturating_sub(1))
+                                }
+                                KeyCode::Home => graph_sel = 0,
+                                KeyCode::End => graph_sel = graph_rows.len().saturating_sub(1),
+                                KeyCode::Enter => {
+                                    if let Some(row) = graph_rows.get(graph_sel) {
+                                        let (id, is_cur) = (row.id.clone(), row.is_current);
+                                        if !is_cur {
+                                            match crate::core::session::Session::load(
+                                                &engine.memory,
+                                                &id,
+                                            ) {
+                                                Ok(sess) => {
+                                                    engine.session = sess;
+                                                    transcript = transcript_from(engine);
+                                                    scroll = 0;
+                                                    sessions = engine
+                                                        .memory
+                                                        .list_sessions()
+                                                        .unwrap_or_default();
+                                                    persist_settings(|s| {
+                                                        s.working_session =
+                                                            Some(engine.session.id.clone())
+                                                    });
+                                                    privacy =
+                                                        privacy_snapshot(engine, &guard_cfg);
+                                                    status = format!(
+                                                        "checked out '{}'",
+                                                        engine.session.name
+                                                    );
+                                                }
+                                                Err(e) => status = format!("error: {e}"),
+                                            }
+                                        }
+                                    }
+                                    graph = false;
+                                }
+                                KeyCode::Esc | KeyCode::Char('q') => {
+                                    graph = false;
+                                    status = "ready".into();
+                                }
+                                KeyCode::Char('c')
+                                    if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                                {
+                                    return Ok(());
+                                }
+                                _ => {}
+                            }
+                            continue;
                         }
                         if palette {
                             if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
@@ -1777,6 +1852,195 @@ async fn run_app(
                                             }
                                             _ => status =
                                                 "usage: /diff <session a> <session b>".into(),
+                                        }
+                                    }
+                                    "merge" => {
+                                        let target = arg.trim();
+                                        if target.is_empty() {
+                                            status = "usage: /merge <branch name or id>".into();
+                                        } else {
+                                            let nodes =
+                                                engine.memory.branch_nodes().unwrap_or_default();
+                                            let found = nodes
+                                                .iter()
+                                                .find(|n| {
+                                                    n.id == target
+                                                        || n.name == target
+                                                        || n.id.starts_with(target)
+                                                })
+                                                .map(|n| (n.id.clone(), n.name.clone()));
+                                            match found {
+                                                Some((id, _)) if id == engine.session.id => {
+                                                    status =
+                                                        "cannot merge a branch into itself".into();
+                                                }
+                                                Some((id, name)) => {
+                                                    match engine
+                                                        .session
+                                                        .merge_from(&engine.memory, &id)
+                                                    {
+                                                        Ok(0) => status = format!(
+                                                            "'{name}' has nothing new to merge"
+                                                        ),
+                                                        Ok(n) => {
+                                                            transcript =
+                                                                transcript_from(engine);
+                                                            scroll = 0;
+                                                            sessions = engine
+                                                                .memory
+                                                                .list_sessions()
+                                                                .unwrap_or_default();
+                                                            privacy = privacy_snapshot(
+                                                                engine, &guard_cfg,
+                                                            );
+                                                            status = format!(
+                                                                "merged '{name}' (+{n} messages)"
+                                                            );
+                                                        }
+                                                        Err(e) => {
+                                                            status = format!("error: {e}")
+                                                        }
+                                                    }
+                                                }
+                                                None => status =
+                                                    format!("no branch matches '{target}'"),
+                                            }
+                                        }
+                                    }
+                                    "graph" | "tree" => {
+                                        graph_rows = flatten_tree(
+                                            &engine.memory.branch_nodes().unwrap_or_default(),
+                                            &engine.session.id,
+                                        );
+                                        graph_sel = graph_rows
+                                            .iter()
+                                            .position(|r| r.is_current)
+                                            .unwrap_or(0);
+                                        graph = true;
+                                        status =
+                                            "branch graph — ↑/↓ select, Enter open, Esc close"
+                                                .into();
+                                    }
+                                    "blame" => {
+                                        let q = arg.trim();
+                                        if q.is_empty() {
+                                            status = "usage: /blame <text to locate>".into();
+                                        } else {
+                                            let needle = q.to_ascii_lowercase();
+                                            let hits: Vec<String> = engine
+                                                .session
+                                                .messages
+                                                .iter()
+                                                .enumerate()
+                                                .filter(|(_, m)| {
+                                                    m.content.to_ascii_lowercase().contains(&needle)
+                                                })
+                                                .map(|(i, m)| {
+                                                    let first = m
+                                                        .content
+                                                        .lines()
+                                                        .next()
+                                                        .unwrap_or("")
+                                                        .chars()
+                                                        .take(80)
+                                                        .collect::<String>();
+                                                    format!(
+                                                        "  #{:<3} {:<9} {}",
+                                                        i + 1,
+                                                        m.role.as_str(),
+                                                        first
+                                                    )
+                                                })
+                                                .collect();
+                                            let mut text =
+                                                format!("blame '{q}': {} match(es)\n", hits.len());
+                                            if hits.is_empty() {
+                                                text.push_str(
+                                                    "  (not found in this session's messages)",
+                                                );
+                                            } else {
+                                                let nodes = engine
+                                                    .memory
+                                                    .branch_nodes()
+                                                    .unwrap_or_default();
+                                                if let Some(node) = nodes
+                                                    .iter()
+                                                    .find(|n| n.id == engine.session.id)
+                                                {
+                                                    if let Some(pid) = &node.parent {
+                                                        let inherited = session_text(
+                                                            &engine.memory, pid,
+                                                        )
+                                                        .to_ascii_lowercase()
+                                                        .contains(&needle);
+                                                        text.push_str(if inherited {
+                                                            "  lineage: present in the parent branch (inherited)\n"
+                                                        } else {
+                                                            "  lineage: introduced in THIS branch\n"
+                                                        });
+                                                    }
+                                                }
+                                                text.push_str(&hits.join("\n"));
+                                            }
+                                            transcript.push(ChatLine {
+                                                speaker: Speaker::System,
+                                                text,
+                                            });
+                                            scroll = 0;
+                                            status = format!("blame: {} match(es)", hits.len());
+                                        }
+                                    }
+                                    "provenance" | "egress" => {
+                                        match engine
+                                            .memory
+                                            .list_egress_for_session(&engine.session.id, 50)
+                                        {
+                                            Ok(entries) => {
+                                                let mut text = if entries.is_empty() {
+                                                    "provenance · no egress recorded for this session yet"
+                                                        .to_string()
+                                                } else {
+                                                    format!(
+                                                        "provenance · {} send(s) from this session\n",
+                                                        entries.len()
+                                                    )
+                                                };
+                                                for e in entries.iter().rev() {
+                                                    let red = if e.redactions.is_empty() {
+                                                        String::new()
+                                                    } else {
+                                                        format!("  [redacted: {}]", e.redactions)
+                                                    };
+                                                    let orig = if e.original_sha.is_empty() {
+                                                        String::new()
+                                                    } else {
+                                                        format!(
+                                                            "  commit {}",
+                                                            &e.original_sha[..12.min(e.original_sha.len())]
+                                                        )
+                                                    };
+                                                    text.push_str(&format!(
+                                                        "  #{} {} {}-{}  {} B  sha {}{}{}\n",
+                                                        e.id,
+                                                        e.ts,
+                                                        e.provider,
+                                                        e.model,
+                                                        e.payload_bytes,
+                                                        &e.payload_sha[..12.min(e.payload_sha.len())],
+                                                        red,
+                                                        orig
+                                                    ));
+                                                }
+                                                transcript.push(ChatLine {
+                                                    speaker: Speaker::System,
+                                                    text,
+                                                });
+                                                scroll = 0;
+                                                status =
+                                                    "provenance (egress ledger for this session)"
+                                                        .into();
+                                            }
+                                            Err(e) => status = format!("error: {e}"),
                                         }
                                     }
                                     "clear" => match engine.session.clear(&engine.memory) {
@@ -3072,6 +3336,51 @@ fn session_text(memory: &crate::privacy::EncryptedMemory, id: &str) -> String {
         .join("\n")
 }
 
+/// Flatten the branch tree into navigable rows (depth-prefixed labels).
+fn flatten_tree(nodes: &[crate::privacy::BranchNode], current: &str) -> Vec<GraphRow> {
+    use std::collections::{BTreeMap, HashSet};
+    let ids: HashSet<&str> = nodes.iter().map(|n| n.id.as_str()).collect();
+    let mut children: BTreeMap<Option<String>, Vec<&crate::privacy::BranchNode>> = BTreeMap::new();
+    for node in nodes {
+        let parent = node.parent.clone().filter(|p| ids.contains(p.as_str()));
+        children.entry(parent).or_default().push(node);
+    }
+    fn walk(
+        children: &BTreeMap<Option<String>, Vec<&crate::privacy::BranchNode>>,
+        parent: Option<String>,
+        prefix: &str,
+        current: &str,
+        rows: &mut Vec<GraphRow>,
+    ) {
+        if let Some(list) = children.get(&parent) {
+            let total = list.len();
+            for (i, node) in list.iter().enumerate() {
+                let last = i + 1 == total;
+                let connector = if last { "└─ " } else { "├─ " };
+                let marker = if node.id == current { "●" } else { "○" };
+                let from = if node.parent.is_some() && node.from >= 0 {
+                    format!("  ← @{}", node.from)
+                } else {
+                    String::new()
+                };
+                rows.push(GraphRow {
+                    id: node.id.clone(),
+                    label: format!(
+                        "{prefix}{connector}{marker} {}  ({} msg){from}",
+                        node.name, node.message_count
+                    ),
+                    is_current: node.id == current,
+                });
+                let next_prefix = format!("{prefix}{}", if last { "   " } else { "│  " });
+                walk(children, Some(node.id.clone()), &next_prefix, current, rows);
+            }
+        }
+    }
+    let mut rows = Vec::new();
+    walk(&children, None, "", current, &mut rows);
+    rows
+}
+
 /// Footer label summarising pending attachments (empty when none).
 fn attachments_label(pending: &[Attachment]) -> String {
     if pending.is_empty() {
@@ -3692,6 +4001,9 @@ fn draw_ui(
     at_sel: usize,
     slash_matches: &[(String, String)],
     slash_sel: usize,
+    graph: bool,
+    graph_rows: &[GraphRow],
+    graph_sel: usize,
 ) {
     let area = f.area();
     // Base background for the whole screen.
@@ -4558,6 +4870,40 @@ fn draw_ui(
             box_area,
         );
     }
+    // Conversation-branch graph (navigable): ↑/↓ select, Enter opens a branch.
+    if graph {
+        let rows = graph_rows.len().min(20);
+        let h = (rows as u16) + 2;
+        let w = area.width.saturating_sub(6).clamp(30, 80);
+        let box_area = centered_rect(area, w, h);
+        overlay_bg(f, box_area, pal().accent);
+        let (start, end) = list_window(graph_rows.len(), graph_sel, rows);
+        let mut lines: Vec<Line> = Vec::new();
+        lines.push(Line::from(Span::styled(
+            format!(" branch graph · {}/{}", graph_sel + 1, graph_rows.len()),
+            Style::default()
+                .fg(pal().accent)
+                .add_modifier(Modifier::BOLD),
+        )));
+        for (i, row) in graph_rows.iter().enumerate().take(end).skip(start) {
+            let selected = i == graph_sel;
+            let style = if selected {
+                Style::default()
+                    .fg(pal().bg)
+                    .bg(pal().accent)
+                    .add_modifier(Modifier::BOLD)
+            } else if row.is_current {
+                Style::default().fg(pal().green).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(pal().text)
+            };
+            lines.push(Line::from(Span::styled(format!("  {}", row.label), style)));
+        }
+        f.render_widget(
+            Paragraph::new(lines).block(Block::default().padding(Padding::new(1, 1, 0, 0))),
+            box_area,
+        );
+    }
     // Copy-mode overlay (Ctrl+Y): visual line selection yanked to the clipboard.
     if let Some(cs) = copy {
         let w = area.width.saturating_sub(8).clamp(24, 100);
@@ -5037,6 +5383,10 @@ fn welcome_lines(tools_enabled: bool) -> Vec<Line<'static>> {
         key("/log", "show the conversation branch tree"),
         key("/checkout", "switch to a branch by name or id"),
         key("/diff", "compare two sessions (branch diff)"),
+        key("/merge", "merge a branch's new turns into this one"),
+        key("/graph", "navigable branch graph (Enter opens a branch)"),
+        key("/blame", "locate which turn/branch introduced some text"),
+        key("/provenance", "what left the machine for this session"),
         key("/clear", "wipe the current session"),
         key("/model", "pick a model from the list (saved for next launches)"),
         key("/effort", "reasoning effort (a picker opens right after /model)"),

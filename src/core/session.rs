@@ -71,6 +71,20 @@ impl Session {
         })
     }
 
+    /// Merge another branch into this one: append the messages of `source_id`
+    /// that come after the longest common prefix with this session. Returns how
+    /// many messages were appended.
+    pub fn merge_from(&mut self, memory: &EncryptedMemory, source_id: &str) -> Result<usize> {
+        let other = memory.get_history(source_id, 100_000)?;
+        let common = common_prefix_len(&self.messages, &other);
+        let mut added = 0;
+        for message in other.into_iter().skip(common) {
+            self.push(message, memory)?;
+            added += 1;
+        }
+        Ok(added)
+    }
+
     /// Load an existing session and its history.
     pub fn load(memory: &EncryptedMemory, id: &str) -> Result<Self> {
         if !memory.session_exists(id)? {
@@ -139,4 +153,13 @@ impl Session {
         ));
         self.push(message, memory)
     }
+}
+
+/// Length of the longest common prefix shared by two message lists.
+fn common_prefix_len(a: &[Message], b: &[Message]) -> usize {
+    let mut i = 0;
+    while i < a.len() && i < b.len() && a[i].role == b[i].role && a[i].content == b[i].content {
+        i += 1;
+    }
+    i
 }

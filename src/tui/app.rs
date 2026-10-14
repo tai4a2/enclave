@@ -54,17 +54,18 @@ const EFFORT_OPTIONS: &[(&str, &str)] = &[
 // shades (no hard borders): the transcript sits on the base background while
 // the header, sidebar, info panel, input and footer use a slightly lighter
 // surface colour.
-/// Active colour palette (set once at startup from `[tui] theme`).
-static PALETTE: std::sync::OnceLock<Palette> = std::sync::OnceLock::new();
+/// Active colour palette (read at every draw, switchable at runtime via `/theme`).
+static PALETTE: std::sync::RwLock<Palette> =
+    std::sync::RwLock::new(crate::tui::theme::DEFAULT);
 
 /// The active palette (defaults to the built-in theme).
 fn pal() -> Palette {
-    *PALETTE.get_or_init(Palette::default)
+    *PALETTE.read().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Install the palette selected in the config (idempotent; first call wins).
+/// Install a palette (startup config or the `/theme` command).
 fn set_palette(palette: Palette) {
-    let _ = PALETTE.set(palette);
+    *PALETTE.write().unwrap_or_else(|e| e.into_inner()) = palette;
 }
 
 /// Active key-binding overrides (set once at startup from `[tui.keybinds]`).
@@ -131,7 +132,7 @@ fn surface() -> Style {
 
 /// Text shown by `/help`.
 const SLASH_HELP: &str =
-    "commands: /help · /new · /switch · /branch [name] · /log · /graph · /checkout <name> · /diff <a> <b> · /merge <branch> · /blame <text> · /provenance · /clear · /undo · /redo · /retry · /compact · /find <text> · /search <text> · /model [id] · /effort · /connect [provider] · /thinking · /details · /plan · /build · /attach <path> · /detach · /export [md|html|pdf] [path] · /editor · /init · /mcp · /ledger · /rag [index <paths>|search <q>|status|clear] · /airgap [on|off] · /route [on|off] · /remember <text> · /memory [search <q>|pin <id>] · /forget <id|text> · /checkpoint · /theme [name] · /commands · /credits · /panic · /quit   (Ctrl-P palette · Ctrl-S picker · Ctrl-R search sessions · Ctrl-Y copy · Ctrl-O editor · Shift+Tab plan/build · @file refs · !shell)";
+    "commands: /help · /new · /switch · /branch [name] [--from N] · /log · /graph · /checkout <name> · /diff <a> <b> · /merge <branch> · /blame <text> · /provenance · /clear · /undo · /redo · /retry · /compact · /find <text> · /search <text> · /model [id] · /effort · /connect [provider] · /thinking · /details · /plan · /build · /attach <path> · /detach · /export [md|html|pdf] [path] · /editor · /init · /mcp · /ledger · /rag [index <paths>|search <q>|status|clear] · /airgap [on|off] · /route [on|off] · /remember <text> · /memory [search <q>|pin <id>] · /forget <id|text> · /checkpoint · /theme [name] · /commands · /credits · /panic · /quit   (Ctrl-P palette · Ctrl-S picker · Ctrl-R search sessions · Ctrl-Y copy · Ctrl-O editor · Shift+Tab plan/build · @file refs · !shell)";
 
 /// Command palette entries (Ctrl-P): (command, one-line description).
 const PALETTE_COMMANDS: &[(&str, &str)] = &[
@@ -1695,8 +1696,22 @@ async fn run_app(
                                         status = "session picker — ↑/↓ select, Enter open, n new, r rename, d delete, Esc close".into();
                                     }
                                     "branch" => {
-                                        let keep = engine.session.messages.len();
-                                        let name = if arg.is_empty() {
+                                        let mut keep = engine.session.messages.len();
+                                        let mut name = String::new();
+                                        let mut toks = arg.split_whitespace();
+                                        while let Some(tok) = toks.next() {
+                                            if tok == "--from" {
+                                                if let Some(n) = toks.next() {
+                                                    keep = n.parse().unwrap_or(keep);
+                                                }
+                                            } else if let Some(n) = tok.strip_prefix("--from=") {
+                                                keep = n.parse().unwrap_or(keep);
+                                            } else {
+                                                name = tok.to_string();
+                                            }
+                                        }
+                                        keep = keep.min(engine.session.messages.len());
+                                        let name = if name.is_empty() {
                                             let base = engine.session.name.clone();
                                             let n = engine
                                                 .memory
@@ -1713,7 +1728,7 @@ async fn run_app(
                                                 .unwrap_or(1);
                                             format!("{base}~{n}")
                                         } else {
-                                            arg.clone()
+                                            name
                                         };
                                         match crate::core::session::Session::fork(
                                             &engine.memory,
@@ -1908,10 +1923,37 @@ async fn run_app(
                                         }
                                     }
                                     "graph" | "tree" => {
-                                        graph_rows = flatten_tree(
-                                            &engine.memory.branch_nodes().unwrap_or_default(),
-                                            &engine.session.id,
-                                        );
+                                        let nodes =
+                                            engine.memory.branch_nodes().unwrap_or_default();
+                                        let mut snippets: std::collections::HashMap<
+                                            String,
+                                            String,
+                                        > = std::collections::HashMap::new();
+                                        for node in &nodes {
+                                            if let Ok(hist) =
+                                                engine.memory.get_history(&node.id, 100_000)
+                                            {
+                                                if let Some(first) = hist
+                                                    .iter()
+                                                    .find(|m| m.role == Role::User)
+                                                    .or_else(|| hist.first())
+                                                {
+                                                    let snip: String = first
+                                                        .content
+                                                        .lines()
+                                                        .next()
+                                                        .unwrap_or("")
+                                                        .chars()
+                                                        .take(48)
+                                                        .collect();
+                                                    if !snip.is_empty() {
+                                                        snippets.insert(node.id.clone(), snip);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        graph_rows =
+                                            flatten_tree(&nodes, &engine.session.id, &snippets);
                                         graph_sel = graph_rows
                                             .iter()
                                             .position(|r| r.is_current)
@@ -3337,7 +3379,11 @@ fn session_text(memory: &crate::privacy::EncryptedMemory, id: &str) -> String {
 }
 
 /// Flatten the branch tree into navigable rows (depth-prefixed labels).
-fn flatten_tree(nodes: &[crate::privacy::BranchNode], current: &str) -> Vec<GraphRow> {
+fn flatten_tree(
+    nodes: &[crate::privacy::BranchNode],
+    current: &str,
+    snippets: &std::collections::HashMap<String, String>,
+) -> Vec<GraphRow> {
     use std::collections::{BTreeMap, HashSet};
     let ids: HashSet<&str> = nodes.iter().map(|n| n.id.as_str()).collect();
     let mut children: BTreeMap<Option<String>, Vec<&crate::privacy::BranchNode>> = BTreeMap::new();
@@ -3350,6 +3396,7 @@ fn flatten_tree(nodes: &[crate::privacy::BranchNode], current: &str) -> Vec<Grap
         parent: Option<String>,
         prefix: &str,
         current: &str,
+        snippets: &std::collections::HashMap<String, String>,
         rows: &mut Vec<GraphRow>,
     ) {
         if let Some(list) = children.get(&parent) {
@@ -3363,21 +3410,34 @@ fn flatten_tree(nodes: &[crate::privacy::BranchNode], current: &str) -> Vec<Grap
                 } else {
                     String::new()
                 };
+                let snippet = snippets.get(&node.id).cloned().unwrap_or_default();
+                let snip_part = if snippet.is_empty() {
+                    String::new()
+                } else {
+                    format!("  · {snippet}")
+                };
                 rows.push(GraphRow {
                     id: node.id.clone(),
                     label: format!(
-                        "{prefix}{connector}{marker} {}  ({} msg){from}",
+                        "{prefix}{connector}{marker} {}  ({} msg){from}{snip_part}",
                         node.name, node.message_count
                     ),
                     is_current: node.id == current,
                 });
                 let next_prefix = format!("{prefix}{}", if last { "   " } else { "│  " });
-                walk(children, Some(node.id.clone()), &next_prefix, current, rows);
+                walk(
+                    children,
+                    Some(node.id.clone()),
+                    &next_prefix,
+                    current,
+                    snippets,
+                    rows,
+                );
             }
         }
     }
     let mut rows = Vec::new();
-    walk(&children, None, "", current, &mut rows);
+    walk(&children, None, "", current, snippets, &mut rows);
     rows
 }
 
@@ -5379,7 +5439,7 @@ fn welcome_lines(tools_enabled: bool) -> Vec<Line<'static>> {
         key("/help", "show this help"),
         key("/new", "start a new session (asks for a name)"),
         key("/switch", "open the session picker (also Ctrl-S)"),
-        key("/branch", "fork this conversation into a new branch"),
+        key("/branch", "fork a branch (use --from N to fork from an earlier message)"),
         key("/log", "show the conversation branch tree"),
         key("/checkout", "switch to a branch by name or id"),
         key("/diff", "compare two sessions (branch diff)"),

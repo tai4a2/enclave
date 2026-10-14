@@ -12,6 +12,7 @@ pub mod error;
 pub mod privacy;
 pub mod providers;
 pub mod tui;
+pub mod web;
 
 /// Crate version.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

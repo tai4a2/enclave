@@ -149,6 +149,12 @@ pub enum Command {
     },
     /// Show the resolved configuration (no secrets).
     Config,
+    /// Serve the local-only web UI (interactive, styled like the TUI).
+    Serve {
+        /// Port to bind on 127.0.0.1.
+        #[arg(short, long, default_value = "7878")]
+        port: u16,
+    },
     /// Securely delete the encrypted database, salt and stored keys.
     Wipe {
         #[arg(long)]
@@ -399,6 +405,21 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::Config => {
             print_config(&paths, &settings);
             Ok(())
+        }
+        Command::Serve { port } => {
+            let mut engine = build_engine(
+                &paths, &settings, None, None, None, false, None, false, false,
+            )?;
+            let tools = settings.effective_tools(false);
+            let guard = settings.effective_guard(false);
+            engine.taint = guard.enabled && guard.taint;
+            engine.air_gap = settings.air_gap;
+            engine.injection = guard.enabled && guard.injection;
+            engine.arm_canary();
+            engine.route_sensitive = guard.enabled && settings.routing.sensitive == crate::config::RoutingMode::Local;
+            let runtime = tokio::runtime::Runtime::new()
+                .map_err(|e| EnclaveError::other(format!("runtime: {e}")))?;
+            runtime.block_on(crate::web::serve(engine, tools, guard, port))
         }
         Command::Wipe { force } => wipe_cmd(&paths, force),
         Command::Chat {

@@ -725,8 +725,60 @@ launch.
 | `enclave or providers` | List upstream provider names |
 | `enclave or endpoints <model>` | Provider endpoints, context and prices for a model |
 | `enclave or keys list\|create\|get\|update\|delete` | Manage OpenRouter provisioning keys (needs `ENCLAVE_OPENROUTER_PROVISIONING_KEY`) |
+| `enclave serve [-p 7878]` | Start the local-only web UI of your encrypted memory (loopback + per-run token) |
 
 Security/privacy audit: see [docs/audit.md](docs/audit.md).
+
+## Local web UI
+
+A faithful, interactive web view of the same encrypted memory — styled like the TUI:
+
+```bash
+./dist/enclave serve            # binds 127.0.0.1:7878
+./dist/enclave serve -p 9000    # custom port
+```
+
+It prints a one-off URL with a random per-run token, e.g.
+`http://127.0.0.1:7878/?token=…`.
+
+- **Loopback only**, token-gated on every request (`?token=` or the `x-enclave-token`
+  header); assets are embedded in the binary — no CDN, zero telemetry.
+- Same layout as the TUI: header, sessions sidebar, card transcript with markdown
+  rendering, right-hand info panel (model, guard, air-gap, DB size, egress, tasks),
+  privacy bar and footer.
+- **Live chat** with server-sent-event streaming; everything is stored in the same
+  encrypted vault (SQLCipher).
+- **Agentic mode** (`agent` chip in the footer, or `/agent`): the assistant can run the
+  built-in tools (read/write/edit files, glob, grep, run_shell, …); every call is shown in
+  a yellow “nothing runs without your approval” panel with **Run / Skip** buttons, tool
+  output is rendered inline (diffs coloured `+green`/`−red`) and file edits are summarised
+  in the info panel **CHANGES** list.
+- **Attachments**: the 📎 button (or `@path`) adds images and text files to your next
+  message; `!command` runs a shell command locally (output never leaves the machine).
+- **Branch graph**: `/graph` (or the sidebar ◎ button, or `Ctrl-G`) renders the whole
+  conversation tree as a real SVG — click a node to select it, double-click to open it, and
+  use the action bar (open · checkout · merge → current · diff vs current · branch from here ·
+  rename · delete). `/diff a b` shows a coloured line diff between two sessions.
+- Keyboard + mouse: `Ctrl-P` command palette · `Ctrl-S` session picker ·
+  `Ctrl-R` search across sessions · `Ctrl-F` find in the conversation; type `/` for the
+  slash autocomplete and `@` to reference a project file.
+- Session management: `+ new`, hover `✎`/`🗑`, or **right-click a session** for
+  Open / Rename / Branch / Delete (rename dialog + delete confirmation).
+- Theme switcher, model picker + **effort picker**, **provider picker** (`/connect`), and
+  toggles for plan/build, air-gap, sensitive routing and agent mode — all from the UI.
+- **Memory** (`/memory`, `/remember`, `/forget`), the **egress ledger** (`/ledger`, with
+  chain verification), `/undo` `/redo` `/retry` `/compact`, and **export** (`/export
+  md|html|pdf` — the file downloads straight from the browser).
+- A **privacy guard** check runs before every send: detected sensitive items are listed in
+  a confirmation dialog, and desktop notifications fire when a reply or tool approval is
+  ready.
+- An always-visible **quick-action toolbar** (graph · sessions · model · effort · provider ·
+  theme · plan/build · agent · air-gap · route · ledger · memory · rag · find · search ·
+  undo · retry · export) — the active toggles light up. The header pills (mode, agent,
+  air-gap, route) are clickable too.
+- **Responsive panels**: the ☰ / ▤ buttons in the header toggle the sessions sidebar and the
+  info panel (`Alt-S` / `Alt-I`), so they are reachable even on narrow windows; a
+  “↓ latest” button appears when you scroll up while new output streams in.
 
 ## Local RAG (encrypted file index)
 

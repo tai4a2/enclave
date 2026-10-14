@@ -5,7 +5,7 @@ Run the built binary from `./dist/enclave`; the user mostly uses `./dist/enclave
 
 ## Build & verify loop (ALWAYS)
 After every change:
-1. `cargo test` — must stay green (currently 204 tests).
+1. `cargo test` — must stay green (currently 213 tests).
 2. `cargo clippy --all-targets` — must be 0 warnings.
 3. `cargo build --release`
 4. `cp target/release/enclave dist/enclave && codesign --force --sign - dist/enclave`
@@ -15,8 +15,8 @@ macOS re-prompts the keychain on launch.
 
 ## Git
 - Commit ONLY on explicit user request. Do not commit proactively.
-- Branch `main`. Last commit: `8e98117`
-  ("Add native PDF export, OpenRouter commands and opencode-style TUI popups").
+- Branch `main`. Last commit: `fc79301`
+  ("Extend Conversation Git: merge, graph view, blame and ledger provenance").
 
 ## Environment
 - Config dir: `~/Library/Application Support/dev.enclave.enclave`
@@ -28,8 +28,8 @@ macOS re-prompts the keychain on launch.
 - The user has an OpenRouter key (previously 403 "PII detected" — server-side, avoid PII).
 - Toolchain pinned in `rust-toolchain.toml` (1.99.0).
 
-## State (all committed at 8e98117)
-Everything through security Waves A–C is implemented and tested (204 tests green,
+## State (all committed at fc79301)
+Everything through security Waves A–C is implemented and tested (213 tests green,
 clippy 0): crypto/vault/SQLCipher memory; 4 providers (openrouter/openai/anthropic/ollama)
 with streaming + real function calling; privacy guard (regex PII + local NER + placeholders)
 with taint tracking, egress policy-as-code, air-gap, prompt-injection canary, sensitivity
@@ -56,21 +56,27 @@ design only). OpenRouter parity, TUI popups (command palette Ctrl-P, provider/th
 pickers, `@file` fuzzy completion, slash `/` auto-popup, thinking/details toggles, cursor
 style) and the native Rust PDF renderer are all DONE and committed.
 
-### Session recap (for resuming the next day)
-The user asked for a "revolutionary" CLI/TUI idea with real added value. The proposal
-(agreed to revisit tomorrow) is:
+### Conversation Git (DONE, committed at 5a6127a + fc79301)
+The conversation is treated like git: encrypted, branchable, verifiable.
+- Storage: `sessions.branch_parent` + `sessions.branch_from` (migration in
+  `src/privacy/memory.rs`); `BranchNode`, `branch_nodes()`, `set_branch()`,
+  `list_egress_for_session()`.
+- `Session::fork` (copy a prefix into a new branch) and `Session::merge_from`
+  (append a branch's new turns after the common prefix).
+- TUI: `/branch [name]`, `/log`, `/checkout <name|id>`, `/diff <a> <b>`,
+  `/merge <branch>`, `/graph` (`/tree`, navigable colored tree overlay),
+  `/blame <text>` (inherited vs introduced), `/provenance` (`/egress`, per-session
+  egress ledger entries). Purple-graph overlay: ↑/↓ select, Enter checkout.
+- CLI: `enclave sessions branch|log|diff|merge|provenance`.
+- Tests: `tests/branch.rs` (9). Docs: README "Conversation branches".
 
-- **FLAGSHIP — "Conversation Git"**: treat the conversation as a content-addressed,
-  encrypted DAG stored in `vault.db` (git for chats). Commands `/branch`, `/checkout`,
-  `/merge`, `/diff`, `/blame`, `/log`; the TUI draws the graph instead of a flat list.
-  Ties into the existing egress ledger + proof-of-redaction for verifiable provenance
-  (which model saw what, what was redacted). Reuses the crypto already in the project.
-- Runner-up ideas: "Privacy Blast-Radius" (live map of every datum + a recall that
-  re-redacts) and "Local Model Committee" (several local Ollama models debate; a verifier
-  cross-checks consensus + dissents).
-- Offered next step: prototype a minimal branch/checkout/diff on the encrypted DAG.
-
-DECISION PENDING: whether to build "Conversation Git" or pick another idea.
+### Ideas still open (not built yet)
+- **Privacy Blast-Radius**: live map of every datum (local/remote, provider, when)
+  with a "recall" that re-redacts.
+- **Local Model Committee**: several local Ollama models debate; a verifier
+  cross-checks consensus + dissents.
+- Possible extensions of Conversation Git: automatic merge conflict resolution by
+  a model, provenance badges inline in the transcript, graph colors per model.
 
 ## Ideas backlog
 See `docs/security-roadmap.md` for the full privacy/security roadmap. Top remaining picks:

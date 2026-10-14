@@ -5,7 +5,7 @@ Run the built binary from `./dist/enclave`; the user mostly uses `./dist/enclave
 
 ## Build & verify loop (ALWAYS)
 After every change:
-1. `cargo test` — must stay green (currently 213 tests).
+1. `cargo test` — must stay green (currently 218 tests).
 2. `cargo clippy --all-targets` — must be 0 warnings.
 3. `cargo build --release`
 4. `cp target/release/enclave dist/enclave && codesign --force --sign - dist/enclave`
@@ -15,7 +15,7 @@ macOS re-prompts the keychain on launch.
 
 ## Git
 - Commit ONLY on explicit user request. Do not commit proactively.
-- Branch `main`. Last commit: `fc79301`
+- Branch `main`. Last commit: `651f65b`
   ("Extend Conversation Git: merge, graph view, blame and ledger provenance").
 
 ## Environment
@@ -29,13 +29,13 @@ macOS re-prompts the keychain on launch.
 - Toolchain pinned in `rust-toolchain.toml` (1.99.0).
 
 ## State (all committed at fc79301)
-Everything through security Waves A–C is implemented and tested (213 tests green,
+Everything through security Waves A–C is implemented and tested (218 tests green,
 clippy 0): crypto/vault/SQLCipher memory; 4 providers (openrouter/openai/anthropic/ollama)
 with streaming + real function calling; privacy guard (regex PII + local NER + placeholders)
 with taint tracking, egress policy-as-code, air-gap, prompt-injection canary, sensitivity
 routing, DLP local judge; encrypted export/import; shell proposals + agentic mode (`--agent`)
 with builtin tools (read_file, write_file, edit_file, apply_patch, list_dir, glob, grep,
-run_shell, todo, question, remember, rag_search) + MCP stdio client (hardened); Plan/Build
+run_shell, todo, question, remember, decide, rag_search) + MCP stdio client (hardened); Plan/Build
 modes, permissions (allow/ask/deny, bash_rules, external_directory, doom_loop, `--auto`),
 local AGENTS.md rules, custom `.md` commands, `@file` refs, `!shell`; `/undo /redo /retry
 /compact`, themes + keybindings, `/find`, `/search`, `/init`, `/export md|html|pdf`, external
@@ -70,13 +70,24 @@ The conversation is treated like git: encrypted, branchable, verifiable.
 - CLI: `enclave sessions branch|log|diff|merge|provenance`.
 - Tests: `tests/branch.rs` (9). Docs: README "Conversation branches".
 
+### Project memory & privacy posture (DONE, uncommitted at 651f65b + new work)
+- **Decision Log / ADR** (#2): encrypted `decisions` table in `src/privacy/memory.rs`
+  (`Decision`, `add_decision`, `list_decisions`, `search_decisions`, `set_decision_status`,
+  `delete_decision`, `delete_decisions_matching`, `decision_count`); injected into the
+  system prompt; `decide` agent tool; TUI `/decide` `/decisions`; CLI `enclave decisions
+  list|add|search|status|forget`; web UI `/api/decisions`.
+- **Privacy Blast-Radius** (#20) + **Privacy score** (#26d): `src/privacy/exposure.rs`
+  (`blast_radius`, `privacy_score`, `BlastRadius`, `PrivacyScore`, `ScoreInputs`) over
+  `EgressSummary` (`EncryptedMemory::egress_summary`); CLI `enclave exposure [--session]`;
+  TUI `/exposure` (`/blast-radius`); web UI `/api/exposure` + toolbar button. Counts/kinds
+  only, never payloads.
+
 ### Ideas still open (not built yet)
-- **Privacy Blast-Radius**: live map of every datum (local/remote, provider, when)
-  with a "recall" that re-redacts.
 - **Local Model Committee**: several local Ollama models debate; a verifier
   cross-checks consensus + dissents.
 - Possible extensions of Conversation Git: automatic merge conflict resolution by
   a model, provenance badges inline in the transcript, graph colors per model.
+- See `docs/roadmap-memory-context.md` for the full 27-idea scored roadmap.
 
 ## Ideas backlog
 See `docs/security-roadmap.md` for the full privacy/security roadmap. Top remaining picks:

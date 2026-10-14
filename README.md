@@ -183,6 +183,50 @@ working_session = "9f3c1a2b-…"
 - **Working session**: Enclave remembers which session you were in and reopens
   it on the next launch.
 
+## Project decisions (ADR log)
+
+Enclave can record the **rationale** behind decisions ("why did we choose X?")
+as an encrypted, ADR-style log in the same `vault.db`. Recorded decisions are
+injected into the system prompt (like memories) so the model respects them, and
+they can be searched later.
+
+In the TUI:
+
+| Command | Action |
+|---------|--------|
+| `/decide <title> [:: rationale]` | Record a decision |
+| `/decisions [query]` | List or search decisions |
+
+From the CLI:
+
+```bash
+enclave decisions add "Mistral over Llama" --body "better tool-calling" --tags ai
+enclave decisions list
+enclave decisions search tool
+enclave decisions status <id> superseded
+enclave decisions forget <id|text>
+```
+
+In agentic mode the model can record decisions itself via the `decide` tool
+(permission-gated). Statuses: `accepted` · `proposed` · `rejected` · `superseded`.
+
+## Privacy exposure (blast-radius & score)
+
+`enclave exposure` aggregates the encrypted egress ledger into a **privacy
+blast-radius** — how much went out, to which providers, how much was redacted —
+plus a **privacy posture score** (0–100, grade A–F) computed from your settings
+(guard, taint, air-gap, routing, sandbox, proxy/Tor) and your outgoing traffic.
+
+```bash
+enclave exposure            # whole vault
+enclave exposure --session  # most recent session only
+```
+
+The same view is available in the TUI (`/exposure`, alias `/blast-radius`) and
+the web UI (toolbar **exposure** button / `/exposure`). It shows **counts and
+kinds only — never payloads or secrets**. The score's factors explain each
+contribution (e.g. `+18 air-gap`, `-4 remote sends`).
+
 ## Conversation branches (Conversation Git)
 
 Enclave can treat a conversation like **git treats code**: instead of a single

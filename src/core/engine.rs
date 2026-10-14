@@ -157,6 +157,8 @@ pub struct ChatEngine {
     pub mcp: Option<std::sync::Arc<crate::core::mcp::McpRegistry>>,
     /// Persistent memories injected into the system prompt (never `local_only`).
     pub memories: Vec<crate::privacy::Memory>,
+    /// Recent project decisions (ADR-style) recalled into the system prompt.
+    pub decisions: Vec<crate::privacy::Decision>,
     /// Taint tracking: mark user messages that contain sensitive data and
     /// re-redact them automatically on later turns.
     pub taint: bool,
@@ -207,6 +209,7 @@ impl ChatEngine {
             todos: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             mcp: None,
             memories: Vec::new(),
+            decisions: Vec::new(),
             taint: true,
             policy: None,
             air_gap: false,
@@ -265,6 +268,7 @@ impl ChatEngine {
             todos: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             mcp: None,
             memories: Vec::new(),
+            decisions: Vec::new(),
             taint: true,
             policy: None,
             air_gap: false,
@@ -307,11 +311,38 @@ impl ChatEngine {
         Ok(())
     }
 
-    /// Execute a tool call that needs engine state (currently `remember`),
+    /// Reload recent project decisions recalled into the system prompt.
+    pub fn reload_decisions(&mut self) -> Result<()> {
+        self.decisions = self.memory.list_decisions(20)?;
+        Ok(())
+    }
+
+    /// Execute a tool call that needs engine state (`remember`, `decide`),
     /// returning `Some(result)` when handled. Callers fall through to
     /// `builtin_tools::execute` when this returns `None`.
     pub fn execute_stateful(&mut self, call: &ToolCall) -> Option<Result<String>> {
         match call.name.as_str() {
+            "decide" => {
+                let args: serde_json::Value = serde_json::from_str(&call.arguments)
+                    .unwrap_or_else(|_| serde_json::json!({}));
+                let title = args["title"].as_str().unwrap_or("").trim().to_string();
+                if title.is_empty() {
+                    return Some(Err(EnclaveError::other("decide: 'title' is required")));
+                }
+                let body = args["body"].as_str().unwrap_or("").to_string();
+                let tags = args["tags"].as_str().unwrap_or("").to_string();
+                let status = args["status"].as_str().unwrap_or("accepted").to_string();
+                let sid = self.session.id.clone();
+                let out = (|| -> Result<String> {
+                    let id = self.memory.add_decision(Some(&sid), &title, &body, &tags, &status)?;
+                    Ok(format!(
+                        "decision recorded [{}] {}",
+                        &id[..8.min(id.len())],
+                        title
+                    ))
+                })();
+                Some(out)
+            }
             "remember" => {
                 let args: serde_json::Value = serde_json::from_str(&call.arguments)
                     .unwrap_or_else(|_| serde_json::json!({}));
@@ -407,6 +438,21 @@ impl ChatEngine {
                     block.push_str(" (tags: ");
                     block.push_str(tags);
                     block.push(')');
+                }
+                block.push('\n');
+            }
+            parts.push(block.trim_end().to_string());
+        }
+        if !self.decisions.is_empty() {
+            let mut block = String::from(
+                "# Project decisions (recorded rationale — respect these unless the user says otherwise)\n",
+            );
+            for d in &self.decisions {
+                block.push_str(&format!("- [{}] {}", d.status, d.title));
+                let body = d.body.trim();
+                if !body.is_empty() {
+                    block.push_str(": ");
+                    block.push_str(body);
                 }
                 block.push('\n');
             }

@@ -252,6 +252,20 @@ pub fn defs(with_delegate: bool) -> Vec<ToolDef> {
             }),
         ),
         ToolDef::new(
+            "decide",
+            "Record an architectural/product decision (ADR-style) in the encrypted project log, so the rationale is recalled later.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string", "description": "short decision title"},
+                    "body": {"type": "string", "description": "the rationale: context, options considered, consequences"},
+                    "status": {"type": "string", "description": "accepted (default) | proposed | rejected | superseded"},
+                    "tags": {"type": "string", "description": "optional comma-separated tags"}
+                },
+                "required": ["title"]
+            }),
+        ),
+        ToolDef::new(
             "rag_search",
             "Search the user's locally indexed files (encrypted RAG store) and return the most relevant chunks.",
             serde_json::json!({
@@ -887,7 +901,7 @@ mod tests {
     #[test]
     fn defs_shape_and_delegate_flag() {
         let base = defs(false);
-        assert_eq!(base.len(), 12);
+        assert_eq!(base.len(), 13);
         assert!(base.iter().all(|d| !d.name.is_empty()));
         assert!(base.iter().any(|d| d.name == "edit_file"));
         assert!(base.iter().any(|d| d.name == "apply_patch"));
@@ -897,9 +911,10 @@ mod tests {
         assert!(base.iter().any(|d| d.name == "question"));
         assert!(base.iter().any(|d| d.name == "remember"));
         assert!(base.iter().any(|d| d.name == "rag_search"));
+        assert!(base.iter().any(|d| d.name == "decide"));
         let with = defs(true);
-        assert_eq!(with.len(), 13);
-        assert_eq!(with[12].name, "delegate");
+        assert_eq!(with.len(), 14);
+        assert_eq!(with[13].name, "delegate");
     }
 
     fn ctx_at(ws: &Path) -> ToolContext {

@@ -137,6 +137,17 @@ pub enum Command {
         #[arg(long, value_name = "ID")]
         proof: Option<i64>,
     },
+    /// Record and recall project decisions (ADR-style encrypted log).
+    Decisions {
+        #[command(subcommand)]
+        action: DecisionsAction,
+    },
+    /// Show the privacy blast-radius and a privacy posture score.
+    Exposure {
+        /// Restrict the blast-radius to the most recent session.
+        #[arg(long)]
+        session: bool,
+    },
     /// Manage the local encrypted RAG index (index files, search offline).
     Rag {
         #[command(subcommand)]
@@ -288,6 +299,34 @@ pub enum MemoryAction {
     },
 }
 
+/// `enclave decisions` sub-commands (ADR-style project log).
+#[derive(Subcommand, Debug)]
+pub enum DecisionsAction {
+    /// List recorded decisions (most recent first).
+    List {
+        #[arg(short, long, default_value = "50")]
+        limit: usize,
+    },
+    /// Record a new decision.
+    Add {
+        title: String,
+        /// The rationale: context, options considered, consequences.
+        #[arg(short, long, default_value = "")]
+        body: String,
+        #[arg(short, long, default_value = "")]
+        tags: String,
+        /// accepted (default) | proposed | rejected | superseded.
+        #[arg(long, default_value = "accepted")]
+        status: String,
+    },
+    /// Search decisions by substring (title, body or tags).
+    Search { query: String },
+    /// Change a decision's status.
+    Status { id: String, status: String },
+    /// Forget a decision by id, or all matching a query.
+    Forget { what: String },
+}
+
 /// `enclave or` sub-commands (OpenRouter).
 #[derive(Debug, clap::Subcommand)]
 pub enum OrAction {
@@ -382,6 +421,8 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::Keys { action } => keys_cmd(action),
         Command::Sessions { action } => sessions_cmd(&paths, &settings, action),
         Command::Memory { action } => memory_cmd(&paths, &settings, action),
+        Command::Decisions { action } => decisions_cmd(&paths, &settings, action),
+        Command::Exposure { session } => exposure_cmd(&paths, &settings, session),
         Command::Ledger { verify, limit, proof } => {
             ledger_cmd(&paths, &settings, verify, limit, proof)
         }
@@ -662,6 +703,7 @@ fn build_engine(
     engine.dlp_judge = settings.policy.judge.clone().filter(|m| !m.trim().is_empty());
     engine.judge_action = settings.policy.judge_action;
     engine.reload_memories()?;
+    engine.reload_decisions()?;
     persist_working_session(paths, &engine.session.id);
     Ok(engine)
 }
@@ -1345,6 +1387,181 @@ fn memory_cmd(paths: &Paths, settings: &Settings, action: MemoryAction) -> Resul
             let n = memory.delete_memories_matching("")?;
             println!("deleted {n} memor{}", if n == 1 { "y" } else { "ies" });
         }
+    }
+    Ok(())
+}
+
+/// Record and recall the ADR-style project decision log.
+fn decisions_cmd(paths: &Paths, settings: &Settings, action: DecisionsAction) -> Result<()> {
+    use crate::privacy::EncryptedMemory;
+
+    let vault = Vault::new(&paths.config_dir);
+    let key = unlock_master_key(&vault, settings, false)?;
+    let memory = EncryptedMemory::open(&paths.db_path, &key)?;
+    let short = |id: &str| id[..8.min(id.len())].to_string();
+
+    match action {
+        DecisionsAction::Add {
+            title,
+            body,
+            tags,
+            status,
+        } => {
+            let title = title.trim();
+            if title.is_empty() {
+                return Err(EnclaveError::other("decision title cannot be empty"));
+            }
+            let id = memory.add_decision(None, title, &body, tags.trim(), status.trim())?;
+            println!("decision [{}] {} ({})", short(&id), title, status.trim());
+        }
+        DecisionsAction::List { limit } => {
+            let ds = memory.list_decisions(limit)?;
+            if ds.is_empty() {
+                println!("no decisions recorded (add one with: enclave decisions add \"...\")");
+            } else {
+                for d in &ds {
+                    println!("{}  [{}] {}{}", short(&d.id), d.status, d.title, tags_suffix(&d.tags));
+                    let first = d.body.lines().next().unwrap_or("");
+                    if !first.is_empty() {
+                        println!("      {}", truncate_line(first, 100));
+                    }
+                }
+                println!("\n{} decisions", memory.decision_count()?);
+            }
+        }
+        DecisionsAction::Search { query } => {
+            let ds = memory.search_decisions(&query, 100)?;
+            if ds.is_empty() {
+                println!("no decisions match '{query}'");
+            } else {
+                for d in &ds {
+                    println!("{}  [{}] {}{}", short(&d.id), d.status, d.title, tags_suffix(&d.tags));
+                    let first = d.body.lines().next().unwrap_or("");
+                    if !first.is_empty() {
+                        println!("      {}", truncate_line(first, 100));
+                    }
+                }
+            }
+        }
+        DecisionsAction::Status { id, status } => {
+            if memory.set_decision_status(&id, status.trim())? {
+                println!("[{}] → {}", short(&id), status.trim());
+            } else {
+                println!("no decision with id '{id}'");
+            }
+        }
+        DecisionsAction::Forget { what } => {
+            if memory.delete_decision(&what)? {
+                println!("forgot decision [{}]", short(&what));
+            } else {
+                let n = memory.delete_decisions_matching(&what)?;
+                if n == 0 {
+                    println!("no decision matched '{what}'");
+                } else {
+                    println!("forgot {n} decision(s) matching '{what}'");
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Truncate a line for display.
+fn truncate_line(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        text.to_string()
+    } else {
+        let mut s: String = text.chars().take(max.saturating_sub(1)).collect();
+        s.push('…');
+        s
+    }
+}
+
+/// Human-readable byte size.
+fn human_bytes(n: u64) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = KB * 1024.0;
+    let f = n as f64;
+    if f >= MB {
+        format!("{:.1} MB", f / MB)
+    } else if f >= KB {
+        format!("{:.1} KB", f / KB)
+    } else {
+        format!("{n} B")
+    }
+}
+
+/// Show the privacy blast-radius and a posture score.
+fn exposure_cmd(paths: &Paths, settings: &Settings, session_only: bool) -> Result<()> {
+    use crate::config::SandboxMode;
+    use crate::privacy::EncryptedMemory;
+    use crate::privacy::exposure::{ScoreInputs, blast_radius, privacy_score};
+
+    let vault = Vault::new(&paths.config_dir);
+    let key = unlock_master_key(&vault, settings, false)?;
+    let memory = EncryptedMemory::open(&paths.db_path, &key)?;
+
+    let sid = if session_only {
+        memory
+            .list_sessions()?
+            .into_iter()
+            .find(|s| s.message_count > 0)
+            .map(|s| s.id)
+    } else {
+        None
+    };
+
+    let summary = memory.egress_summary(sid.as_deref())?;
+    let br = blast_radius(&summary);
+    let redactions: i64 = summary.kinds.iter().map(|(_, c)| *c).sum();
+
+    println!(
+        "privacy blast-radius — {}",
+        if session_only { "this session" } else { "whole vault" }
+    );
+    println!(
+        "  {} outbound request(s): {} remote · {} local · {} redacted · {} sent",
+        br.total,
+        br.remote,
+        br.local,
+        br.redacted,
+        human_bytes(br.bytes.max(0) as u64)
+    );
+    if br.providers.is_empty() {
+        println!("  providers         : (nothing recorded)");
+    } else {
+        let prov: Vec<String> = br.providers.iter().map(|(p, c)| format!("{p}×{c}")).collect();
+        println!("  providers         : {}", prov.join(", "));
+    }
+    if br.kinds.is_empty() {
+        println!("  sensitive caught   : none");
+    } else {
+        let kinds: Vec<String> = br.kinds.iter().map(|(k, c)| format!("{k}×{c}")).collect();
+        println!("  sensitive caught   : {}", kinds.join(", "));
+    }
+
+    let local_only_memories = memory
+        .list_memories(1000)?
+        .iter()
+        .filter(|m| m.local_only)
+        .count() as i64;
+    let inputs = ScoreInputs {
+        remote: br.remote,
+        local: br.local,
+        redactions,
+        air_gap: settings.air_gap,
+        route_sensitive: settings.routing.sensitive == crate::config::RoutingMode::Local,
+        guard_enabled: settings.guard.enabled,
+        taint: settings.guard.taint,
+        sandbox_on: settings.tools.sandbox != SandboxMode::Off,
+        anonymised_network: settings.network.proxy.is_some() || settings.network.tor,
+        local_only_memories,
+    };
+    let score = privacy_score(&inputs);
+    println!();
+    println!("privacy score: {} / 100  (grade {})", score.score, score.grade);
+    for (label, delta) in &score.factors {
+        println!("  {:+3}  {label}", delta);
     }
     Ok(())
 }

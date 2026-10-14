@@ -87,6 +87,9 @@ pub async fn serve(
         .route("/api/toggle", post(api_toggle))
         .route("/api/memories", get(api_memories).post(api_memory_add))
         .route("/api/memories/delete", post(api_memory_delete))
+        .route("/api/decisions", get(api_decisions).post(api_decision_add))
+        .route("/api/decisions/delete", post(api_decision_delete))
+        .route("/api/exposure", get(api_exposure))
         .route("/api/ledger", get(api_ledger))
         .route("/api/rag", post(api_rag))
         .route("/api/export", post(api_export))
@@ -171,6 +174,7 @@ fn state_json(engine: &ChatEngine, tools_enabled: bool, guard_label: &str, agent
         "db_bytes": engine.memory.disk_bytes(),
         "egress_count": engine.memory.egress_count().unwrap_or(0),
         "memories_count": engine.memory.memory_count().unwrap_or(0),
+        "decisions_count": engine.memory.decision_count().unwrap_or(0),
         "stats": { "sessions": n_sessions, "messages": n_messages },
         "todos": todos.iter().map(|t| json!({ "text": t.text, "status": t.status })).collect::<Vec<_>>(),
         "mcp_tools": engine.mcp.as_ref().map(|m| m.tool_names()).unwrap_or_default(),
@@ -1175,6 +1179,125 @@ async fn api_memory_delete(
     }
 }
 
+async fn api_decisions(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    if !authorized(&state, &headers, &q) {
+        return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+    }
+    let query = q.get("q").cloned().unwrap_or_default();
+    let engine = state.engine.lock().await;
+    let ds = if query.trim().is_empty() {
+        engine.memory.list_decisions(200).unwrap_or_default()
+    } else {
+        engine.memory.search_decisions(&query, 200).unwrap_or_default()
+    };
+    Json(json!({ "decisions": ds.iter().map(|d| json!({
+        "id": d.id, "session_id": d.session_id, "title": d.title, "body": d.body,
+        "status": d.status, "tags": d.tags, "updated_at": d.updated_at,
+    })).collect::<Vec<_>>() }))
+    .into_response()
+}
+
+async fn api_decision_add(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+    Json(body): Json<Value>,
+) -> Response {
+    if !authorized(&state, &headers, &q) {
+        return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+    }
+    let title = body["title"].as_str().unwrap_or("").trim().to_string();
+    if title.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "title is required" }))).into_response();
+    }
+    let rationale = body["body"].as_str().unwrap_or("").to_string();
+    let tags = body["tags"].as_str().unwrap_or("").to_string();
+    let status = body["status"].as_str().unwrap_or("accepted").to_string();
+    let engine = state.engine.lock().await;
+    match engine.memory.add_decision(
+        Some(&engine.session.id),
+        &title,
+        &rationale,
+        &tags,
+        &status,
+    ) {
+        Ok(id) => Json(json!({ "id": id, "ok": true })).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))).into_response(),
+    }
+}
+
+async fn api_decision_delete(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+    Json(body): Json<Value>,
+) -> Response {
+    if !authorized(&state, &headers, &q) {
+        return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+    }
+    let id = body["id"].as_str().unwrap_or("").trim().to_string();
+    if id.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "id is required" }))).into_response();
+    }
+    let engine = state.engine.lock().await;
+    match engine.memory.delete_decision(&id) {
+        Ok(ok) => Json(json!({ "ok": ok })).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))).into_response(),
+    }
+}
+
+async fn api_exposure(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    if !authorized(&state, &headers, &q) {
+        return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+    }
+    use crate::config::SandboxMode;
+    use crate::privacy::exposure::{ScoreInputs, blast_radius, privacy_score};
+
+    let engine = state.engine.lock().await;
+    let summary = engine.memory.egress_summary(None).unwrap_or_default();
+    let br = blast_radius(&summary);
+    let redactions: i64 = summary.kinds.iter().map(|(_, c)| *c).sum();
+    let local_only_memories = engine
+        .memory
+        .list_memories(1000)
+        .unwrap_or_default()
+        .iter()
+        .filter(|m| m.local_only)
+        .count() as i64;
+    let inputs = ScoreInputs {
+        remote: br.remote,
+        local: br.local,
+        redactions,
+        air_gap: engine.air_gap,
+        route_sensitive: engine.route_sensitive,
+        guard_enabled: state.guard_label != "off",
+        taint: engine.taint,
+        sandbox_on: state.tools.sandbox != SandboxMode::Off,
+        anonymised_network: false,
+        local_only_memories,
+    };
+    let score = privacy_score(&inputs);
+    Json(json!({
+        "blast_radius": {
+            "total": br.total, "remote": br.remote, "local": br.local,
+            "redacted": br.redacted, "bytes": br.bytes,
+            "providers": br.providers.iter().map(|(n, c)| json!({ "name": n, "count": c })).collect::<Vec<_>>(),
+            "kinds": br.kinds.iter().map(|(n, c)| json!({ "name": n, "count": c })).collect::<Vec<_>>(),
+        },
+        "score": { "score": score.score, "grade": score.grade,
+            "factors": score.factors.iter().map(|(l, d)| json!({ "label": l, "delta": d })).collect::<Vec<_>>() },
+    }))
+    .into_response()
+}
+
 async fn api_ledger(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1626,6 +1749,8 @@ const INDEX_HTML: &str = r#"
   <span class="tb" data-cmd="/route">route</span>
   <span class="tb" data-cmd="/ledger">ledger</span>
   <span class="tb" data-cmd="/memory">memory</span>
+  <span class="tb" data-cmd="/decisions">decisions</span>
+  <span class="tb" data-cmd="/exposure">exposure</span>
   <span class="tb" data-cmd="/rag">rag</span>
   <span class="tb" data-cmd="/find">find</span>
   <span class="tb" data-cmd="/search">search</span>
@@ -1672,10 +1797,11 @@ const PALETTE_COMMANDS = [
   ["/ledger","show the encrypted egress ledger"],["/provenance","what left the machine for this session"],["/rag","local file index (index/search/status/clear)"],["/merge","merge a branch's new turns into this one"],["/blame","find which turn mentions some text"],["/init","generate an AGENTS.md for this project"],["/mcp","list tools exposed by MCP servers"],["/details","toggle tool detail blocks"],["/airgap","toggle air-gap"],
   ["/route","toggle routing of sensitive turns"],["/remember","save a fact to memory"],
   ["/memory","list / search memories"],["/forget","delete a memory"],["/checkpoint","summarise into memory"],
+  ["/decide","record a decision with rationale"],["/decisions","list / search decisions"],["/exposure","privacy blast-radius + score"],
   ["/panic","lock now"],["/quit","close the web UI"]
 ];
 const THEMES=["default","nord","gruvbox","solarized","mono"];
-const SLASH_REAL = new Set(['/help','/new','/switch','/theme','/themes','/model','/models','/effort','/connect','/provider','/providers','/plan','/build','/agent','/airgap','/route','/clear','/branch','/checkout','/graph','/tree','/log','/diff','/palette','/sessions','/resume','/continue','/quit','/find','/search','/search-all','/shortcuts','/keys','/ledger','/egress','/provenance','/rag','/merge','/init','/mcp','/blame','/details','/thinking','/memory','/memories','/remember','/forget','/checkpoint','/export','/undo','/redo','/retry','/compact','/summarize']);
+const SLASH_REAL = new Set(['/help','/new','/switch','/theme','/themes','/model','/models','/effort','/connect','/provider','/providers','/plan','/build','/agent','/airgap','/route','/clear','/branch','/checkout','/graph','/tree','/log','/diff','/palette','/sessions','/resume','/continue','/quit','/find','/search','/search-all','/shortcuts','/keys','/ledger','/egress','/provenance','/rag','/merge','/init','/mcp','/blame','/details','/thinking','/memory','/memories','/remember','/forget','/checkpoint','/decide','/decisions','/exposure','/export','/undo','/redo','/retry','/compact','/summarize']);
 
 // ---------- small utils ----------
 function fmtBytes(n){ n=+n||0; if(n>=1048576) return (n/1048576).toFixed(1)+' MB'; if(n>=1024) return (n/1024).toFixed(1)+' KB'; return n+' B'; }
@@ -1765,6 +1891,7 @@ function renderInfo(){
   h+=krow('data',STATE.stats.messages+' msg · '+STATE.stats.sessions+' sessions');
   h+=krow('egress',STATE.egress_count+' sent');
   h+=krow('memory',STATE.memories_count+' facts');
+  h+=krow('decisions',STATE.decisions_count+' logged');
   if(STATE.todos&&STATE.todos.length){
     h+='<div class="sec">tasks</div>';
     STATE.todos.slice(0,12).forEach(t=>{
@@ -1970,6 +2097,29 @@ async function openMemories(q){
     rows:mems.map(m=>({k:truncate(m.text,30),d:(m.tags||'')+(m.pinned?' · pinned':'')+(m.local_only?' · local-only':''),id:m.id,
       actions:[{act:'del',label:'🗑'}],ondel:async()=>{ await api('/api/memories/delete',{id:m.id}); toast('deleted','ok'); closeOverlay(); openMemories(q); }})),
     hint:'Enter copies /forget id · 🗑 delete · Esc close',onPick:r=>{ $('inp').value='/forget '+r.id+' '; $('inp').focus(); }});
+}
+async function openDecisions(q){
+  const d=await (await fetch('/api/decisions'+(q?('?q='+encodeURIComponent(q)):''),{headers:H})).json();
+  const ds=d.decisions||[];
+  openOverlay({title:'decisions · '+ds.length+' logged',filterPlaceholder:'filter…',
+    rows:ds.map(x=>({k:'['+x.status+'] '+truncate(x.title,34),
+      d:truncate(x.body||'',64)+(x.tags?(' · #'+x.tags):''),id:x.id,
+      actions:[{act:'del',label:'🗑'}],
+      ondel:async()=>{ await api('/api/decisions/delete',{id:x.id}); toast('decision forgotten','ok'); closeOverlay(); openDecisions(q); }})),
+    hint:'Enter copies /decisions <title> · 🗑 forget · Esc close',onPick:r=>{ $('inp').value='/decisions '+r.k+' '; $('inp').focus(); }});
+}
+async function openExposure(){
+  const d=await (await fetch('/api/exposure',{headers:H})).json();
+  const b=d.blast_radius||{}, s=d.score||{};
+  const rows=[];
+  rows.push({k:'outbound',d:b.total+' request(s) · '+b.remote+' remote · '+b.local+' local · '+b.redacted+' redacted'});
+  rows.push({k:'bytes sent',d:fmtBytes(b.bytes||0)});
+  (b.providers||[]).forEach(p=>rows.push({k:p.name,d:p.count+' request(s)'}));
+  if(!(b.kinds||[]).length){ rows.push({k:'sensitive',d:'none caught'}); }
+  (b.kinds||[]).forEach(k=>rows.push({k:'caught',d:k.name+' ×'+k.count}));
+  (s.factors||[]).forEach(f=>rows.push({k:(f.delta>=0?'+':'')+f.delta,d:f.label}));
+  openOverlay({title:'privacy blast-radius · score '+s.score+'/100 (grade '+s.grade+')',rows,
+    hint:'counts and kinds only — never payloads or secrets · Esc close',onPick:()=>{}});
 }
 async function openLedger(perSession){
   const url='/api/ledger?verify=1'+(perSession?'&session=1':'');
@@ -2485,6 +2635,9 @@ async function runSlash(text){
     case 'blame': openBlame(arg); break;
     case 'details': case 'thinking': toggleDetails(); break;
     case 'memory': case 'memories': openMemories(arg||''); break;
+    case 'decide': promptModal('Record decision','Title :: rationale',arg||'',async v=>{ if(!v||!v.trim()) return; const [t,b]=v.split('::'); const r=await api('/api/decisions',{title:(t||v).trim(),body:(b||'').trim()}); if(r.error){ toast(r.error,'error'); return; } await loadState(); toast('decision recorded','ok'); }); break;
+    case 'decisions': openDecisions(arg||''); break;
+    case 'exposure': case 'blast-radius': openExposure(); break;
     case 'remember': promptModal('Remember','Fact to store',arg||'',async v=>{ if(!v||!v.trim()) return; const r=await api('/api/memories',{text:v.trim()}); if(r.error){ toast(r.error,'error'); return; } await loadState(); toast('remembered','ok'); }); break;
     case 'forget': if(!arg){ toast('usage: /forget <id>','error'); break; } { const r=await api('/api/memories/delete',{id:arg}); await loadState(); toast(r.ok?'forgotten':'not found', r.ok?'ok':'error'); } break;
     case 'checkpoint': { const prompt='Summarise the key facts, decisions, preferences and open questions in this conversation into a short bullet list suitable for long-term memory.'; statusSet('summarising…'); const text=await resolveAt(parts.slice(1).join(' ')||''); const r=await api('/api/memories',{text:prompt,tags:'checkpoint'}); await loadState(); toast('checkpoint hint stored','ok'); break; }
@@ -2588,7 +2741,7 @@ function setTheme(t){ document.body.dataset.theme=t; localStorage.setItem('encla
 setTheme(localStorage.getItem('enclave-theme')||'default');
 function syncPanelBtns(){ $('tgSide').classList.toggle('off', !panelVisible('aside.side')); $('tgInfo').classList.toggle('off', !panelVisible('aside.info')); }
 window.addEventListener('resize', syncPanelBtns);
-(async()=>{ await loadState(); if(STATE){ await openCurrent(); } syncPanelBtns(); statusSet('ready'); })();
+(async()=>{ await loadState(); if(STATE){ await openCurrent(); }   syncPanelBtns(); statusSet('ready'); })();
 </script>
 </body>
 </html>

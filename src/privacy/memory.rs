@@ -129,6 +129,42 @@ fn map_memory(row: &rusqlite::Row<'_>) -> rusqlite::Result<Memory> {
     })
 }
 
+/// Map a `decisions` row (columns: id, session_id, title, body, status, tags,
+/// created_at, updated_at) into a [`Decision`].
+fn map_decision(row: &rusqlite::Row<'_>) -> rusqlite::Result<Decision> {
+    Ok(Decision {
+        id: row.get(0)?,
+        session_id: row.get(1)?,
+        title: row.get(2)?,
+        body: row.get(3)?,
+        status: row.get(4)?,
+        tags: row.get(5)?,
+        created_at: row.get(6)?,
+        updated_at: row.get(7)?,
+    })
+}
+
+/// Sort a count map into `(key, count)` pairs, most frequent first (ties by key).
+fn sort_counts(map: std::collections::BTreeMap<String, i64>) -> Vec<(String, i64)> {
+    let mut out: Vec<(String, i64)> = map.into_iter().collect();
+    out.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    out
+}
+
+/// Parse a stored redaction summary ("2 EMAIL, 1 CARD") into (label, count).
+fn parse_redactions(summary: &str) -> Vec<(String, i64)> {
+    let mut out = Vec::new();
+    for part in summary.split(',') {
+        let mut it = part.split_whitespace();
+        if let (Some(n), Some(label)) = (it.next(), it.next()) {
+            if let Ok(count) = n.parse::<i64>() {
+                out.push((label.to_string(), count));
+            }
+        }
+    }
+    out
+}
+
 /// Summary row describing a stored session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionInfo {
@@ -188,6 +224,24 @@ pub struct Memory {
     pub updated_at: String,
 }
 
+/// A recorded decision (ADR-style): why a choice was made in a project.
+///
+/// Stored encrypted in the vault, tagged by session. Captured explicitly
+/// (`/decide`, the `decide` tool, `enclave decisions add`) so the *why* survives
+/// across sessions and can be recalled.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Decision {
+    pub id: String,
+    pub session_id: Option<String>,
+    pub title: String,
+    pub body: String,
+    /// `accepted` (default), `proposed`, `rejected` or `superseded`.
+    pub status: String,
+    pub tags: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
 /// One row of the encrypted egress ledger: a tamper-evident record of an
 /// outbound request. It stores only a SHA-256 fingerprint of the payload and a
 /// summary of the guard redactions — never the payload or any secret.
@@ -205,6 +259,24 @@ pub struct EgressEntry {
     /// was redacted. Enables later proof-of-redaction.
     pub original_sha: String,
     pub hash: String,
+}
+
+/// Aggregated view of the egress ledger ("privacy blast-radius").
+///
+/// Answers "what has left this machine?" — counts, providers and which kinds of
+/// sensitive data were caught by the guard — without ever exposing payloads.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EgressSummary {
+    /// Total outbound requests recorded.
+    pub total: i64,
+    /// Requests that had at least one guard redaction applied.
+    pub redacted: i64,
+    /// Total payload bytes sent (fingerprint-side estimate).
+    pub bytes: i64,
+    /// Requests per provider, most frequent first.
+    pub providers: Vec<(String, i64)>,
+    /// Guard findings by kind label (e.g. `EMAIL` → 3), most frequent first.
+    pub kinds: Vec<(String, i64)>,
 }
 
 /// One indexed chunk of the local RAG store.
@@ -287,6 +359,20 @@ impl EncryptedMemory {
                 updated_at TEXT NOT NULL\
              );\
              CREATE INDEX IF NOT EXISTS idx_memories_updated ON memories(pinned DESC, updated_at DESC);",
+        )?;
+        // Decision log (ADR-style): the *why* behind project choices.
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS decisions (\
+                id TEXT PRIMARY KEY, \
+                session_id TEXT, \
+                title TEXT NOT NULL, \
+                body TEXT NOT NULL DEFAULT '', \
+                status TEXT NOT NULL DEFAULT 'accepted', \
+                tags TEXT NOT NULL DEFAULT '', \
+                created_at TEXT NOT NULL, \
+                updated_at TEXT NOT NULL\
+             );\
+             CREATE INDEX IF NOT EXISTS idx_decisions_updated ON decisions(updated_at DESC);",
         )?;
         // Encrypted egress ledger: a tamper-evident hash chain of what left the
         // machine (fingerprints only — never payloads or secrets).
@@ -772,6 +858,117 @@ impl EncryptedMemory {
         Ok(n)
     }
 
+    // --- Decision log (ADR-style: the "why" of the project) ---
+
+    /// The column list shared by every `decisions` query.
+    const DECISION_COLS: &'static str =
+        "id, session_id, title, body, status, tags, created_at, updated_at";
+
+    /// Record a decision and return its id.
+    pub fn add_decision(
+        &self,
+        session_id: Option<&str>,
+        title: &str,
+        body: &str,
+        tags: &str,
+        status: &str,
+    ) -> Result<String> {
+        let id = uuid::Uuid::new_v4().to_string();
+        let now = chrono::Utc::now().to_rfc3339();
+        let status = if status.trim().is_empty() { "accepted" } else { status };
+        self.conn.execute(
+            "INSERT INTO decisions \
+                (id, session_id, title, body, status, tags, created_at, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
+            rusqlite::params![id, session_id, title, body, status, tags, now],
+        )?;
+        Ok(id)
+    }
+
+    /// List decisions, most recently updated first.
+    pub fn list_decisions(&self, limit: usize) -> Result<Vec<Decision>> {
+        let sql = format!(
+            "SELECT {} FROM decisions ORDER BY updated_at DESC LIMIT ?1",
+            Self::DECISION_COLS
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params![limit as i64], map_decision)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Search decisions by substring over title, body and tags.
+    pub fn search_decisions(&self, query: &str, limit: usize) -> Result<Vec<Decision>> {
+        let query = query.trim();
+        if query.is_empty() {
+            return self.list_decisions(limit);
+        }
+        let pattern = format!("%{}%", escape_like(query));
+        let sql = format!(
+            "SELECT {} FROM decisions \
+             WHERE title LIKE ?1 ESCAPE '\\' OR body LIKE ?1 ESCAPE '\\' OR tags LIKE ?1 ESCAPE '\\' \
+             ORDER BY updated_at DESC LIMIT ?2",
+            Self::DECISION_COLS
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params![pattern, limit as i64], map_decision)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Fetch a single decision by id.
+    pub fn get_decision(&self, id: &str) -> Result<Option<Decision>> {
+        let sql = format!("SELECT {} FROM decisions WHERE id = ?1", Self::DECISION_COLS);
+        let found = self.conn.query_row(&sql, rusqlite::params![id], map_decision).optional()?;
+        Ok(found)
+    }
+
+    /// Change a decision's status (proposed/accepted/rejected/superseded).
+    pub fn set_decision_status(&self, id: &str, status: &str) -> Result<bool> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let rows = self.conn.execute(
+            "UPDATE decisions SET status = ?1, updated_at = ?2 WHERE id = ?3",
+            rusqlite::params![status, now, id],
+        )?;
+        Ok(rows > 0)
+    }
+
+    /// Delete a decision by id. Returns whether it existed.
+    pub fn delete_decision(&self, id: &str) -> Result<bool> {
+        let rows = self
+            .conn
+            .execute("DELETE FROM decisions WHERE id = ?1", rusqlite::params![id])?;
+        Ok(rows > 0)
+    }
+
+    /// Delete every decision whose title/body/tags contain `query`.
+    pub fn delete_decisions_matching(&self, query: &str) -> Result<usize> {
+        let query = query.trim();
+        if query.is_empty() {
+            return Ok(0);
+        }
+        let pattern = format!("%{}%", escape_like(query));
+        let rows = self.conn.execute(
+            "DELETE FROM decisions WHERE title LIKE ?1 ESCAPE '\\' OR body LIKE ?1 ESCAPE '\\' OR tags LIKE ?1 ESCAPE '\\'",
+            rusqlite::params![pattern],
+        )?;
+        Ok(rows)
+    }
+
+    /// Number of stored decisions.
+    pub fn decision_count(&self) -> Result<i64> {
+        let n: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM decisions", [], |r| r.get(0))?;
+        Ok(n)
+    }
+
     // ---- Egress ledger --------------------------------------------------
 
     /// Append an outbound request to the encrypted, tamper-evident ledger.
@@ -879,6 +1076,36 @@ impl EncryptedMemory {
             .conn
             .query_row("SELECT COUNT(*) FROM egress", [], |r| r.get(0))?;
         Ok(n)
+    }
+
+    /// Aggregate the ledger into a "privacy blast-radius" summary.
+    ///
+    /// `session_id = None` aggregates everything; `Some(id)` restricts to one
+    /// session. Nothing but counts, providers and redaction kinds is returned.
+    pub fn egress_summary(&self, session_id: Option<&str>) -> Result<EgressSummary> {
+        let entries = match session_id {
+            Some(id) => self.list_egress_for_session(id, 1_000_000)?,
+            None => self.list_egress(1_000_000)?,
+        };
+        let mut summary = EgressSummary {
+            total: entries.len() as i64,
+            ..Default::default()
+        };
+        let mut providers: std::collections::BTreeMap<String, i64> = std::collections::BTreeMap::new();
+        let mut kinds: std::collections::BTreeMap<String, i64> = std::collections::BTreeMap::new();
+        for entry in &entries {
+            summary.bytes += entry.payload_bytes;
+            *providers.entry(entry.provider.clone()).or_insert(0) += 1;
+            if !entry.redactions.trim().is_empty() {
+                summary.redacted += 1;
+                for (label, count) in parse_redactions(&entry.redactions) {
+                    *kinds.entry(label).or_insert(0) += count;
+                }
+            }
+        }
+        summary.providers = sort_counts(providers);
+        summary.kinds = sort_counts(kinds);
+        Ok(summary)
     }
 
     /// Recompute the whole hash chain. Returns `true` when intact.

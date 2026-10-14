@@ -132,7 +132,7 @@ fn surface() -> Style {
 
 /// Text shown by `/help`.
 const SLASH_HELP: &str =
-    "commands: /help · /new · /switch · /branch [name] [--from N] · /log · /graph · /checkout <name> · /diff <a> <b> · /merge <branch> · /blame <text> · /provenance · /clear · /undo · /redo · /retry · /compact · /find <text> · /search <text> · /model [id] · /effort · /connect [provider] · /thinking · /details · /plan · /build · /attach <path> · /detach · /export [md|html|pdf] [path] · /editor · /init · /mcp · /ledger · /rag [index <paths>|search <q>|status|clear] · /airgap [on|off] · /route [on|off] · /remember <text> · /memory [search <q>|pin <id>] · /forget <id|text> · /checkpoint · /theme [name] · /commands · /credits · /panic · /quit   (Ctrl-P palette · Ctrl-S picker · Ctrl-R search sessions · Ctrl-Y copy · Ctrl-O editor · Shift+Tab plan/build · @file refs · !shell)";
+    "commands: /help · /new · /switch · /branch [name] [--from N] · /log · /graph · /checkout <name> · /diff <a> <b> · /merge <branch> · /blame <text> · /provenance · /clear · /undo · /redo · /retry · /compact · /find <text> · /search <text> · /model [id] · /effort · /connect [provider] · /thinking · /details · /plan · /build · /attach <path> · /detach · /export [md|html|pdf] [path] · /editor · /init · /mcp · /ledger · /rag [index <paths>|search <q>|status|clear] · /airgap [on|off] · /route [on|off] · /remember <text> · /memory [search <q>|pin <id>] · /forget <id|text> · /checkpoint · /decide <title> [:: why] · /decisions [query] · /exposure · /theme [name] · /commands · /credits · /panic · /quit   (Ctrl-P palette · Ctrl-S picker · Ctrl-R search sessions · Ctrl-Y copy · Ctrl-O editor · Shift+Tab plan/build · @file refs · !shell)";
 
 /// Command palette entries (Ctrl-P): (command, one-line description).
 const PALETTE_COMMANDS: &[(&str, &str)] = &[
@@ -177,6 +177,9 @@ const PALETTE_COMMANDS: &[(&str, &str)] = &[
     ("/memory", "list / search / pin memories"),
     ("/forget", "delete a memory"),
     ("/checkpoint", "summarise this session into memory"),
+    ("/decide", "record a decision with its rationale"),
+    ("/decisions", "list/search recorded decisions"),
+    ("/exposure", "privacy blast-radius + posture score"),
     ("/commands", "list custom .md commands"),
     ("/credits", "show OpenRouter credits / usage"),
     ("/mcp", "list tools exposed by MCP servers"),
@@ -2787,6 +2790,74 @@ async fn run_app(
                                         }
                                         Err(e) => status = format!("error: {e}"),
                                     },
+                                    "decide" => {
+                                        let raw = arg.trim();
+                                        if raw.is_empty() {
+                                            status = "usage: /decide <title> [:: rationale]".into();
+                                        } else {
+                                            let (title, body) = match raw.split_once("::") {
+                                                Some((t, b)) => (t.trim().to_string(), b.trim().to_string()),
+                                                None => (raw.to_string(), String::new()),
+                                            };
+                                            match engine.memory.add_decision(
+                                                Some(&engine.session.id),
+                                                &title,
+                                                &body,
+                                                "",
+                                                "accepted",
+                                            ) {
+                                                Ok(id) => {
+                                                    let _ = engine.reload_decisions();
+                                                    transcript.push(ChatLine {
+                                                        speaker: Speaker::System,
+                                                        text: format!(
+                                                            "decision recorded [{}] {}",
+                                                            &id[..8.min(id.len())],
+                                                            title
+                                                        ),
+                                                    });
+                                                    status = "decision recorded".into();
+                                                }
+                                                Err(e) => status = format!("error: {e}"),
+                                            }
+                                        }
+                                    }
+                                    "decisions" => {
+                                        let q = arg.trim();
+                                        let res = if q.is_empty() {
+                                            engine.memory.list_decisions(50)
+                                        } else {
+                                            engine.memory.search_decisions(q, 50)
+                                        };
+                                        match res {
+                                            Ok(ds) if ds.is_empty() => {
+                                                status = if q.is_empty() {
+                                                    "no decisions yet (use /decide <title> :: <why>)".into()
+                                                } else {
+                                                    format!("no decision matches '{q}'")
+                                                }
+                                            }
+                                            Ok(ds) => {
+                                                let body = decisions_to_text(&ds);
+                                                transcript.push(ChatLine {
+                                                    speaker: Speaker::System,
+                                                    text: format!("decisions ({}):\n{body}", ds.len()),
+                                                });
+                                                status = format!("{} decision(s)", ds.len());
+                                            }
+                                            Err(e) => status = format!("error: {e}"),
+                                        }
+                                    }
+                                    "exposure" | "blast-radius" => match exposure_text(engine, &guard_cfg, &tools_cfg) {
+                                        Ok(t) => {
+                                            transcript.push(ChatLine {
+                                                speaker: Speaker::System,
+                                                text: t,
+                                            });
+                                            status = "privacy blast-radius".into();
+                                        }
+                                        Err(e) => status = format!("error: {e}"),
+                                    },
                                     "panic" => {
                                         locked = true;
                                         lock_input.clear();
@@ -5340,6 +5411,93 @@ fn plain_line(s: &str) -> Line<'static> {
     Line::from(s.to_string())
 }
 
+/// Render recorded decisions as an aligned, multi-line block.
+fn decisions_to_text(ds: &[crate::privacy::Decision]) -> String {
+    ds.iter()
+        .map(|d| {
+            let tags = if d.tags.trim().is_empty() {
+                String::new()
+            } else {
+                format!("  #{}", d.tags.replace(',', " #"))
+            };
+            let first = d.body.lines().next().unwrap_or("");
+            if first.is_empty() {
+                format!("{}  [{}] {}{}", &d.id[..8.min(d.id.len())], d.status, truncate(&d.title, 70), tags)
+            } else {
+                format!(
+                    "{}  [{}] {}{}\n        {}",
+                    &d.id[..8.min(d.id.len())],
+                    d.status,
+                    truncate(&d.title, 60),
+                    tags,
+                    truncate(first, 80)
+                )
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Build the "privacy blast-radius" + score text for the TUI.
+fn exposure_text(
+    engine: &ChatEngine,
+    guard: &GuardSettings,
+    tools: &ToolsSettings,
+) -> crate::error::Result<String> {
+    use crate::privacy::exposure::{ScoreInputs, blast_radius, privacy_score};
+
+    let summary = engine.memory.egress_summary(None)?;
+    let br = blast_radius(&summary);
+    let redactions: i64 = summary.kinds.iter().map(|(_, c)| *c).sum();
+    let local_only_memories = engine
+        .memory
+        .list_memories(1000)?
+        .iter()
+        .filter(|m| m.local_only)
+        .count() as i64;
+
+    let size = fmt_bytes(br.bytes.max(0) as u64);
+    let mut out = String::new();
+    out.push_str(&format!(
+        "privacy blast-radius — {} outbound request(s): {} remote · {} local · {} redacted · {size} sent\n",
+        br.total,
+        br.remote,
+        br.local,
+        br.redacted,
+    ));
+    if br.providers.is_empty() {
+        out.push_str("providers: (nothing recorded)\n");
+    } else {
+        let p: Vec<String> = br.providers.iter().map(|(n, c)| format!("{n}×{c}")).collect();
+        out.push_str(&format!("providers: {}\n", p.join(", ")));
+    }
+    if br.kinds.is_empty() {
+        out.push_str("sensitive caught: none\n");
+    } else {
+        let k: Vec<String> = br.kinds.iter().map(|(n, c)| format!("{n}×{c}")).collect();
+        out.push_str(&format!("sensitive caught: {}\n", k.join(", ")));
+    }
+
+    let inputs = ScoreInputs {
+        remote: br.remote,
+        local: br.local,
+        redactions,
+        air_gap: engine.air_gap,
+        route_sensitive: engine.route_sensitive,
+        guard_enabled: guard.enabled,
+        taint: engine.taint,
+        sandbox_on: tools.sandbox != crate::config::SandboxMode::Off,
+        anonymised_network: false,
+        local_only_memories,
+    };
+    let score = privacy_score(&inputs);
+    out.push_str(&format!(
+        "\nprivacy score: {} / 100 (grade {})",
+        score.score, score.grade
+    ));
+    Ok(out)
+}
+
 /// Truncate a string to `n` characters (appending an ellipsis when cut).
 fn truncate(s: &str, n: usize) -> String {
     if s.chars().count() <= n {
@@ -5468,6 +5626,9 @@ fn welcome_lines(tools_enabled: bool) -> Vec<Line<'static>> {
         key("/memory", "list memories (/memory search <q> · /memory pin <id>)"),
         key("/forget", "delete a memory by id or text"),
         key("/checkpoint", "summarise this session into long-term memory"),
+        key("/decide", "record a decision: /decide title :: rationale"),
+        key("/decisions", "list or search recorded decisions"),
+        key("/exposure", "privacy blast-radius and posture score"),
         key("/copy", "copy the last reply (or the last N replies: /copy 3)"),
         key("/save", "save this conversation as a Markdown file (plaintext)"),
         key("/undo /redo", "undo the last turn / restore it"),

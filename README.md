@@ -227,6 +227,23 @@ the web UI (toolbar **exposure** button / `/exposure`). It shows **counts and
 kinds only — never payloads or secrets**. The score's factors explain each
 contribution (e.g. `+18 air-gap`, `-4 remote sends`).
 
+## Context inspector (what is sent this turn)
+
+`enclave context` answers **"why is this in context?"**: it breaks the outgoing
+request into its labelled parts — system prompt, local `AGENTS.md` rules, Plan
+note, injected **memory**, **decisions**, anti-injection notice — each with a
+preview and its size, plus the history size, the active **redactions** and the
+**taint** status.
+
+```bash
+enclave context                 # working session
+enclave context --session <id>  # a specific session
+```
+
+Also available in the TUI (`/context`) and the web UI (toolbar **context**
+button / `/context`). Nothing is sent by inspecting — it reads the same
+composition the engine would send.
+
 ## Conversation branches (Conversation Git)
 
 Enclave can treat a conversation like **git treats code**: instead of a single

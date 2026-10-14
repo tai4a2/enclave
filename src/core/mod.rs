@@ -21,7 +21,10 @@ pub use attachment::{Attachment, AttachmentKind};
 pub use builtin_tools::FileChange;
 pub use commands::CustomCommand;
 pub use diff::{DiffKind, DiffLine};
-pub use engine::{AgentMode, AgentStep, ApprovedGate, ChatEngine, ToolDecision, ToolGate};
+pub use engine::{
+    AgentMode, AgentStep, ApprovedGate, ChatEngine, ContextPart, ContextReport, ToolDecision,
+    ToolGate,
+};
 pub use message::{Message, Role, ToolCall};
 pub use session::Session;
 pub use tools::{Proposal, ToolOutput};

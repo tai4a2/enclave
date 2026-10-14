@@ -90,6 +90,7 @@ pub async fn serve(
         .route("/api/decisions", get(api_decisions).post(api_decision_add))
         .route("/api/decisions/delete", post(api_decision_delete))
         .route("/api/exposure", get(api_exposure))
+        .route("/api/context", get(api_context))
         .route("/api/ledger", get(api_ledger))
         .route("/api/rag", post(api_rag))
         .route("/api/export", post(api_export))
@@ -1250,6 +1251,32 @@ async fn api_decision_delete(
     }
 }
 
+async fn api_context(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    if !authorized(&state, &headers, &q) {
+        return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+    }
+    let engine = state.engine.lock().await;
+    let r = engine.context_report();
+    Json(json!({
+        "provider": r.provider,
+        "model": r.model,
+        "mode": r.mode,
+        "parts": r.parts.iter().map(|p| json!({
+            "label": p.label, "detail": p.detail, "chars": p.chars
+        })).collect::<Vec<_>>(),
+        "messages": r.messages,
+        "history_chars": r.history_chars,
+        "redactions": r.redactions,
+        "taint": r.taint,
+        "total_chars": r.total_chars,
+    }))
+    .into_response()
+}
+
 async fn api_exposure(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1751,6 +1778,7 @@ const INDEX_HTML: &str = r#"
   <span class="tb" data-cmd="/memory">memory</span>
   <span class="tb" data-cmd="/decisions">decisions</span>
   <span class="tb" data-cmd="/exposure">exposure</span>
+  <span class="tb" data-cmd="/context">context</span>
   <span class="tb" data-cmd="/rag">rag</span>
   <span class="tb" data-cmd="/find">find</span>
   <span class="tb" data-cmd="/search">search</span>
@@ -1797,11 +1825,11 @@ const PALETTE_COMMANDS = [
   ["/ledger","show the encrypted egress ledger"],["/provenance","what left the machine for this session"],["/rag","local file index (index/search/status/clear)"],["/merge","merge a branch's new turns into this one"],["/blame","find which turn mentions some text"],["/init","generate an AGENTS.md for this project"],["/mcp","list tools exposed by MCP servers"],["/details","toggle tool detail blocks"],["/airgap","toggle air-gap"],
   ["/route","toggle routing of sensitive turns"],["/remember","save a fact to memory"],
   ["/memory","list / search memories"],["/forget","delete a memory"],["/checkpoint","summarise into memory"],
-  ["/decide","record a decision with rationale"],["/decisions","list / search decisions"],["/exposure","privacy blast-radius + score"],
+  ["/decide","record a decision with rationale"],["/decisions","list / search decisions"],["/exposure","privacy blast-radius + score"],["/context","explain what is sent this turn"],
   ["/panic","lock now"],["/quit","close the web UI"]
 ];
 const THEMES=["default","nord","gruvbox","solarized","mono"];
-const SLASH_REAL = new Set(['/help','/new','/switch','/theme','/themes','/model','/models','/effort','/connect','/provider','/providers','/plan','/build','/agent','/airgap','/route','/clear','/branch','/checkout','/graph','/tree','/log','/diff','/palette','/sessions','/resume','/continue','/quit','/find','/search','/search-all','/shortcuts','/keys','/ledger','/egress','/provenance','/rag','/merge','/init','/mcp','/blame','/details','/thinking','/memory','/memories','/remember','/forget','/checkpoint','/decide','/decisions','/exposure','/export','/undo','/redo','/retry','/compact','/summarize']);
+const SLASH_REAL = new Set(['/help','/new','/switch','/theme','/themes','/model','/models','/effort','/connect','/provider','/providers','/plan','/build','/agent','/airgap','/route','/clear','/branch','/checkout','/graph','/tree','/log','/diff','/palette','/sessions','/resume','/continue','/quit','/find','/search','/search-all','/shortcuts','/keys','/ledger','/egress','/provenance','/rag','/merge','/init','/mcp','/blame','/details','/thinking','/memory','/memories','/remember','/forget','/checkpoint','/decide','/decisions','/exposure','/context','/export','/undo','/redo','/retry','/compact','/summarize']);
 
 // ---------- small utils ----------
 function fmtBytes(n){ n=+n||0; if(n>=1048576) return (n/1048576).toFixed(1)+' MB'; if(n>=1024) return (n/1024).toFixed(1)+' KB'; return n+' B'; }
@@ -2120,6 +2148,19 @@ async function openExposure(){
   (s.factors||[]).forEach(f=>rows.push({k:(f.delta>=0?'+':'')+f.delta,d:f.label}));
   openOverlay({title:'privacy blast-radius · score '+s.score+'/100 (grade '+s.grade+')',rows,
     hint:'counts and kinds only — never payloads or secrets · Esc close',onPick:()=>{}});
+}
+async function openContext(){
+  const r=await (await fetch('/api/context',{headers:H})).json();
+  const rows=[];
+  rows.push({k:'provider',d:r.provider+' · '+r.model+' · mode '+r.mode});
+  (r.parts||[]).forEach(p=>rows.push({k:p.label,d:p.chars+' chars — '+p.detail}));
+  if(!(r.parts||[]).length) rows.push({k:'system',d:'(none)'});
+  rows.push({k:'history',d:r.messages+' message(s) · '+r.history_chars+' chars'});
+  rows.push({k:'redactions',d:r.redactions||'none'});
+  rows.push({k:'taint',d:r.taint?'on (flagged turns re-redacted)':'off'});
+  rows.push({k:'total sent',d:r.total_chars+' chars'});
+  openOverlay({title:'context this turn',rows,
+    hint:'this is exactly what composes the request — Esc close',onPick:()=>{}});
 }
 async function openLedger(perSession){
   const url='/api/ledger?verify=1'+(perSession?'&session=1':'');
@@ -2638,6 +2679,7 @@ async function runSlash(text){
     case 'decide': promptModal('Record decision','Title :: rationale',arg||'',async v=>{ if(!v||!v.trim()) return; const [t,b]=v.split('::'); const r=await api('/api/decisions',{title:(t||v).trim(),body:(b||'').trim()}); if(r.error){ toast(r.error,'error'); return; } await loadState(); toast('decision recorded','ok'); }); break;
     case 'decisions': openDecisions(arg||''); break;
     case 'exposure': case 'blast-radius': openExposure(); break;
+    case 'context': openContext(); break;
     case 'remember': promptModal('Remember','Fact to store',arg||'',async v=>{ if(!v||!v.trim()) return; const r=await api('/api/memories',{text:v.trim()}); if(r.error){ toast(r.error,'error'); return; } await loadState(); toast('remembered','ok'); }); break;
     case 'forget': if(!arg){ toast('usage: /forget <id>','error'); break; } { const r=await api('/api/memories/delete',{id:arg}); await loadState(); toast(r.ok?'forgotten':'not found', r.ok?'ok':'error'); } break;
     case 'checkpoint': { const prompt='Summarise the key facts, decisions, preferences and open questions in this conversation into a short bullet list suitable for long-term memory.'; statusSet('summarising…'); const text=await resolveAt(parts.slice(1).join(' ')||''); const r=await api('/api/memories',{text:prompt,tags:'checkpoint'}); await loadState(); toast('checkpoint hint stored','ok'); break; }
@@ -2741,7 +2783,7 @@ function setTheme(t){ document.body.dataset.theme=t; localStorage.setItem('encla
 setTheme(localStorage.getItem('enclave-theme')||'default');
 function syncPanelBtns(){ $('tgSide').classList.toggle('off', !panelVisible('aside.side')); $('tgInfo').classList.toggle('off', !panelVisible('aside.info')); }
 window.addEventListener('resize', syncPanelBtns);
-(async()=>{ await loadState(); if(STATE){ await openCurrent(); }   syncPanelBtns(); statusSet('ready'); })();
+(async()=>{ await loadState(); if(STATE){ await openCurrent(); } syncPanelBtns(); statusSet('ready'); })();
 </script>
 </body>
 </html>

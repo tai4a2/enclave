@@ -148,6 +148,12 @@ pub enum Command {
         #[arg(long)]
         session: bool,
     },
+    /// Explain what Enclave puts into the context this turn ("why is this in context?").
+    Context {
+        /// Inspect this session id (defaults to the working session).
+        #[arg(long)]
+        session: Option<String>,
+    },
     /// Manage the local encrypted RAG index (index files, search offline).
     Rag {
         #[command(subcommand)]
@@ -423,6 +429,7 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::Memory { action } => memory_cmd(&paths, &settings, action),
         Command::Decisions { action } => decisions_cmd(&paths, &settings, action),
         Command::Exposure { session } => exposure_cmd(&paths, &settings, session),
+        Command::Context { session } => context_cmd(&paths, &settings, session),
         Command::Ledger { verify, limit, proof } => {
             ledger_cmd(&paths, &settings, verify, limit, proof)
         }
@@ -1492,6 +1499,53 @@ fn human_bytes(n: u64) -> String {
 }
 
 /// Show the privacy blast-radius and a posture score.
+fn context_cmd(paths: &Paths, settings: &Settings, session_id: Option<String>) -> Result<()> {
+    let mut engine = build_engine(paths, settings, None, None, session_id, false, None, false, false)?;
+    let guard = settings.effective_guard(false);
+    engine.taint = guard.enabled && guard.taint;
+    engine.air_gap = settings.air_gap;
+    engine.route_sensitive =
+        guard.enabled && settings.routing.sensitive == crate::config::RoutingMode::Local;
+    if guard.enabled && guard.injection {
+        engine.arm_canary();
+    }
+    let r = engine.context_report();
+    println!(
+        "context this turn — provider {} · model {} · mode {}",
+        r.provider, r.model, r.mode
+    );
+    println!("system message:");
+    if r.parts.is_empty() {
+        println!("  (none)");
+    } else {
+        for p in &r.parts {
+            println!(
+                "  • {:<22} {:>6} chars  — {}",
+                p.label, p.chars, p.detail
+            );
+        }
+    }
+    println!(
+        "history: {} message(s) · {} chars",
+        r.messages, r.history_chars
+    );
+    if r.redactions.is_empty() {
+        println!("redactions: none");
+    } else {
+        println!("redactions: {}", r.redactions);
+    }
+    println!(
+        "taint: {}",
+        if r.taint {
+            "on (flagged turns re-redacted)"
+        } else {
+            "off"
+        }
+    );
+    println!("total sent: {} chars", r.total_chars);
+    Ok(())
+}
+
 fn exposure_cmd(paths: &Paths, settings: &Settings, session_only: bool) -> Result<()> {
     use crate::config::SandboxMode;
     use crate::privacy::EncryptedMemory;

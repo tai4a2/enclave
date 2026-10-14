@@ -132,7 +132,7 @@ fn surface() -> Style {
 
 /// Text shown by `/help`.
 const SLASH_HELP: &str =
-    "commands: /help · /new · /switch · /branch [name] [--from N] · /log · /graph · /checkout <name> · /diff <a> <b> · /merge <branch> · /blame <text> · /provenance · /clear · /undo · /redo · /retry · /compact · /find <text> · /search <text> · /model [id] · /effort · /connect [provider] · /thinking · /details · /plan · /build · /attach <path> · /detach · /export [md|html|pdf] [path] · /editor · /init · /mcp · /ledger · /rag [index <paths>|search <q>|status|clear] · /airgap [on|off] · /route [on|off] · /remember <text> · /memory [search <q>|pin <id>] · /forget <id|text> · /checkpoint · /decide <title> [:: why] · /decisions [query] · /exposure · /theme [name] · /commands · /credits · /panic · /quit   (Ctrl-P palette · Ctrl-S picker · Ctrl-R search sessions · Ctrl-Y copy · Ctrl-O editor · Shift+Tab plan/build · @file refs · !shell)";
+    "commands: /help · /new · /switch · /branch [name] [--from N] · /log · /graph · /checkout <name> · /diff <a> <b> · /merge <branch> · /blame <text> · /provenance · /clear · /undo · /redo · /retry · /compact · /find <text> · /search <text> · /model [id] · /effort · /connect [provider] · /thinking · /details · /plan · /build · /attach <path> · /detach · /export [md|html|pdf] [path] · /editor · /init · /mcp · /ledger · /rag [index <paths>|search <q>|status|clear] · /airgap [on|off] · /route [on|off] · /remember <text> · /memory [search <q>|pin <id>] · /forget <id|text> · /checkpoint · /decide <title> [:: why] · /decisions [query] · /exposure · /context · /theme [name] · /commands · /credits · /panic · /quit   (Ctrl-P palette · Ctrl-S picker · Ctrl-R search sessions · Ctrl-Y copy · Ctrl-O editor · Shift+Tab plan/build · @file refs · !shell)";
 
 /// Command palette entries (Ctrl-P): (command, one-line description).
 const PALETTE_COMMANDS: &[(&str, &str)] = &[
@@ -180,6 +180,7 @@ const PALETTE_COMMANDS: &[(&str, &str)] = &[
     ("/decide", "record a decision with its rationale"),
     ("/decisions", "list/search recorded decisions"),
     ("/exposure", "privacy blast-radius + posture score"),
+    ("/context", "show what goes into the context this turn"),
     ("/commands", "list custom .md commands"),
     ("/credits", "show OpenRouter credits / usage"),
     ("/mcp", "list tools exposed by MCP servers"),
@@ -2858,6 +2859,13 @@ async fn run_app(
                                         }
                                         Err(e) => status = format!("error: {e}"),
                                     },
+                                    "context" => {
+                                        transcript.push(ChatLine {
+                                            speaker: Speaker::System,
+                                            text: context_text(engine),
+                                        });
+                                        status = "context inspects what is sent".into();
+                                    }
                                     "panic" => {
                                         locked = true;
                                         lock_input.clear();
@@ -5498,6 +5506,44 @@ fn exposure_text(
     Ok(out)
 }
 
+/// Explain what Enclave puts into the context this turn ("why is this in
+/// context?"): the composition of the system message plus the history size,
+/// any active redactions and the taint status.
+fn context_text(engine: &ChatEngine) -> String {
+    let r = engine.context_report();
+    let mut out = String::new();
+    out.push_str(&format!(
+        "context this turn — provider {} · model {} · mode {}\n",
+        r.provider, r.model, r.mode
+    ));
+    out.push_str("system message:\n");
+    if r.parts.is_empty() {
+        out.push_str("  (none)\n");
+    } else {
+        for p in &r.parts {
+            out.push_str(&format!(
+                "  • {:<22} {:>6} chars  — {}\n",
+                p.label, p.chars, p.detail
+            ));
+        }
+    }
+    out.push_str(&format!(
+        "history: {} message(s) · {} chars\n",
+        r.messages, r.history_chars
+    ));
+    if r.redactions.is_empty() {
+        out.push_str("redactions: none\n");
+    } else {
+        out.push_str(&format!("redactions: {}\n", r.redactions));
+    }
+    out.push_str(&format!(
+        "taint: {}\ntotal sent: {} chars",
+        if r.taint { "on (flagged turns re-redacted)" } else { "off" },
+        r.total_chars
+    ));
+    out
+}
+
 /// Truncate a string to `n` characters (appending an ellipsis when cut).
 fn truncate(s: &str, n: usize) -> String {
     if s.chars().count() <= n {
@@ -5629,6 +5675,7 @@ fn welcome_lines(tools_enabled: bool) -> Vec<Line<'static>> {
         key("/decide", "record a decision: /decide title :: rationale"),
         key("/decisions", "list or search recorded decisions"),
         key("/exposure", "privacy blast-radius and posture score"),
+        key("/context", "explain what is sent this turn (why is this in context?)"),
         key("/copy", "copy the last reply (or the last N replies: /copy 3)"),
         key("/save", "save this conversation as a Markdown file (plaintext)"),
         key("/undo /redo", "undo the last turn / restore it"),

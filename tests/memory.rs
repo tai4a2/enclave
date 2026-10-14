@@ -95,3 +95,32 @@ fn memories_are_injected_into_the_system_prompt() {
         "local-only memories must never be injected"
     );
 }
+
+#[test]
+fn context_report_shows_composition_and_provenance() {
+    let dir = tempfile::tempdir().unwrap();
+    let memory = EncryptedMemory::open(&dir.path().join("v.db"), &test_key()).unwrap();
+    memory
+        .add_memory("the user prefers Rust", "pref", "note", None, false)
+        .unwrap();
+    memory
+        .add_decision(None, "Use SQLCipher", "encrypt the vault at rest", "security", "accepted")
+        .unwrap();
+
+    let sid = memory.create_session("t").unwrap();
+    let session = Session::load(&memory, &sid).unwrap();
+    let provider = Box::new(MockProvider::new(vec![]));
+    let mut engine = ChatEngine::new(provider, "mock".into(), memory, session, None);
+    engine.reload_memories().unwrap();
+    engine.reload_decisions().unwrap();
+
+    let r = engine.context_report();
+    let labels: Vec<&str> = r.parts.iter().map(|p| p.label.as_str()).collect();
+    assert!(labels.contains(&"memory"));
+    assert!(labels.contains(&"decisions"));
+    assert!(r.parts.iter().all(|p| p.chars > 0));
+    assert_eq!(r.messages, 0);
+    assert!(r.total_chars >= r.parts.iter().map(|p| p.chars).sum::<usize>());
+    assert!(r.redactions.is_empty());
+    assert!(!r.taint);
+}

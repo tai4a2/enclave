@@ -40,6 +40,10 @@ senza consenso esplicito, coerente con `docs/security-roadmap.md`.
    iniettata, come un AGENTS.md auto-derivato e auto-corretto.
 5. **Memoria con provenienza.** Ogni memoria registra origine (file, commit,
    sessione) → auditabile e garbage-collectable in modo sicuro.
+   **Stato: parziale.** Le memorie/decisioni sono già taggate con `source_session`
+   e l'egress ledger registra la provenienza verso l'esterno; il Context Inspector
+   (vedi #16) mostra *cosa* viene iniettato e da quale parte. Manca l'origine
+   file/commit per singola memoria.
 6. **Decadimento e rinforzo (spaced repetition dei fatti).** Confidenza + recency:
    le memorie usate si rinforzano, quelle inutilizzate decadono; i conflitti
    emergono e vengono risolti dall'utente.
@@ -70,6 +74,11 @@ senza consenso esplicito, coerente con `docs/security-roadmap.md`.
     permesso-gated e minimizzato: esce solo ciò che serve, non il file intero.
 16. **"Perché è nel contesto?"** Ogni elemento iniettato mostra la sua motivazione e
     si può spegnere con un click; un pulsante "minimizza contesto" taglia l'accessorio.
+    **Stato: implementato (v1).** `Context Inspector`: `ChatEngine::context_report()`
+    + `system_parts()` espongono la composizione del messaggio di sistema (prompt,
+    regole, piano, memoria, decisioni, anti-injection) con anteprima e dimensione,
+    più storico/redazioni/taint. CLI `enclave context [--session]`, TUI `/context`,
+    web `/api/context` + overlay. (Manca ancora lo "spegnimento" per-elemento.)
 17. **Reranker locale appreso (feedback loop).** Traccia quali frammenti hanno davvero
     influenzato la risposta e impara un reranker on-device: migliora con l'uso.
 18. **Provenienza visibile nella risposta.** Il modello cita quale memoria/chunk ha

@@ -5,7 +5,7 @@ Run the built binary from `./dist/enclave`; the user mostly uses `./dist/enclave
 
 ## Build & verify loop (ALWAYS)
 After every change:
-1. `cargo test` — must stay green (currently 218 tests).
+1. `cargo test` — must stay green (currently 219 tests).
 2. `cargo clippy --all-targets` — must be 0 warnings.
 3. `cargo build --release`
 4. `cp target/release/enclave dist/enclave && codesign --force --sign - dist/enclave`
@@ -15,8 +15,8 @@ macOS re-prompts the keychain on launch.
 
 ## Git
 - Commit ONLY on explicit user request. Do not commit proactively.
-- Branch `main`. Last commit: `651f65b`
-  ("Extend Conversation Git: merge, graph view, blame and ledger provenance").
+- Branch `main`. Last commit: `9205be5`
+  ("Add project decisions (ADR log) and privacy blast-radius/score").
 
 ## Environment
 - Config dir: `~/Library/Application Support/dev.enclave.enclave`
@@ -70,7 +70,12 @@ The conversation is treated like git: encrypted, branchable, verifiable.
 - CLI: `enclave sessions branch|log|diff|merge|provenance`.
 - Tests: `tests/branch.rs` (9). Docs: README "Conversation branches".
 
-### Project memory & privacy posture (DONE, uncommitted at 651f65b + new work)
+### Project memory & privacy posture (DONE; committed at 9205be5 + new Context Inspector)
+- **Context Inspector** (#16, new): `ChatEngine::system_parts()` + `context_report()`
+  (`ContextReport`/`ContextPart` in `src/core/engine.rs`) break the outgoing request
+  into labelled parts (prompt, rules, plan, memory, decisions, anti-injection) with
+  preview + size, plus history/redactions/taint. CLI `enclave context [--session]`,
+  TUI `/context`, web `/api/context` + overlay + toolbar chip.
 - **Decision Log / ADR** (#2): encrypted `decisions` table in `src/privacy/memory.rs`
   (`Decision`, `add_decision`, `list_decisions`, `search_decisions`, `set_decision_status`,
   `delete_decision`, `delete_decisions_matching`, `decision_count`); injected into the

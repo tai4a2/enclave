@@ -149,11 +149,7 @@ fn state_json(engine: &ChatEngine, tools_enabled: bool, guard_label: &str, agent
         .stats()
         .map(|s| (s.sessions, s.messages))
         .unwrap_or((0, 0));
-    let todos = engine
-        .todos
-        .lock()
-        .map(|t| t.clone())
-        .unwrap_or_default();
+    let todos = engine.todos.lock().map(|t| t.clone()).unwrap_or_default();
     json!({
         "provider": engine.provider_name(),
         "model": engine.model,
@@ -213,7 +209,13 @@ async fn api_state(
         return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
     }
     let engine = state.engine.lock().await;
-    Json(state_json(&engine, state.tools_enabled, &state.guard_label, agent_on(&state))).into_response()
+    Json(state_json(
+        &engine,
+        state.tools_enabled,
+        &state.guard_label,
+        agent_on(&state),
+    ))
+    .into_response()
 }
 
 async fn api_session(
@@ -247,9 +249,19 @@ async fn api_session_load(
     match crate::core::session::Session::load(&engine.memory, &id) {
         Ok(sess) => {
             engine.session = sess;
-            Json(state_json(&engine, state.tools_enabled, &state.guard_label, agent_on(&state))).into_response()
+            Json(state_json(
+                &engine,
+                state.tools_enabled,
+                &state.guard_label,
+                agent_on(&state),
+            ))
+            .into_response()
         }
-        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -265,16 +277,30 @@ async fn api_session_rename(
     }
     let name = body["name"].as_str().unwrap_or("").trim().to_string();
     if name.is_empty() {
-        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "name is required" }))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "name is required" })),
+        )
+            .into_response();
     }
     let mut engine = state.engine.lock().await;
     if let Err(e) = engine.memory.rename_session(&id, &name) {
-        return (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response();
     }
     if engine.session.id == id {
         engine.session.name = name;
     }
-    Json(state_json(&engine, state.tools_enabled, &state.guard_label, agent_on(&state))).into_response()
+    Json(state_json(
+        &engine,
+        state.tools_enabled,
+        &state.guard_label,
+        agent_on(&state),
+    ))
+    .into_response()
 }
 
 async fn api_session_delete(
@@ -288,7 +314,11 @@ async fn api_session_delete(
     }
     let mut engine = state.engine.lock().await;
     if let Err(e) = engine.memory.delete_session(&id) {
-        return (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response();
     }
     if engine.session.id == id {
         match engine
@@ -310,7 +340,13 @@ async fn api_session_delete(
             }
         }
     }
-    Json(state_json(&engine, state.tools_enabled, &state.guard_label, agent_on(&state))).into_response()
+    Json(state_json(
+        &engine,
+        state.tools_enabled,
+        &state.guard_label,
+        agent_on(&state),
+    ))
+    .into_response()
 }
 
 async fn api_session_new(
@@ -332,9 +368,19 @@ async fn api_session_new(
     match crate::core::session::Session::create(&engine.memory, &name) {
         Ok(sess) => {
             engine.session = sess;
-            Json(state_json(&engine, state.tools_enabled, &state.guard_label, agent_on(&state))).into_response()
+            Json(state_json(
+                &engine,
+                state.tools_enabled,
+                &state.guard_label,
+                agent_on(&state),
+            ))
+            .into_response()
         }
-        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -357,7 +403,10 @@ async fn api_branch(
         match resolve_session(&engine, &parent_req) {
             Some(id) => id,
             None => {
-                return (StatusCode::BAD_REQUEST, Json(json!({ "error": format!("no session matches '{parent_req}'") })))
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "error": format!("no session matches '{parent_req}'") })),
+                )
                     .into_response()
             }
         }
@@ -386,9 +435,19 @@ async fn api_branch(
     match crate::core::session::Session::fork(&engine.memory, &parent, &name, keep) {
         Ok(sess) => {
             engine.session = sess;
-            Json(state_json(&engine, state.tools_enabled, &state.guard_label, agent_on(&state))).into_response()
+            Json(state_json(
+                &engine,
+                state.tools_enabled,
+                &state.guard_label,
+                agent_on(&state),
+            ))
+            .into_response()
         }
-        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -403,7 +462,11 @@ async fn api_model(
     }
     let model = body["model"].as_str().unwrap_or("").trim().to_string();
     if model.is_empty() {
-        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "model is required" }))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "model is required" })),
+        )
+            .into_response();
     }
     {
         let mut engine = state.engine.lock().await;
@@ -417,7 +480,13 @@ async fn api_model(
         }
     }
     let engine = state.engine.lock().await;
-    Json(state_json(&engine, state.tools_enabled, &state.guard_label, agent_on(&state))).into_response()
+    Json(state_json(
+        &engine,
+        state.tools_enabled,
+        &state.guard_label,
+        agent_on(&state),
+    ))
+    .into_response()
 }
 
 async fn api_toggle(
@@ -448,7 +517,13 @@ async fn api_toggle(
         state.agent.store(v, Ordering::Relaxed);
     }
     let engine = state.engine.lock().await;
-    Json(state_json(&engine, state.tools_enabled, &state.guard_label, agent_on(&state))).into_response()
+    Json(state_json(
+        &engine,
+        state.tools_enabled,
+        &state.guard_label,
+        agent_on(&state),
+    ))
+    .into_response()
 }
 
 async fn api_files(
@@ -488,7 +563,10 @@ async fn api_search(
         return Json(json!({ "hits": [] })).into_response();
     }
     let engine = state.engine.lock().await;
-    let hits = engine.memory.search_messages(&query, 100).unwrap_or_default();
+    let hits = engine
+        .memory
+        .search_messages(&query, 100)
+        .unwrap_or_default();
     Json(json!({
         "hits": hits.iter().map(|h| json!({
             "session_id": h.session_id,
@@ -546,7 +624,11 @@ async fn api_file(
     }
     let raw = q.get("path").cloned().unwrap_or_default();
     if raw.trim().is_empty() {
-        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "path is required" }))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "path is required" })),
+        )
+            .into_response();
     }
     let ws = {
         let engine = state.engine.lock().await;
@@ -554,7 +636,13 @@ async fn api_file(
     };
     let path = match crate::core::builtin_tools::resolve_in_workspace(&ws, &raw) {
         Ok(p) => p,
-        Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response()
+        }
     };
     match std::fs::read_to_string(&path) {
         Ok(content) => {
@@ -565,7 +653,11 @@ async fn api_file(
             }
             Json(json!({ "path": raw, "content": c })).into_response()
         }
-        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -592,7 +684,9 @@ async fn api_models(
                     } else {
                         format!(
                             "{}k ctx · ${:.2}/${:.2} per M",
-                            m.context_length / 1000, m.prompt_price, m.completion_price
+                            m.context_length / 1000,
+                            m.prompt_price,
+                            m.completion_price
                         )
                     };
                     models.push((m.id, meta));
@@ -624,7 +718,11 @@ async fn api_send(
     }
     let text = body["text"].as_str().unwrap_or("").trim().to_string();
     if text.is_empty() {
-        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "empty message" }))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "empty message" })),
+        )
+            .into_response();
     }
     let attachments = attachments_from(&body);
 
@@ -683,7 +781,10 @@ async fn api_send(
         .unwrap_or_else(|_| Response::new(Body::empty()))
 }
 
-fn tool_context(engine: &ChatEngine, tools: &ToolsSettings) -> crate::core::builtin_tools::ToolContext {
+fn tool_context(
+    engine: &ChatEngine,
+    tools: &ToolsSettings,
+) -> crate::core::builtin_tools::ToolContext {
     crate::core::builtin_tools::ToolContext {
         workspace: engine.workspace.clone(),
         shell_timeout_secs: tools.timeout_secs,
@@ -700,9 +801,7 @@ fn tool_context(engine: &ChatEngine, tools: &ToolsSettings) -> crate::core::buil
 
 fn pending_calls(engine: &ChatEngine) -> Option<Vec<ToolCall>> {
     match engine.session.messages.last() {
-        Some(m)
-            if m.role == crate::core::message::Role::Assistant && !m.tool_calls.is_empty() =>
-        {
+        Some(m) if m.role == crate::core::message::Role::Assistant && !m.tool_calls.is_empty() => {
             Some(m.tool_calls.clone())
         }
         _ => None,
@@ -789,9 +888,14 @@ async fn agent_round(
         if dec == "approve" {
             results.push(execute_one(engine, &ctx, call).await);
         } else {
-            let label = if dec == "deny" { "[denied by user]" } else { "[denied by policy]" };
+            let label = if dec == "deny" {
+                "[denied by user]"
+            } else {
+                "[denied by policy]"
+            };
             let _ = engine.push_tool_result(&call.id, label);
-            results.push(json!({ "id": call.id, "name": call.name, "denied": true, "output": label }));
+            results
+                .push(json!({ "id": call.id, "name": call.name, "denied": true, "output": label }));
         }
     }
     json!({ "type": "tools", "text": text, "calls": [], "results": results, "continuing": true })
@@ -808,11 +912,19 @@ async fn api_agent_start(
     }
     let text = body["text"].as_str().unwrap_or("").trim().to_string();
     if text.is_empty() {
-        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "empty message" }))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "empty message" })),
+        )
+            .into_response();
     }
     let mut engine = state.engine.lock().await;
     if let Err(e) = engine.begin_agentic_with(&text, attachments_from(&body)) {
-        return (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response();
     }
     let result = agent_round(&mut engine, &state.tools, &HashMap::new()).await;
     Json(json!({ "result": result, "state": state_json(&engine, state.tools_enabled, &state.guard_label, agent_on(&state)) }))
@@ -851,7 +963,11 @@ async fn api_effort(
     if !authorized(&state, &headers, &q) {
         return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
     }
-    let raw = body["effort"].as_str().unwrap_or("default").trim().to_lowercase();
+    let raw = body["effort"]
+        .as_str()
+        .unwrap_or("default")
+        .trim()
+        .to_lowercase();
     let value: Option<String> = match raw.as_str() {
         "default" | "off" | "none" | "" => None,
         other => Some(other.to_string()),
@@ -867,7 +983,13 @@ async fn api_effort(
         }
     }
     let engine = state.engine.lock().await;
-    Json(state_json(&engine, state.tools_enabled, &state.guard_label, agent_on(&state))).into_response()
+    Json(state_json(
+        &engine,
+        state.tools_enabled,
+        &state.guard_label,
+        agent_on(&state),
+    ))
+    .into_response()
 }
 
 async fn api_provider(
@@ -881,12 +1003,20 @@ async fn api_provider(
     }
     let name = body["provider"].as_str().unwrap_or("").trim().to_string();
     if name.is_empty() {
-        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "provider is required" }))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "provider is required" })),
+        )
+            .into_response();
     }
     {
         let mut engine = state.engine.lock().await;
         if let Err(e) = engine.set_provider(&name) {
-            return (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))).into_response();
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response();
         }
     }
     if let Ok(paths) = crate::config::Paths::resolve() {
@@ -896,7 +1026,13 @@ async fn api_provider(
         }
     }
     let engine = state.engine.lock().await;
-    Json(state_json(&engine, state.tools_enabled, &state.guard_label, agent_on(&state))).into_response()
+    Json(state_json(
+        &engine,
+        state.tools_enabled,
+        &state.guard_label,
+        agent_on(&state),
+    ))
+    .into_response()
 }
 
 async fn api_history(
@@ -913,17 +1049,41 @@ async fn api_history(
     let out = match op.as_str() {
         "undo" => match engine.undo_last_turn() {
             Ok(t) => json!({ "op": "undo", "text": t }),
-            Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))).into_response(),
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "error": e.to_string() })),
+                )
+                    .into_response()
+            }
         },
         "retry" => match engine.retry_last() {
             Ok(t) => json!({ "op": "retry", "text": t }),
-            Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))).into_response(),
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "error": e.to_string() })),
+                )
+                    .into_response()
+            }
         },
         "compact" => match engine.compact().await {
             Ok(s) => json!({ "op": "compact", "summary": s, "chars": s.chars().count() }),
-            Err(e) => return (StatusCode::BAD_GATEWAY, Json(json!({ "error": e.to_string() }))).into_response(),
+            Err(e) => {
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    Json(json!({ "error": e.to_string() })),
+                )
+                    .into_response()
+            }
         },
-        _ => return (StatusCode::BAD_REQUEST, Json(json!({ "error": "unknown op" }))).into_response(),
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "unknown op" })),
+            )
+                .into_response()
+        }
     };
     Json(json!({ "result": out, "state": state_json(&engine, state.tools_enabled, &state.guard_label, agent_on(&state)) }))
         .into_response()
@@ -953,16 +1113,29 @@ async fn api_checkout(
     let id = match resolve_session(&engine, &key) {
         Some(id) => id,
         None => {
-            return (StatusCode::BAD_REQUEST, Json(json!({ "error": format!("no session matches '{key}'") })))
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": format!("no session matches '{key}'") })),
+            )
                 .into_response()
         }
     };
     match crate::core::session::Session::load(&engine.memory, &id) {
         Ok(sess) => {
             engine.session = sess;
-            Json(state_json(&engine, state.tools_enabled, &state.guard_label, agent_on(&state))).into_response()
+            Json(state_json(
+                &engine,
+                state.tools_enabled,
+                &state.guard_label,
+                agent_on(&state),
+            ))
+            .into_response()
         }
-        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -980,22 +1153,34 @@ async fn api_merge(
     let id = match resolve_session(&engine, &key) {
         Some(id) => id,
         None => {
-            return (StatusCode::BAD_REQUEST, Json(json!({ "error": format!("no branch matches '{key}'") })))
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": format!("no branch matches '{key}'") })),
+            )
                 .into_response()
         }
     };
     if id == engine.session.id {
-        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "cannot merge a branch into itself" })))
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "cannot merge a branch into itself" })),
+        )
             .into_response();
     }
-    let ChatEngine { session, memory, .. } = &mut *engine;
+    let ChatEngine {
+        session, memory, ..
+    } = &mut *engine;
     match session.merge_from(memory, &id) {
         Ok(n) => Json(json!({
             "merged": n,
             "state": state_json(&engine, state.tools_enabled, &state.guard_label, agent_on(&state)),
         }))
         .into_response(),
-        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -1012,7 +1197,10 @@ async fn api_init(
     let ws = engine.workspace.clone();
     let path = ws.join("AGENTS.md");
     if path.exists() {
-        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "AGENTS.md already exists" })))
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "AGENTS.md already exists" })),
+        )
             .into_response();
     }
     let mut files = Vec::new();
@@ -1040,10 +1228,18 @@ async fn api_init(
             let body = strip_fence(&text);
             match std::fs::write(&path, body) {
                 Ok(()) => Json(json!({ "path": path.display().to_string() })).into_response(),
-                Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))).into_response(),
+                Err(e) => (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "error": e.to_string() })),
+                )
+                    .into_response(),
             }
         }
-        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -1063,20 +1259,44 @@ async fn api_diff(
     State(state): State<AppState>,
     headers: HeaderMap,
     Query(q): Query<HashMap<String, String>>,
-) -> Response {    if !authorized(&state, &headers, &q) {
+) -> Response {
+    if !authorized(&state, &headers, &q) {
         return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
     }
     let a_key = q.get("a").cloned().unwrap_or_default();
     let b_key = q.get("b").cloned().unwrap_or_default();
     let engine = state.engine.lock().await;
-    let (a_id, b_id) = match (resolve_session(&engine, &a_key), resolve_session(&engine, &b_key)) {
+    let (a_id, b_id) = match (
+        resolve_session(&engine, &a_key),
+        resolve_session(&engine, &b_key),
+    ) {
         (Some(a), Some(b)) => (a, b),
-        _ => return (StatusCode::BAD_REQUEST, Json(json!({ "error": "session not found" }))).into_response(),
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "session not found" })),
+            )
+                .into_response()
+        }
     };
-    let a = engine.memory.get_history(&a_id, 100_000).unwrap_or_default();
-    let b = engine.memory.get_history(&b_id, 100_000).unwrap_or_default();
-    let ta = a.iter().map(|m| m.content.clone()).collect::<Vec<_>>().join("\n");
-    let tb = b.iter().map(|m| m.content.clone()).collect::<Vec<_>>().join("\n");
+    let a = engine
+        .memory
+        .get_history(&a_id, 100_000)
+        .unwrap_or_default();
+    let b = engine
+        .memory
+        .get_history(&b_id, 100_000)
+        .unwrap_or_default();
+    let ta = a
+        .iter()
+        .map(|m| m.content.clone())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let tb = b
+        .iter()
+        .map(|m| m.content.clone())
+        .collect::<Vec<_>>()
+        .join("\n");
     let lines = crate::core::diff::lines(&ta, &tb);
     let (added, removed) = crate::core::diff::stats(&lines);
     Json(json!({
@@ -1126,7 +1346,10 @@ async fn api_memories(
     let mems = if query.trim().is_empty() {
         engine.memory.list_memories(200).unwrap_or_default()
     } else {
-        engine.memory.search_memories(&query, 200).unwrap_or_default()
+        engine
+            .memory
+            .search_memories(&query, 200)
+            .unwrap_or_default()
     };
     Json(json!({ "memories": mems.iter().map(|m| json!({
         "id": m.id, "text": m.text, "tags": m.tags, "kind": m.kind,
@@ -1146,7 +1369,11 @@ async fn api_memory_add(
     }
     let text = body["text"].as_str().unwrap_or("").trim().to_string();
     if text.is_empty() {
-        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "text is required" }))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "text is required" })),
+        )
+            .into_response();
     }
     let tags = body["tags"].as_str().unwrap_or("").to_string();
     let local_only = body["local_only"].as_bool().unwrap_or(false);
@@ -1156,7 +1383,11 @@ async fn api_memory_add(
         .add_memory(&text, &tags, "note", Some(&engine.session.id), local_only)
     {
         Ok(id) => Json(json!({ "id": id, "ok": true })).into_response(),
-        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -1171,12 +1402,20 @@ async fn api_memory_delete(
     }
     let id = body["id"].as_str().unwrap_or("").trim().to_string();
     if id.is_empty() {
-        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "id is required" }))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "id is required" })),
+        )
+            .into_response();
     }
     let engine = state.engine.lock().await;
     match engine.memory.delete_memory(&id) {
         Ok(ok) => Json(json!({ "ok": ok })).into_response(),
-        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -1193,7 +1432,10 @@ async fn api_decisions(
     let ds = if query.trim().is_empty() {
         engine.memory.list_decisions(200).unwrap_or_default()
     } else {
-        engine.memory.search_decisions(&query, 200).unwrap_or_default()
+        engine
+            .memory
+            .search_decisions(&query, 200)
+            .unwrap_or_default()
     };
     Json(json!({ "decisions": ds.iter().map(|d| json!({
         "id": d.id, "session_id": d.session_id, "title": d.title, "body": d.body,
@@ -1213,21 +1455,26 @@ async fn api_decision_add(
     }
     let title = body["title"].as_str().unwrap_or("").trim().to_string();
     if title.is_empty() {
-        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "title is required" }))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "title is required" })),
+        )
+            .into_response();
     }
     let rationale = body["body"].as_str().unwrap_or("").to_string();
     let tags = body["tags"].as_str().unwrap_or("").to_string();
     let status = body["status"].as_str().unwrap_or("accepted").to_string();
     let engine = state.engine.lock().await;
-    match engine.memory.add_decision(
-        Some(&engine.session.id),
-        &title,
-        &rationale,
-        &tags,
-        &status,
-    ) {
+    match engine
+        .memory
+        .add_decision(Some(&engine.session.id), &title, &rationale, &tags, &status)
+    {
         Ok(id) => Json(json!({ "id": id, "ok": true })).into_response(),
-        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -1242,12 +1489,20 @@ async fn api_decision_delete(
     }
     let id = body["id"].as_str().unwrap_or("").trim().to_string();
     if id.is_empty() {
-        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "id is required" }))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "id is required" })),
+        )
+            .into_response();
     }
     let engine = state.engine.lock().await;
     match engine.memory.delete_decision(&id) {
         Ok(ok) => Json(json!({ "ok": ok })).into_response(),
-        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -1289,7 +1544,7 @@ async fn api_exposure(
         return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
     }
     use crate::config::SandboxMode;
-    use crate::privacy::exposure::{ScoreInputs, blast_radius, privacy_score};
+    use crate::privacy::exposure::{blast_radius, privacy_score, ScoreInputs};
 
     let engine = state.engine.lock().await;
     let summary = engine.memory.egress_summary(None).unwrap_or_default();
@@ -1336,11 +1591,20 @@ async fn api_ledger(
     if !authorized(&state, &headers, &q) {
         return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
     }
-    let verify = q.get("verify").map(|v| v == "1" || v == "true").unwrap_or(false);
-    let per_session = q.get("session").map(|v| v == "1" || v == "true").unwrap_or(false);
+    let verify = q
+        .get("verify")
+        .map(|v| v == "1" || v == "true")
+        .unwrap_or(false);
+    let per_session = q
+        .get("session")
+        .map(|v| v == "1" || v == "true")
+        .unwrap_or(false);
     let engine = state.engine.lock().await;
     let entries = if per_session {
-        engine.memory.list_egress_for_session(&engine.session.id, 100).unwrap_or_default()
+        engine
+            .memory
+            .list_egress_for_session(&engine.session.id, 100)
+            .unwrap_or_default()
     } else {
         engine.memory.list_egress(100).unwrap_or_default()
     };
@@ -1403,7 +1667,10 @@ async fn api_rag(
             let mut nfiles = 0usize;
             for file in &files {
                 let source = file.display().to_string();
-                let text = match std::fs::read(file).ok().and_then(|d| String::from_utf8(d).ok()) {
+                let text = match std::fs::read(file)
+                    .ok()
+                    .and_then(|d| String::from_utf8(d).ok())
+                {
                     Some(t) if !t.trim().is_empty() => t,
                     _ => continue,
                 };
@@ -1466,11 +1733,18 @@ async fn api_export(
             "html",
         ),
     };
-    let filename = format!("enclave-{}.{}", &engine.session.id[..8.min(engine.session.id.len())], ext);
+    let filename = format!(
+        "enclave-{}.{}",
+        &engine.session.id[..8.min(engine.session.id.len())],
+        ext
+    );
     Response::builder()
         .status(StatusCode::OK)
         .header("content-type", mime)
-        .header("content-disposition", format!("attachment; filename=\"{filename}\""))
+        .header(
+            "content-disposition",
+            format!("attachment; filename=\"{filename}\""),
+        )
         .body(Body::from(bytes))
         .unwrap_or_else(|_| Response::new(Body::empty()))
 }
@@ -1486,7 +1760,11 @@ async fn api_shell(
     }
     let cmd = body["cmd"].as_str().unwrap_or("").trim().to_string();
     if cmd.is_empty() {
-        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "cmd is required" }))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "cmd is required" })),
+        )
+            .into_response();
     }
     let (timeout, cap, mode, ws) = {
         let engine = state.engine.lock().await;
@@ -1507,7 +1785,11 @@ async fn api_shell(
     .await
     {
         Ok(out) => Json(json!({ "output": out.render() })).into_response(),
-        Err(e) => (StatusCode::BAD_GATEWAY, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -1591,15 +1873,15 @@ const INDEX_HTML: &str = r#"
   .sess .acts span:hover{background:var(--bg);color:var(--text);}
   .sess .acts span.del:hover{color:var(--red);}
 
-  section.chat{flex:1 1 auto;overflow-y:auto;background:var(--bg);padding:26px 30px;display:flex;flex-direction:column;gap:12px;scroll-behavior:smooth;}
+  section.chat{flex:1 1 auto;overflow-y:auto;background:var(--bg);padding:26px 30px;display:flex;flex-direction:column;gap:12px;}
   .card{border-radius:10px;padding:11px 15px;position:relative;transition:box-shadow .16s ease,transform .16s ease;}
   .card.user:hover,.card.assistant:hover{box-shadow:0 6px 22px rgba(0,0,0,.28);}
   .copybtn{position:absolute;top:6px;right:8px;opacity:0;cursor:pointer;color:var(--dim);font-size:13px;
            padding:2px 6px;border-radius:5px;transition:opacity .12s;user-select:none;}
   .card:hover .copybtn{opacity:1;}
   .copybtn:hover{background:var(--surface-hi);color:var(--text);}
-  .card.user{background:var(--surface-hi);border-left:3px solid var(--accent);}
-  .card.assistant{background:var(--surface);border-left:3px solid var(--surface-hi);}
+  .card.user{align-self:flex-end;max-width:82%;background:var(--surface-hi);border-left:0;border-right:3px solid var(--accent);border-radius:13px 13px 4px 13px;}
+  .card.assistant{align-self:stretch;background:var(--surface);border-left:3px solid var(--surface-hi);}
   .card.system{background:transparent;color:var(--dim);font-style:italic;font-size:13px;border-left:3px solid transparent;}
   .card.tool{background:transparent;border-left:3px solid transparent;font-size:13px;}
   .att{display:inline-flex;align-items:center;gap:6px;margin:6px 6px 0 0;padding:3px 8px;border-radius:6px;
@@ -1642,6 +1924,33 @@ const INDEX_HTML: &str = r#"
   .md .gutter{color:#555;user-select:none;}
   .md .code{color:#5fd0d0;}
   .md blockquote{margin:6px 0;color:#aaa;font-style:italic;}
+  .codewin{border:1px solid var(--line);border-radius:10px;overflow:hidden;margin:9px 0;background:#0c0d11;}
+  .cwhead{display:flex;align-items:center;gap:9px;padding:5px 11px;background:var(--surface-hi);font-size:11.5px;
+          color:var(--dim);font-family:ui-monospace,Menlo,monospace;}
+  .cwhead .lang{color:var(--accent);font-weight:700;}
+  .cwhead .stats{color:var(--dim);}
+  .cwhead .cadd{color:var(--green);}
+  .cwhead .cdel{color:var(--red);}
+  .cwhead .cp{margin-left:auto;cursor:pointer;padding:1px 8px;border-radius:6px;user-select:none;}
+  .cwhead .cp:hover{background:var(--bg);color:var(--text);}
+  .codegrid{overflow-x:auto;padding:7px 0;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px;line-height:1.5;}
+  .crow{display:grid;grid-template-columns:auto 1fr;}
+  .crow .ln{color:#4a4d5a;text-align:right;padding:0 11px 0 13px;user-select:none;}
+  .crow .lc{white-space:pre;padding-right:16px;color:#5fd0d0;}
+  .splitdiff{display:grid;grid-template-columns:1fr 1fr;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+             font-size:12.5px;line-height:1.5;}
+  .splitdiff .pane{overflow-x:auto;padding:7px 0;}
+  .splitdiff .pane.right{border-left:1px solid var(--line);}
+  .splitdiff .phead{font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--dim);padding:0 13px 4px;}
+  .drow{display:grid;grid-template-columns:auto 1fr;}
+  .drow .ln{color:#4a4d5a;text-align:right;padding:0 10px 0 13px;user-select:none;}
+  .drow .lc{white-space:pre;padding-right:14px;color:var(--text);}
+  .drow.ctx .lc{color:var(--dim);}
+  .drow.add{background:rgba(134,239,172,.12);} .drow.add .lc{color:var(--green);}
+  .drow.del{background:rgba(248,150,150,.12);} .drow.del .lc{color:var(--red);}
+  .drow.mod{background:rgba(250,220,120,.07);}
+  .drow.empty .lc{color:transparent;}
+  .drow.sep .lc{color:var(--accent);opacity:.7;}
 
   .toolbar{flex:0 0 auto;background:var(--surface);display:flex;gap:6px;padding:7px 14px 2px;flex-wrap:wrap;}
   .tb{cursor:pointer;color:var(--dim);border:1px solid var(--line);border-radius:999px;padding:2px 11px;font-size:12px;white-space:nowrap;transition:border-color .1s,color .1s;}
@@ -1653,13 +1962,18 @@ const INDEX_HTML: &str = r#"
   .gbtn.danger:hover{border-color:var(--red);color:var(--red);}
   .gsel{margin-left:auto;color:var(--dim);font-size:12px;align-self:center;font-family:ui-monospace,Menlo,monospace;}
   .gnode.sel rect{stroke:var(--accent);stroke-width:2.5;}
-  .inputwrap{flex:0 0 auto;background:var(--surface);display:flex;gap:10px;padding:10px 14px;flex-wrap:wrap;
-             border-top:1px solid var(--line);border-left:3px solid var(--accent);transition:border-color .15s;}
-  .inputwrap.plan{border-left-color:var(--yellow);}
-  .inputwrap.agent{border-left-color:var(--accent);}
-  .inputwrap .prompt{color:var(--accent);font-weight:700;flex:0 0 auto;padding-top:2px;}
-  .inputwrap .clip{color:var(--dim);cursor:pointer;flex:0 0 auto;padding:2px 8px;border-radius:6px;font-size:15px;}
-  .inputwrap .clip:hover{background:var(--surface-hi);color:var(--text);}
+  .composer{flex:0 0 auto;background:var(--surface);border:1px solid var(--line);border-left:3px solid var(--accent);
+            border-radius:13px;display:flex;gap:10px;padding:11px 13px;flex-wrap:wrap;margin-top:8px;
+            transition:border-color .15s,box-shadow .15s;box-shadow:0 4px 18px rgba(0,0,0,.22);}
+  .composer:focus-within{border-color:var(--accent);box-shadow:0 8px 28px rgba(0,0,0,.34);}
+  .composer.plan{border-left-color:var(--yellow);}
+  .composer.agent{border-left-color:var(--accent);}
+  .composer .prompt{color:var(--accent);font-weight:700;flex:0 0 auto;padding-top:2px;}
+  .composer .clip{color:var(--dim);cursor:pointer;flex:0 0 auto;padding:2px 8px;border-radius:6px;font-size:15px;}
+  .composer .clip:hover{background:var(--surface-hi);color:var(--text);}
+  .composer .send{cursor:pointer;flex:0 0 auto;background:var(--accent);color:var(--bg);font-weight:700;
+                  border:0;border-radius:8px;padding:4px 12px;font-size:12.5px;align-self:flex-start;}
+  .composer .send:hover{filter:brightness(1.1);}
   .attchips{width:100%;display:flex;gap:6px;flex-wrap:wrap;}
   .attchips:empty{display:none;}
   textarea{flex:1 1 auto;resize:none;background:transparent;border:0;outline:0;color:var(--text);
@@ -1764,6 +2078,13 @@ const INDEX_HTML: &str = r#"
   <section class="chat" id="chat"></section>
   <aside class="info" id="info"></aside>
 </main>
+<div class="composer" id="composer">
+  <div class="prompt">❯</div>
+  <textarea id="inp" rows="1" placeholder="ask anything…  ( /help · Ctrl-P palette · @file · !cmd )"></textarea>
+  <span class="clip" id="clip" title="attach a file or image">📎</span>
+  <button class="send" id="sendBtn" title="send (Enter)">send ⏎</button>
+  <div id="attchips" class="attchips"></div>
+</div>
 <button id="jumpBtn" class="jumpbtn hidden" title="scroll to the latest message">↓ latest</button>
 <div class="toolbar" id="toolbar">
   <span class="tb" data-cmd="/graph">◎ graph</span>
@@ -1790,12 +2111,6 @@ const INDEX_HTML: &str = r#"
   <span class="tb" data-cmd="/export">export</span>
   <span class="tb" data-cmd="/help">/help</span>
 </div>
-<div class="inputwrap" id="inputwrap">
-  <div class="prompt">❯</div>
-  <textarea id="inp" rows="1" placeholder="send a message…  ( /help commands · Ctrl-P palette · Ctrl-S sessions )"></textarea>
-  <span class="clip" id="clip" title="attach a file or image">📎</span>
-  <div id="attchips" class="attchips"></div>
-</div>
 <div class="privacy" id="privacy"></div>
 <footer class="bar">
   <div style="min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis">
@@ -1813,8 +2128,12 @@ const HJSON = { 'x-enclave-token': TOKEN, 'content-type': 'application/json' };
 const esc = s => String(s==null?'':s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const $ = id => document.getElementById(id);
 let STATE=null, ACTIVE=null, ACTIVE_MESSAGES=null, STREAMING=false, STICK=true;
-function scrollChat(){ const c=$('chat'); if(!c) return; if(STICK) c.scrollTop=c.scrollHeight;
+function scrollChat(){ const c=$('chat'); if(!c) return; ensureComposer(); if(STICK){ c.scrollTop=c.scrollHeight;
+    requestAnimationFrame(()=>{ if(STICK){ c.scrollTop=c.scrollHeight; } }); }
   const near=c.scrollHeight-c.scrollTop-c.clientHeight<48; const jb=$('jumpBtn'); if(jb) jb.classList.toggle('hidden',near); }
+// The composer lives inline at the end of the transcript (no fixed bottom bar).
+function ensureComposer(){ const c=$('composer'), chat=$('chat'); if(c&&chat&&chat.lastElementChild!==c) chat.appendChild(c); }
+function clearChat(){ const chat=$('chat'); if(!chat) return; Array.from(chat.children).forEach(ch=>{ if(ch.id!=='composer') ch.remove(); }); }
 
 const PALETTE_COMMANDS = [
   ["/help","show all commands"],["/new","start a new session"],["/switch","open the session picker"],
@@ -1852,11 +2171,87 @@ function inlineMD(txt){
   }
   return out;
 }
+// ---------- code windows + split diff ----------
+window.__cw=[];
+function cwCopy(el,idx){ navigator.clipboard.writeText(window.__cw[idx]||'').then(()=>toast('copied','ok'),()=>toast('copy failed','error')); }
+function cwRegister(text){ return window.__cw.push(text)-1; }
+function isDiffText(code){
+  const ls=String(code).split('\n');
+  if(ls.some(l=>l.startsWith('@@'))) return true;
+  let s=0; for(const l of ls){ if(l.startsWith('+')||l.startsWith('-')) s++; }
+  return s>0 && s>=Math.max(1,Math.floor(ls.length*0.4));
+}
+function codeWindowHtml(code,lang){
+  const ls=code.split('\n'); const id=cwRegister(code);
+  let body='';
+  ls.forEach((l,i)=>{ body+='<div class="crow"><span class="ln">'+(i+1)+'</span><span class="lc">'+esc(l||' ')+'</span></div>'; });
+  return '<div class="codewin"><div class="cwhead"><span class="lang">'+esc(lang||'code')+'</span>'+
+    '<span class="stats">'+ls.length+' lines</span>'+
+    '<span class="cp" onclick="cwCopy(this,'+id+')">⧉ copy</span></div>'+
+    '<div class="codegrid">'+body+'</div></div>';
+}
+// unified diff (1-char prefixes) or rendered diff (2-char prefixes) -> aligned rows
+function diffRows(code,twoChar){
+  const ls=String(code).replace(/\r/g,'').split('\n'); const rows=[]; let ln=1,rn=1,del=[],add=[];
+  const flush=()=>{ const n=Math.max(del.length,add.length);
+    for(let k=0;k<n;k++){ const d=del[k],a=add[k];
+      rows.push({l: d!==undefined?{n:ln++,t:d,type:(a!==undefined?'mod':'del')}:null,
+                 r: a!==undefined?{n:rn++,t:a,type:(d!==undefined?'mod':'add')}:null}); }
+    del=[];add=[]; };
+  ls.forEach((l,idx)=>{
+    if(l.startsWith('@@')){ flush(); const m=l.match(/@@ -(\d+)(?:,\d+)? \+(\d+)/); if(m){ln=+m[1];rn=+m[2];} rows.push({sep:l}); return; }
+    if(l.startsWith('+++')||l.startsWith('---')||l.startsWith('diff ')||l.startsWith('Index:')||l.startsWith('\\')){ flush(); return; }
+    if(idx===0 && /\(\+\d+[^\d]/.test(l)) return; // "edited path (+N −M)" summary line
+    if(l.startsWith('+ ')){ add.push(l.slice(2)); return; }
+    if(l.startsWith('- ')){ del.push(l.slice(2)); return; }
+    if(l.startsWith('  …')){ flush(); rows.push({sep:l.trim()}); return; }
+    if(twoChar && l.startsWith('  ')){ flush(); const t=l.slice(2); rows.push({l:{n:ln++,t,type:'ctx'},r:{n:rn++,t,type:'ctx'}}); return; }
+    if(l.startsWith('+')){ add.push(l.slice(1)); return; }
+    if(l.startsWith('-')){ del.push(l.slice(1)); return; }
+    flush();
+    const t=(!twoChar && l.startsWith(' '))?l.slice(1):l;
+    rows.push({l:{n:ln++,t,type:'ctx'},r:{n:rn++,t,type:'ctx'}});
+  });
+  flush();
+  return rows;
+}
+function dcell(side){
+  if(!side) return '<div class="drow empty"><span class="ln"></span><span class="lc"></span></div>';
+  return '<div class="drow '+side.type+'"><span class="ln">'+side.n+'</span><span class="lc">'+esc(side.t||' ')+'</span></div>';
+}
+function splitDiffHtml(rows,lang,head){
+  let L='',R='';
+  for(const r of rows){
+    if(r.sep!==undefined){ L+='<div class="drow sep"><span class="ln"></span><span class="lc">'+esc(r.sep)+'</span></div>';
+      R+='<div class="drow sep"><span class="ln"></span><span class="lc">'+esc(r.sep)+'</span></div>'; continue; }
+    L+=dcell(r.l); R+=dcell(r.r);
+  }
+  const id=cwRegister(rows.map(r=> r.sep!==undefined?r.sep:(' '+((r.l&&r.l.t)||''))).join('\n'));
+  return '<div class="codewin">'+(head||'')+
+    '<div class="splitdiff"><div class="pane"><div class="phead">before</div>'+L+'</div>'+
+    '<div class="pane right"><div class="phead">after</div>'+R+'</div></div></div>';
+}
+function diffHeadHtml(label,added,removed,copyId){
+  let s='<div class="cwhead"><span class="lang">'+esc(label)+'</span>';
+  if(added!=null) s+='<span class="cadd">+'+added+'</span>';
+  if(removed!=null) s+='<span class="cdel">−'+removed+'</span>';
+  s+='<span class="cp" onclick="cwCopy(this,'+copyId+')">⧉ copy</span></div>';
+  return s;
+}
+
 function renderMD(text){
-  const lines=String(text).split('\n'); let html='', inCode=false;
+  const lines=String(text).split('\n'); let html='', inCode=false, buf=[], lang='';
+  const flushCode=()=>{ const code=buf.join('\n'); buf=[];
+    if(isDiffText(code)) html+=splitDiffHtml(diffRows(code,false),lang);
+    else html+=codeWindowHtml(code,lang);
+  };
   for(const line of lines){
-    if(line.trimStart().startsWith('```')){ inCode=!inCode; continue; }
-    if(inCode){ html+='<pre><span class="gutter">│ </span><span class="code">'+esc(line)+'</span></pre>'; continue; }
+    if(line.trimStart().startsWith('```')){
+      if(!inCode){ inCode=true; lang=line.trimStart().slice(3).trim(); buf=[]; }
+      else { inCode=false; flushCode(); lang=''; }
+      continue;
+    }
+    if(inCode){ buf.push(line); continue; }
     const t=line.trimStart();
     if(t.startsWith('#')){ const m=t.match(/^(#{1,3})\s+(.*)$/); if(m){ const lv=m[1].length; html+='<h'+lv+'>'+inlineMD(m[2])+'</h'+lv+'>'; continue; } }
     if(t.startsWith('>')){ html+='<blockquote>▌ '+inlineMD(t.slice(1).trim())+'</blockquote>'; continue; }
@@ -1864,6 +2259,7 @@ function renderMD(text){
     if(/^\d+\.\s/.test(t)){ html+='<div>&nbsp;&nbsp;'+inlineMD(t.replace(/^\d+\.\s/,''))+'</div>'; continue; }
     html += (line===''?'<div style="height:6px"></div>':('<p>'+inlineMD(line)+'</p>'));
   }
+  if(inCode) flushCode();
   return '<div class="md">'+html+'</div>';
 }
 
@@ -1948,7 +2344,7 @@ function renderFooter(){
   if(!STATE) return;
   $('modelchip').textContent=' '+STATE.provider+' · '+STATE.model+' ';
   const ac=$('agentchip'); ac.className='chip agentchip'+(STATE.agent?' on':''); ac.textContent='agent '+(STATE.agent?'on':'off');
-  $('inputwrap').className='inputwrap'+(STATE.mode==='plan'?' plan':'');
+  const cw=$('composer'); if(cw) cw.className='composer'+(STATE.mode==='plan'?' plan':'')+(STATE.agent?' agent':'');
 }
 function renderToolbar(){
   const tb=$('toolbar'); if(!tb||!STATE) return;
@@ -2000,10 +2396,11 @@ function welcomeEl(){
   return el;
 }
 function renderChat(messages,opts){
-  const chat=$('chat'); chat.innerHTML='';
+  const chat=$('chat'); clearChat();
   STICK=true;
-  if(messages===null||!messages.length){ chat.appendChild(welcomeEl()); return; }
+  if(messages===null||!messages.length){ chat.appendChild(welcomeEl()); ensureComposer(); return; }
   messages.forEach(m=>chat.appendChild(cardEl(m)));
+  ensureComposer();
   if(opts&&opts.scroll!==false) scrollChat();
 }
 
@@ -2018,15 +2415,25 @@ function colorizeTool(text){ return String(text||'').split('\n').map(l=>{
   return '<div class="tool-line" style="color:'+col+'">'+esc(l)+'</div>'; }).join(''); }
 function toolCard(out){
   const c=document.createElement('div'); c.className='card tool';
-  c.innerHTML='<div class="hdr">⚙ '+esc(out.name)+(out.denied?' · denied':'')+'</div>'+
-    (out.denied?'<div class="tool-line tl-meta">'+esc(out.output||'')+'</div>':colorizeTool(out.output||''));
+  if(out.change){
+    const rows=diffRows(out.output||'',true);
+    const id=cwRegister(rows.map(r=> r.sep!==undefined?r.sep:(' '+((r.l&&r.l.t)||''))).join('\n'));
+    const L=rows.map(r=>r.sep!==undefined?'<div class="drow sep"><span class="ln"></span><span class="lc">'+esc(r.sep)+'</span></div>':dcell(r.l)).join('');
+    const R=rows.map(r=>r.sep!==undefined?'<div class="drow sep"><span class="ln"></span><span class="lc">'+esc(r.sep)+'</span></div>':dcell(r.r)).join('');
+    c.innerHTML='<div class="codewin">'+diffHeadHtml('⚙ '+out.name+' · '+out.change.path, out.change.added, out.change.removed, id)+
+      '<div class="splitdiff"><div class="pane"><div class="phead">before</div>'+L+'</div>'+
+      '<div class="pane right"><div class="phead">after</div>'+R+'</div></div></div>';
+  } else {
+    c.innerHTML='<div class="hdr">⚙ '+esc(out.name)+(out.denied?' · denied':'')+'</div>'+
+      (out.denied?'<div class="tool-line tl-meta">'+esc(out.output||'')+'</div>':colorizeTool(out.output||''));
+  }
   $('chat').appendChild(c); scrollChat();
 }
 function notify(msg){ try{ if(('Notification' in window)&&Notification.permission==='granted'){ new Notification('Enclave',{body:msg}); } }catch(e){} }
 function askNotifyPermission(){ try{ if(('Notification' in window)&&Notification.permission==='default'){ Notification.requestPermission(); } }catch(e){} }
 
 async function sendAgent(text,atts){
-  const chat=$('chat'); if(chat.querySelector('.welcome')) chat.innerHTML='';
+  const chat=$('chat'); if(chat.querySelector('.welcome')) clearChat();
   chat.appendChild(cardEl({role:'user',content:userText(text,atts)})); scrollChat();
   STREAMING=true; $('inp').disabled=true; statusSet('agent working…');
   window.__agentSteps=0;
@@ -2612,7 +3019,7 @@ async function sendText(text,atts){
   if(!text||STREAMING) return;
   const inp=$('inp');
   const chat=$('chat');
-  if(chat.querySelector('.welcome')) chat.innerHTML='';
+  if(chat.querySelector('.welcome')) clearChat();
   STICK=true;
   chat.appendChild(cardEl({role:'user',content:text,attachments:(atts||[]).map(a=>({kind:a.kind,name:a.name}))}));
   scrollChat();
@@ -2663,7 +3070,7 @@ async function runSlash(text){
     case 'agent': { const on=!STATE.agent; await api('/api/toggle',{agent:on}); await loadState(); toast('agent mode '+(on?'ON':'OFF')); break; }
     case 'airgap': { const on=!STATE.air_gap; await api('/api/toggle',{air_gap:on}); await loadState(); toast('air-gap '+(on?'ON':'OFF')); break; }
     case 'route': { const on=!STATE.route_sensitive; await api('/api/toggle',{route_sensitive:on}); await loadState(); toast('sensitive routing '+(on?'ON':'OFF')); break; }
-    case 'clear': { const chat=$('chat'); chat.innerHTML=''; chat.appendChild(welcomeEl()); ACTIVE_MESSAGES=[]; renderInfo(); toast('view cleared'); break; }
+    case 'clear': { const chat=$('chat'); clearChat(); chat.appendChild(welcomeEl()); ensureComposer(); ACTIVE_MESSAGES=[]; renderInfo(); toast('view cleared'); break; }
     case 'branch': {
       const toks=String(arg||'').trim().split(/\s+/).filter(Boolean);
       let from=null; const names=[];
@@ -2741,8 +3148,12 @@ function toggleSide(){ togglePanel('aside.side','side',$('tgSide')); }
 function toggleInfo(){ togglePanel('aside.info','info',$('tgInfo')); }
 $('tgSide').onclick=toggleSide;
 $('tgInfo').onclick=toggleInfo;
-$('jumpBtn').onclick=()=>{ STICK=true; scrollChat(); };
+$('jumpBtn').onclick=()=>{ STICK=true; const c=$('chat'); c.scrollTo({top:c.scrollHeight,behavior:'smooth'}); };
 $('chat').addEventListener('scroll',()=>{ const c=$('chat'); STICK=c.scrollHeight-c.scrollTop-c.clientHeight<48; $('jumpBtn').classList.toggle('hidden',STICK); });
+// Keep the view pinned to the newest message while more content renders in
+// (markdown/code windows change the scroll height after the initial paint).
+new MutationObserver(()=>{ if(STICK){ const c=$('chat'); if(c) c.scrollTop=c.scrollHeight; } })
+  .observe($('chat'), {childList:true, subtree:true});
 document.addEventListener('click',e=>{ const b=e.target.closest('[data-slash]'); if(b){ e.preventDefault(); runSlash(b.getAttribute('data-slash')); } });
 const inp=$('inp');
 function autosize(t){ t.style.height='auto'; t.style.height=Math.min(t.scrollHeight,180)+'px'; }
@@ -2755,17 +3166,20 @@ inp.addEventListener('keydown',async e=>{
     if(e.key==='Enter'){e.preventDefault();applyPop();return;}
     if(e.key==='Escape'){e.preventDefault();hidePop();return;}
   }
-  if(e.key==='Enter'&&!e.shiftKey){ e.preventDefault(); const v=inp.value.trim(); if(!v) return;
-    if(v.startsWith('/')){ inp.value=''; autosize(inp); hidePop(); await runSlash(v); return; }
-    inp.value=''; autosize(inp); hidePop();
-    askNotifyPermission();
-    if(v.startsWith('!')){ await runShell(v.slice(1).trim()); return; }
-    const text=await resolveAt(v);
-    const atts=ATT.splice(0,ATT.length); renderAtt();
-    if(!(await guardCheck(text))) return;
-    if(STATE&&STATE.agent) await sendAgent(text,atts); else await sendText(text,atts);
-  }
+  if(e.key==='Enter'&&!e.shiftKey){ e.preventDefault(); await submitInput(); }
 });
+async function submitInput(){
+  const v=inp.value.trim(); if(!v) return;
+  if(v.startsWith('/')){ inp.value=''; autosize(inp); hidePop(); await runSlash(v); return; }
+  inp.value=''; autosize(inp); hidePop();
+  askNotifyPermission();
+  if(v.startsWith('!')){ await runShell(v.slice(1).trim()); return; }
+  const text=await resolveAt(v);
+  const atts=ATT.splice(0,ATT.length); renderAtt();
+  if(!(await guardCheck(text))) return;
+  if(STATE&&STATE.agent) await sendAgent(text,atts); else await sendText(text,atts);
+}
+{ const sb=$('sendBtn'); if(sb) sb.onclick=()=>submitInput(); }
 document.addEventListener('keydown',e=>{
   if(MODAL){ if(e.key==='Escape'){e.preventDefault();closeModal();} return; }
   if(OV){
@@ -2794,7 +3208,7 @@ function setTheme(t){ document.body.dataset.theme=t; localStorage.setItem('encla
 setTheme(localStorage.getItem('enclave-theme')||'default');
 function syncPanelBtns(){ $('tgSide').classList.toggle('off', !panelVisible('aside.side')); $('tgInfo').classList.toggle('off', !panelVisible('aside.info')); }
 window.addEventListener('resize', syncPanelBtns);
-(async()=>{ await loadState(); if(STATE){ await openCurrent(); } syncPanelBtns(); statusSet('ready'); })();
+(async()=>{ await loadState(); if(STATE){ await openCurrent(); } ensureComposer(); syncPanelBtns(); statusSet('ready'); })();
 </script>
 </body>
 </html>

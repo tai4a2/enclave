@@ -54,8 +54,7 @@ impl MasterKey {
 
     /// Parse a hex-encoded key.
     pub fn from_hex(hex_str: &str) -> Result<Self> {
-        let bytes = hex::decode(hex_str.trim())
-            .map_err(|e| EnclaveError::crypto(e.to_string()))?;
+        let bytes = hex::decode(hex_str.trim()).map_err(|e| EnclaveError::crypto(e.to_string()))?;
         if bytes.len() != 32 {
             return Err(EnclaveError::crypto("master key must be 32 bytes"));
         }

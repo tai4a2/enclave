@@ -183,7 +183,9 @@ mod tests {
         let d = lines("a\nb\nc", "a\nB\nc");
         assert_eq!(stats(&d), (1, 1));
         assert!(d.iter().any(|l| l.kind == DiffKind::Add && l.text == "B"));
-        assert!(d.iter().any(|l| l.kind == DiffKind::Remove && l.text == "b"));
+        assert!(d
+            .iter()
+            .any(|l| l.kind == DiffKind::Remove && l.text == "b"));
     }
 
     #[test]

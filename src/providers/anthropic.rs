@@ -117,8 +117,8 @@ pub fn parse_response(value: &serde_json::Value) -> (String, Vec<ToolCall>) {
                     }
                 }
                 Some("tool_use") => {
-                    let arguments = serde_json::to_string(&b["input"])
-                        .unwrap_or_else(|_| "{}".into());
+                    let arguments =
+                        serde_json::to_string(&b["input"]).unwrap_or_else(|_| "{}".into());
                     calls.push(ToolCall {
                         id: b["id"].as_str().unwrap_or_default().to_string(),
                         name: b["name"].as_str().unwrap_or_default().to_string(),
@@ -178,7 +178,9 @@ impl Provider for AnthropicProvider {
         if !response.status().is_success() {
             let status = response.status();
             let text = response.text().await.unwrap_or_default();
-            return Err(EnclaveError::provider(format!("anthropic {status}: {text}")));
+            return Err(EnclaveError::provider(format!(
+                "anthropic {status}: {text}"
+            )));
         }
 
         let mut response_stream = response.bytes_stream();
@@ -254,7 +256,9 @@ impl Provider for AnthropicProvider {
         if !response.status().is_success() {
             let status = response.status();
             let text = response.text().await.unwrap_or_default();
-            return Err(EnclaveError::provider(format!("anthropic {status}: {text}")));
+            return Err(EnclaveError::provider(format!(
+                "anthropic {status}: {text}"
+            )));
         }
 
         let value: serde_json::Value = response.json().await?;

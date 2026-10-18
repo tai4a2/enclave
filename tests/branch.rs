@@ -113,12 +113,18 @@ fn merge_of_identical_branches_adds_nothing() {
 fn fork_preserves_tool_metadata() {
     let (_dir, memory) = memory();
     let mut root = Session::create(&memory, "root").unwrap();
-    root.push(Message::assistant_with_tool_calls("thinking", vec![]), &memory)
-        .unwrap();
+    root.push(
+        Message::assistant_with_tool_calls("thinking", vec![]),
+        &memory,
+    )
+    .unwrap();
 
     let child = Session::fork(&memory, &root.id, "alt", 1).unwrap();
     assert_eq!(child.messages.len(), 1);
-    assert_eq!(child.messages[0].role, enclave::core::message::Role::Assistant);
+    assert_eq!(
+        child.messages[0].role,
+        enclave::core::message::Role::Assistant
+    );
 }
 
 #[test]

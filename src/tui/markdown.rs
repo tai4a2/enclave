@@ -12,7 +12,9 @@ fn heading_style(level: usize) -> Style {
         1 => Style::default()
             .fg(Color::LightBlue)
             .add_modifier(Modifier::BOLD),
-        _ => Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD),
+        _ => Style::default()
+            .fg(Color::Blue)
+            .add_modifier(Modifier::BOLD),
     }
 }
 
@@ -29,21 +31,25 @@ fn quote_style() -> Style {
 /// degrades to plain text.
 pub fn render(text: &str) -> Vec<Line<'static>> {
     let mut out: Vec<Line> = Vec::new();
-    let mut in_code = false;
+    let mut code: Option<(String, Vec<String>)> = None;
 
     for raw in text.lines() {
         let trimmed_start = raw.trim_start();
 
-        // Fenced code blocks: render the body with a dim gutter, hide the fences.
+        // Fenced code blocks: buffered and rendered as a framed "code window"
+        // (diff-looking blocks get added/removed highlighting).
         if trimmed_start.starts_with("```") {
-            in_code = !in_code;
+            match code.take() {
+                None => {
+                    let lang = trimmed_start.trim_start_matches('`').trim().to_string();
+                    code = Some((lang, Vec::new()));
+                }
+                Some((lang, lines)) => emit_code_block(&mut out, &lang, &lines),
+            }
             continue;
         }
-        if in_code {
-            out.push(Line::from(vec![
-                Span::styled("│ ", Style::default().fg(Color::DarkGray)),
-                Span::styled(raw.to_string(), Style::default().fg(Color::Cyan)),
-            ]));
+        if let Some((_, lines)) = code.as_mut() {
+            lines.push(raw.to_string());
             continue;
         }
 
@@ -71,12 +77,72 @@ pub fn render(text: &str) -> Vec<Line<'static>> {
         let (prefix, rest) = list_prefix(trimmed_start);
         let mut spans: Vec<Span> = Vec::new();
         if let Some(p) = prefix {
-            spans.push(Span::styled(p.to_string(), Style::default().fg(Color::Cyan)));
+            spans.push(Span::styled(
+                p.to_string(),
+                Style::default().fg(Color::Cyan),
+            ));
         }
         spans.extend(inline(rest));
         out.push(Line::from(spans));
     }
+
+    if let Some((lang, lines)) = code {
+        emit_code_block(&mut out, &lang, &lines);
+    }
     out
+}
+
+fn is_diff_text(lines: &[String]) -> bool {
+    if lines.iter().any(|l| l.starts_with("@@")) {
+        return true;
+    }
+    let marked = lines
+        .iter()
+        .filter(|l| l.starts_with('+') || l.starts_with('-'))
+        .count();
+    marked > 0 && marked * 2 >= lines.len().max(1)
+}
+
+/// Render a fenced block as a framed "code window"; diff-like blocks get
+/// per-line add/remove highlighting.
+fn emit_code_block(out: &mut Vec<Line<'static>>, lang: &str, lines: &[String]) {
+    let is_diff = is_diff_text(lines);
+    let title = if is_diff {
+        " diff ".to_string()
+    } else if lang.is_empty() {
+        " code ".to_string()
+    } else {
+        format!(" {lang} ")
+    };
+    let title_style = Style::default()
+        .fg(if is_diff { Color::Yellow } else { Color::Cyan })
+        .add_modifier(Modifier::BOLD);
+    let rule = Style::default().fg(Color::DarkGray);
+    out.push(Line::from(vec![
+        Span::styled("╭─", rule),
+        Span::styled(title, title_style),
+        Span::styled("─", rule),
+    ]));
+    for l in lines {
+        let body_style = if is_diff {
+            if l.starts_with('@') {
+                Style::default().fg(Color::Yellow)
+            } else if l.starts_with('+') {
+                Style::default().fg(Color::Green).bg(Color::Rgb(0, 42, 18))
+            } else if l.starts_with('-') {
+                Style::default().fg(Color::Red).bg(Color::Rgb(58, 20, 20))
+            } else {
+                Style::default().fg(Color::Gray)
+            }
+        } else {
+            Style::default().fg(Color::Cyan)
+        };
+        out.push(Line::from(vec![
+            Span::styled("│ ", Style::default().fg(Color::DarkGray)),
+            Span::styled(l.clone(), body_style),
+        ]));
+    }
+    out.push(Line::from(Span::styled("╰─", rule)));
 }
 
 fn heading_level(line: &str) -> Option<usize> {
@@ -194,10 +260,23 @@ mod tests {
     }
 
     #[test]
-    fn code_blocks_get_gutter_and_are_hidden_fences() {
+    fn code_blocks_are_framed_and_hide_fences() {
         let l = render("```bash\necho hi\n```");
-        assert_eq!(l.len(), 1);
-        assert_eq!(text_of(&l[0]), "│ echo hi");
+        assert_eq!(l.len(), 3);
+        assert_eq!(text_of(&l[0]), "╭─ bash ─");
+        assert_eq!(text_of(&l[1]), "│ echo hi");
+        assert_eq!(text_of(&l[2]), "╰─");
+    }
+
+    #[test]
+    fn diff_blocks_highlight_added_and_removed_lines() {
+        let l = render("```diff\n@@ -1,2 +1,2 @@\n-old\n+new\n```");
+        let body: Vec<String> = l.iter().map(text_of).collect();
+        assert_eq!(body[0], "╭─ diff ─");
+        let add = l.iter().find(|x| text_of(x) == "│ +new").unwrap();
+        assert_eq!(add.spans[1].style.fg, Some(Color::Green));
+        let del = l.iter().find(|x| text_of(x) == "│ -old").unwrap();
+        assert_eq!(del.spans[1].style.fg, Some(Color::Red));
     }
 
     #[test]
@@ -219,8 +298,9 @@ mod tests {
     fn inline_code_bold_italic() {
         let l = render("use `cargo test` and **bold** and *ital*");
         let spans = &l[0].spans;
-        assert!(spans.iter().any(|s| s.content == "cargo test"
-            && s.style.fg == Some(Color::Yellow)));
+        assert!(spans
+            .iter()
+            .any(|s| s.content == "cargo test" && s.style.fg == Some(Color::Yellow)));
         assert!(spans
             .iter()
             .any(|s| s.content == "bold" && s.style.add_modifier.contains(Modifier::BOLD)));

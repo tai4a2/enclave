@@ -16,7 +16,10 @@ fn open_memory(dir: &std::path::Path) -> EncryptedMemory {
 }
 
 fn tmpdir(name: &str) -> PathBuf {
-    let base = std::env::temp_dir().join(format!("enclave-export-test-{name}-{}", uuid::Uuid::new_v4()));
+    let base = std::env::temp_dir().join(format!(
+        "enclave-export-test-{name}-{}",
+        uuid::Uuid::new_v4()
+    ));
     std::fs::create_dir_all(&base).unwrap();
     base
 }
@@ -24,9 +27,15 @@ fn tmpdir(name: &str) -> PathBuf {
 fn seed_session(memory: &EncryptedMemory, name: &str) -> String {
     let id = memory.create_session(name).unwrap();
     memory
-        .save_message(&id, Role::User.as_str(), "il mio nome è Mauro, email mauro@example.com")
+        .save_message(
+            &id,
+            Role::User.as_str(),
+            "il mio nome è Mauro, email mauro@example.com",
+        )
         .unwrap();
-    memory.save_message(&id, Role::Assistant.as_str(), "ciao! come posso aiutare?").unwrap();
+    memory
+        .save_message(&id, Role::Assistant.as_str(), "ciao! come posso aiutare?")
+        .unwrap();
     id
 }
 
@@ -68,7 +77,10 @@ fn roundtrip_import_preserves_messages_in_new_session() {
     let history = memory2.get_history(&new_id, 100).unwrap();
     assert_eq!(history.len(), 2);
     assert_eq!(history[0].role, Role::User);
-    assert_eq!(history[0].content, "il mio nome è Mauro, email mauro@example.com");
+    assert_eq!(
+        history[0].content,
+        "il mio nome è Mauro, email mauro@example.com"
+    );
     assert_eq!(history[1].role, Role::Assistant);
     assert_eq!(history[1].content, "ciao! come posso aiutare?");
 

@@ -6,8 +6,11 @@ use enclave::privacy::memory::EncryptedMemory;
 use enclave::privacy::vault::MasterKey;
 
 fn open_memory(dir: &tempfile::TempDir) -> EncryptedMemory {
-    EncryptedMemory::open(&dir.path().join("vault.db"), &MasterKey::from_bytes([7u8; 32]))
-        .unwrap()
+    EncryptedMemory::open(
+        &dir.path().join("vault.db"),
+        &MasterKey::from_bytes([7u8; 32]),
+    )
+    .unwrap()
 }
 
 #[test]

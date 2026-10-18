@@ -23,12 +23,24 @@ fn derivation_is_deterministic_and_password_dependent() {
     let dir = tempfile::tempdir().unwrap();
     let vault = Vault::new(dir.path());
 
-    let a = vault.derive_key("correct horse battery staple", false).unwrap();
-    let b = vault.derive_key("correct horse battery staple", false).unwrap();
-    assert_eq!(a.expose(), b.expose(), "same password+salt must yield same key");
+    let a = vault
+        .derive_key("correct horse battery staple", false)
+        .unwrap();
+    let b = vault
+        .derive_key("correct horse battery staple", false)
+        .unwrap();
+    assert_eq!(
+        a.expose(),
+        b.expose(),
+        "same password+salt must yield same key"
+    );
 
     let c = vault.derive_key("wrong password", false).unwrap();
-    assert_ne!(a.expose(), c.expose(), "different password must yield different key");
+    assert_ne!(
+        a.expose(),
+        c.expose(),
+        "different password must yield different key"
+    );
 }
 
 #[test]
@@ -38,7 +50,11 @@ fn different_vaults_yield_different_keys() {
 
     let key_a = Vault::new(dir_a.path()).derive_key("pw", false).unwrap();
     let key_b = Vault::new(dir_b.path()).derive_key("pw", false).unwrap();
-    assert_ne!(key_a.expose(), key_b.expose(), "random salts must yield different keys");
+    assert_ne!(
+        key_a.expose(),
+        key_b.expose(),
+        "random salts must yield different keys"
+    );
 }
 
 #[test]
@@ -61,7 +77,9 @@ fn cached_key_verification_rejects_wrong_password() {
     let vault = Vault::new(dir.path());
 
     let cached = vault.derive_key("the-real-password", false).unwrap();
-    assert!(vault.cached_key_matches("the-real-password", &cached).unwrap());
+    assert!(vault
+        .cached_key_matches("the-real-password", &cached)
+        .unwrap());
     assert!(!vault.cached_key_matches("wrong-guess", &cached).unwrap());
     assert!(!vault.cached_key_matches("", &cached).unwrap());
 }
@@ -72,7 +90,10 @@ fn new_vault_writes_a_versioned_salt_record() {
     let vault = Vault::new(dir.path());
     vault.load_or_create_salt().unwrap();
     let raw = std::fs::read(vault.salt_path()).unwrap();
-    assert!(raw.starts_with(b"ENCLAVE-KDF"), "salt file must be versioned");
+    assert!(
+        raw.starts_with(b"ENCLAVE-KDF"),
+        "salt file must be versioned"
+    );
     // magic + version + kdf id + 32-byte salt
     assert_eq!(raw.len(), 11 + 1 + 1 + 32);
 }

@@ -89,7 +89,12 @@ pub trait Provider: Send + Sync {
     }
 
     /// Convenience: collect a full (non-streaming) completion.
-    async fn chat(&self, messages: Vec<Message>, model: &str, effort: Option<&str>) -> Result<String> {
+    async fn chat(
+        &self,
+        messages: Vec<Message>,
+        model: &str,
+        effort: Option<&str>,
+    ) -> Result<String> {
         use futures::StreamExt;
         let mut stream = self.chat_stream(messages, model, effort).await?;
         let mut out = String::new();
@@ -126,13 +131,26 @@ pub fn default_model_for(name: &str) -> Option<&'static str> {
 /// OpenRouter returns an empty list here: its catalogue is fetched live.
 pub fn suggested_models(name: &str) -> Vec<&'static str> {
     match name {
-        "openai" => vec!["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini", "gpt-4.1", "o4-mini"],
+        "openai" => vec![
+            "gpt-4o-mini",
+            "gpt-4o",
+            "gpt-4.1-mini",
+            "gpt-4.1",
+            "o4-mini",
+        ],
         "anthropic" => vec![
             "claude-3-5-sonnet-latest",
             "claude-3-5-haiku-latest",
             "claude-3-opus-latest",
         ],
-        "ollama" => vec!["llama3.1", "llama3.2", "qwen2.5", "mistral", "phi4", "deepseek-r1"],
+        "ollama" => vec![
+            "llama3.1",
+            "llama3.2",
+            "qwen2.5",
+            "mistral",
+            "phi4",
+            "deepseek-r1",
+        ],
         _ => Vec::new(),
     }
 }
@@ -140,11 +158,19 @@ pub fn suggested_models(name: &str) -> Vec<&'static str> {
 /// Build a provider from its registry name.
 ///
 /// `api_key` may be `None` for local providers such as Ollama.
-pub fn create_provider(name: &str, api_key: Option<String>, ollama_base_url: &str) -> Result<Box<dyn Provider>> {
+pub fn create_provider(
+    name: &str,
+    api_key: Option<String>,
+    ollama_base_url: &str,
+) -> Result<Box<dyn Provider>> {
     match name {
-        "openrouter" => Ok(Box::new(OpenRouterProvider::new(require_key(name, api_key)?))),
+        "openrouter" => Ok(Box::new(OpenRouterProvider::new(require_key(
+            name, api_key,
+        )?))),
         "openai" => Ok(Box::new(OpenAIProvider::new(require_key(name, api_key)?))),
-        "anthropic" => Ok(Box::new(AnthropicProvider::new(require_key(name, api_key)?))),
+        "anthropic" => Ok(Box::new(AnthropicProvider::new(require_key(
+            name, api_key,
+        )?))),
         "ollama" => Ok(Box::new(OllamaProvider::new(ollama_base_url.to_string()))),
         other => Err(EnclaveError::provider(format!(
             "unknown provider '{other}' (known: {})",

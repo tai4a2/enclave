@@ -115,10 +115,7 @@ fn truncate_utf8(data: &[u8], max_bytes: usize) -> (String, bool) {
     while end > 0 && std::str::from_utf8(&data[..end]).is_err() {
         end -= 1;
     }
-    (
-        String::from_utf8_lossy(&data[..end]).into_owned(),
-        true,
-    )
+    (String::from_utf8_lossy(&data[..end]).into_owned(), true)
 }
 
 /// OS-level sandbox settings for approved shell commands.
@@ -211,13 +208,7 @@ fn escape_sbpl(s: &str) -> String {
 /// The child process is killed if the timeout elapses or if the returned
 /// future is dropped. Output is truncated to `max_output_bytes` per stream.
 pub async fn run(command: &str, timeout: Duration, max_output_bytes: usize) -> Result<ToolOutput> {
-    run_with(
-        "sh",
-        &["-c", command],
-        timeout,
-        max_output_bytes,
-    )
-    .await
+    run_with("sh", &["-c", command], timeout, max_output_bytes).await
 }
 
 /// Run a command inside the given sandbox (when one is active on this
@@ -318,9 +309,13 @@ mod tests {
 
     #[tokio::test]
     async fn run_captures_output_and_exit_code() {
-        let out = run("echo hello; echo oops >&2; exit 3", Duration::from_secs(10), 8192)
-            .await
-            .unwrap();
+        let out = run(
+            "echo hello; echo oops >&2; exit 3",
+            Duration::from_secs(10),
+            8192,
+        )
+        .await
+        .unwrap();
         assert_eq!(out.stdout.trim(), "hello");
         assert_eq!(out.stderr.trim(), "oops");
         assert_eq!(out.code, Some(3));
@@ -417,9 +412,14 @@ mod tests {
         assert_eq!(plain.stdout, sandboxless.stdout);
 
         let off = Sandbox::new(SandboxMode::Off, std::env::temp_dir());
-        let out = run_sandboxed("echo sandbox-check", Duration::from_secs(10), 8192, Some(&off))
-            .await
-            .unwrap();
+        let out = run_sandboxed(
+            "echo sandbox-check",
+            Duration::from_secs(10),
+            8192,
+            Some(&off),
+        )
+        .await
+        .unwrap();
         assert_eq!(out.stdout.trim(), "sandbox-check");
     }
 

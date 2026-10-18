@@ -112,7 +112,12 @@ mod tests {
         std::fs::create_dir_all(project.join(".git")).unwrap();
         std::fs::write(project.join(RULES_FILE), "project rule").unwrap();
         std::fs::write(project.join("extra.md"), "extra rule").unwrap();
-        let text = load(&project, &cfg, &["extra.md".into(), "https://x/y.md".into()]).unwrap();
+        let text = load(
+            &project,
+            &cfg,
+            &["extra.md".into(), "https://x/y.md".into()],
+        )
+        .unwrap();
         assert!(text.contains("global rule"));
         assert!(text.contains("project rule"));
         assert!(text.contains("extra rule"));

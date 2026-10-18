@@ -1,7 +1,7 @@
 //! Integration tests for the privacy guard (detection + stable redaction).
 
 use enclave::core::message::Message;
-use enclave::privacy::guard::{FindingKind, Redactor, redact_messages, scan};
+use enclave::privacy::guard::{redact_messages, scan, FindingKind, Redactor};
 
 #[test]
 fn scan_finds_each_pii_kind() {

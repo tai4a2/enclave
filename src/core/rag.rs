@@ -87,10 +87,7 @@ pub fn keyword_search(query: &str, chunks: &[RagChunk], limit: usize) -> Vec<Hit
     let mut df: HashMap<&str, f64> = HashMap::new();
     let docs: Vec<Vec<String>> = chunks.iter().map(|c| tokenize(&c.text)).collect();
     for term in &q_terms {
-        let count = docs
-            .iter()
-            .filter(|d| d.iter().any(|t| t == term))
-            .count() as f64;
+        let count = docs.iter().filter(|d| d.iter().any(|t| t == term)).count() as f64;
         df.insert(term.as_str(), count);
     }
     let avg_len = docs.iter().map(|d| d.len()).sum::<usize>() as f64 / n;
@@ -119,7 +116,11 @@ pub fn keyword_search(query: &str, chunks: &[RagChunk], limit: usize) -> Vec<Hit
             });
         }
     }
-    hits.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    hits.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     hits.truncate(limit.max(1));
     hits
 }
@@ -168,7 +169,11 @@ pub fn semantic_search(
         })
         .filter(|h| h.score > 0.0)
         .collect();
-    hits.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    hits.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     hits.truncate(limit.max(1));
     hits
 }

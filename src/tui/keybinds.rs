@@ -90,7 +90,9 @@ pub fn parse_spec(spec: &str) -> Option<(KeyCode, KeyModifiers)> {
     let parts: Vec<&str> = spec.split('+').collect();
     let (key_part, mods) = parts.split_last()?;
     // `shift+tab` is expressed as the BackTab code, not a modifier.
-    if mods.len() == 1 && mods[0].eq_ignore_ascii_case("shift") && key_part.eq_ignore_ascii_case("tab")
+    if mods.len() == 1
+        && mods[0].eq_ignore_ascii_case("shift")
+        && key_part.eq_ignore_ascii_case("tab")
     {
         return Some((KeyCode::BackTab, KeyModifiers::NONE));
     }
@@ -128,9 +130,7 @@ impl Keybinds {
     pub fn action_for(&self, key: &KeyEvent) -> Option<BindAction> {
         self.map
             .iter()
-            .find(|((code, mods), _)| {
-                *code == key.code && key.modifiers.contains(*mods)
-            })
+            .find(|((code, mods), _)| *code == key.code && key.modifiers.contains(*mods))
             .map(|(_, action)| *action)
     }
 }
@@ -149,7 +149,10 @@ mod tests {
             parse_spec("alt+x"),
             Some((KeyCode::Char('x'), KeyModifiers::ALT))
         );
-        assert_eq!(parse_spec("shift+tab"), Some((KeyCode::BackTab, KeyModifiers::NONE)));
+        assert_eq!(
+            parse_spec("shift+tab"),
+            Some((KeyCode::BackTab, KeyModifiers::NONE))
+        );
         assert_eq!(parse_spec("f5"), Some((KeyCode::F(5), KeyModifiers::NONE)));
         assert_eq!(parse_spec("esc"), Some((KeyCode::Esc, KeyModifiers::NONE)));
         assert_eq!(parse_spec("bogus+thing"), None);
@@ -158,9 +161,7 @@ mod tests {
     #[test]
     fn resolves_overrides_from_settings() {
         let mut settings = TuiSettings::default();
-        settings
-            .keybinds
-            .insert("quit".into(), "ctrl+q".into());
+        settings.keybinds.insert("quit".into(), "ctrl+q".into());
         let kb = Keybinds::from_settings(&settings);
         let key = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL);
         assert_eq!(kb.action_for(&key), Some(BindAction::Quit));

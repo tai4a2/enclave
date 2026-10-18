@@ -165,10 +165,7 @@ mod tests {
             tor: true,
             tls_pin: None,
         };
-        assert_eq!(
-            proxy_url(&cfg).as_deref(),
-            Some("socks5h://127.0.0.1:9000")
-        );
+        assert_eq!(proxy_url(&cfg).as_deref(), Some("socks5h://127.0.0.1:9000"));
     }
 
     #[test]

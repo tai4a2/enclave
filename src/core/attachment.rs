@@ -96,11 +96,7 @@ impl Attachment {
 
 /// Best-effort MIME type from the file extension.
 pub fn guess_mime(name: &str) -> &'static str {
-    let ext = name
-        .rsplit('.')
-        .next()
-        .unwrap_or("")
-        .to_ascii_lowercase();
+    let ext = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
     match ext.as_str() {
         "png" => "image/png",
         "jpg" | "jpeg" => "image/jpeg",

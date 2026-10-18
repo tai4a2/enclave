@@ -121,9 +121,19 @@ pub fn privacy_score(inputs: &ScoreInputs) -> PrivacyScore {
     let remote_penalty = -(inputs.remote.min(20) as i32);
     bump("remote sends", remote_penalty, &mut factors, &mut score);
     let redaction_bonus = (inputs.redactions.min(12)) as i32;
-    bump("redactions applied", redaction_bonus, &mut factors, &mut score);
+    bump(
+        "redactions applied",
+        redaction_bonus,
+        &mut factors,
+        &mut score,
+    );
     let memory_bonus = (inputs.local_only_memories.min(6)) as i32;
-    bump("local-only memories", memory_bonus, &mut factors, &mut score);
+    bump(
+        "local-only memories",
+        memory_bonus,
+        &mut factors,
+        &mut score,
+    );
 
     let score = score.clamp(0, 100) as u8;
     PrivacyScore {

@@ -142,8 +142,7 @@ pub fn random_key() -> Key {
 
 /// Encrypt `plaintext` with AES-256-GCM, returning `nonce || ciphertext`.
 pub fn encrypt(key: &Key, plaintext: &[u8]) -> Result<Vec<u8>> {
-    let cipher =
-        Aes256Gcm::new_from_slice(key).map_err(|e| EnclaveError::crypto(e.to_string()))?;
+    let cipher = Aes256Gcm::new_from_slice(key).map_err(|e| EnclaveError::crypto(e.to_string()))?;
     let mut nonce_bytes = [0u8; NONCE_LEN];
     rand::rngs::OsRng.fill_bytes(&mut nonce_bytes);
     let nonce = Nonce::from_slice(&nonce_bytes);
@@ -162,8 +161,7 @@ pub fn decrypt(key: &Key, data: &[u8]) -> Result<Vec<u8>> {
         return Err(EnclaveError::crypto("ciphertext too short"));
     }
     let (nonce_bytes, ciphertext) = data.split_at(NONCE_LEN);
-    let cipher =
-        Aes256Gcm::new_from_slice(key).map_err(|e| EnclaveError::crypto(e.to_string()))?;
+    let cipher = Aes256Gcm::new_from_slice(key).map_err(|e| EnclaveError::crypto(e.to_string()))?;
     let nonce = Nonce::from_slice(nonce_bytes);
     cipher
         .decrypt(nonce, ciphertext)

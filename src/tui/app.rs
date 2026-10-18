@@ -1,41 +1,41 @@
 //! Full-screen terminal UI built on ratatui (opencode-style layout).
 
-use std::io::{Stdout, stdout};
+use std::io::{stdout, Stdout};
 use std::path::Path;
 use std::time::Duration;
 
+use crossterm::cursor::SetCursorStyle;
 use crossterm::event::{
     DisableFocusChange, DisableMouseCapture, EnableFocusChange, EnableMouseCapture, Event,
     EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
 };
-use crossterm::cursor::SetCursorStyle;
 use crossterm::execute;
 use crossterm::terminal::{
-    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use futures::StreamExt;
-use ratatui::Frame;
-use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Alignment, Constraint, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Padding, Paragraph, Wrap};
+use ratatui::Frame;
+use ratatui::Terminal;
 
 use crate::config::{Action, GuardMode, GuardSettings, ToolsSettings};
-use crate::core::engine::{AgentMode, AgentStep, ApprovedGate, ChatEngine};
 use crate::core::attachment::Attachment;
-use crate::core::message::{Role, ToolCall};
 use crate::core::builtin_tools::FileChange;
+use crate::core::engine::{AgentMode, AgentStep, ApprovedGate, ChatEngine};
+use crate::core::message::{Role, ToolCall};
 use crate::core::tools::{self, Proposal};
 use crate::error::Result;
-use crate::privacy::SessionInfo;
 use crate::privacy::guard::{self, Finding, Redactor};
 use crate::privacy::SecureCredentials;
+use crate::privacy::SessionInfo;
 use crate::providers::{ChunkStream, OpenRouterAccount, OpenRouterModel};
+use crate::tui::keybinds::{BindAction, Keybinds};
 use crate::tui::markdown;
 use crate::tui::theme::Palette;
-use crate::tui::keybinds::{BindAction, Keybinds};
 
 /// Sidebar width in cells; hidden on narrow terminals.
 const SIDEBAR_WIDTH: u16 = 28;
@@ -55,8 +55,7 @@ const EFFORT_OPTIONS: &[(&str, &str)] = &[
 // the header, sidebar, info panel, input and footer use a slightly lighter
 // surface colour.
 /// Active colour palette (read at every draw, switchable at runtime via `/theme`).
-static PALETTE: std::sync::RwLock<Palette> =
-    std::sync::RwLock::new(crate::tui::theme::DEFAULT);
+static PALETTE: std::sync::RwLock<Palette> = std::sync::RwLock::new(crate::tui::theme::DEFAULT);
 
 /// The active palette (defaults to the built-in theme).
 fn pal() -> Palette {
@@ -146,7 +145,10 @@ const PALETTE_COMMANDS: &[(&str, &str)] = &[
     ("/merge", "merge a branch's new turns into this one"),
     ("/graph", "navigable branch graph (Enter to open)"),
     ("/blame", "locate which turn/branch introduced some text"),
-    ("/provenance", "what left the machine for this session (ledger)"),
+    (
+        "/provenance",
+        "what left the machine for this session (ledger)",
+    ),
     ("/clear", "wipe the current session history"),
     ("/model", "pick a model (saved for next launches)"),
     ("/models", "alias of /model"),
@@ -775,14 +777,28 @@ async fn run_app(
                         proposals,
                         idx,
                         approve_all,
-                    } => (proposals.get(*idx).cloned(), *idx, proposals.len(), *approve_all),
+                    } => (
+                        proposals.get(*idx).cloned(),
+                        *idx,
+                        proposals.len(),
+                        *approve_all,
+                    ),
                     _ => (None, 0, 0, false),
                 };
 
                 // "[a]ll" already approved: execute without waiting for keys.
                 if approve_all {
                     if let Some(p) = &proposal {
-                        execute_proposal(engine, &mut transcript, &mut status, p, tools_cfg.timeout_secs, tools_cfg.max_output_bytes, tools_cfg.sandbox).await?;
+                        execute_proposal(
+                            engine,
+                            &mut transcript,
+                            &mut status,
+                            p,
+                            tools_cfg.timeout_secs,
+                            tools_cfg.max_output_bytes,
+                            tools_cfg.sandbox,
+                        )
+                        .await?;
                     }
                     advance_proposal(&mut phase, &mut status, idx, total);
                     continue;
@@ -800,7 +816,16 @@ async fn run_app(
                         }
                         ProposalAction::ApproveAll => {
                             if let Some(p) = &proposal {
-                                execute_proposal(engine, &mut transcript, &mut status, p, tools_cfg.timeout_secs, tools_cfg.max_output_bytes, tools_cfg.sandbox).await?;
+                                execute_proposal(
+                                    engine,
+                                    &mut transcript,
+                                    &mut status,
+                                    p,
+                                    tools_cfg.timeout_secs,
+                                    tools_cfg.max_output_bytes,
+                                    tools_cfg.sandbox,
+                                )
+                                .await?;
                             }
                             if let Phase::Confirming { approve_all, .. } = &mut phase {
                                 *approve_all = true;
@@ -809,7 +834,16 @@ async fn run_app(
                         }
                         ProposalAction::Approve => {
                             if let Some(p) = &proposal {
-                                execute_proposal(engine, &mut transcript, &mut status, p, tools_cfg.timeout_secs, tools_cfg.max_output_bytes, tools_cfg.sandbox).await?;
+                                execute_proposal(
+                                    engine,
+                                    &mut transcript,
+                                    &mut status,
+                                    p,
+                                    tools_cfg.timeout_secs,
+                                    tools_cfg.max_output_bytes,
+                                    tools_cfg.sandbox,
+                                )
+                                .await?;
                             }
                             advance_proposal(&mut phase, &mut status, idx, total);
                         }
@@ -1042,8 +1076,7 @@ async fn run_app(
                                                         s.working_session =
                                                             Some(engine.session.id.clone())
                                                     });
-                                                    privacy =
-                                                        privacy_snapshot(engine, &guard_cfg);
+                                                    privacy = privacy_snapshot(engine, &guard_cfg);
                                                     status = format!(
                                                         "checked out '{}'",
                                                         engine.session.name
@@ -1075,11 +1108,13 @@ async fn run_app(
                             match key.code {
                                 KeyCode::Up => palette_sel = palette_sel.saturating_sub(1),
                                 KeyCode::Down => {
-                                    palette_sel =
-                                        (palette_sel + 1).min(PALETTE_COMMANDS.len().saturating_sub(1));
+                                    palette_sel = (palette_sel + 1)
+                                        .min(PALETTE_COMMANDS.len().saturating_sub(1));
                                 }
                                 KeyCode::Home => palette_sel = 0,
-                                KeyCode::End => palette_sel = PALETTE_COMMANDS.len().saturating_sub(1),
+                                KeyCode::End => {
+                                    palette_sel = PALETTE_COMMANDS.len().saturating_sub(1)
+                                }
                                 KeyCode::Enter => {
                                     if let Some((cmd, _)) = PALETTE_COMMANDS.get(palette_sel) {
                                         input = format!("{cmd} ");
@@ -1253,7 +1288,10 @@ async fn run_app(
                                         fs.query.pop();
                                         fs.sel = 0;
                                     }
-                                    (KeyCode::Char(ch), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
+                                    (
+                                        KeyCode::Char(ch),
+                                        KeyModifiers::NONE | KeyModifiers::SHIFT,
+                                    ) => {
                                         fs.query.push(ch);
                                         fs.sel = 0;
                                     }
@@ -1299,7 +1337,10 @@ async fn run_app(
                                         ss.sel = 0;
                                         changed = true;
                                     }
-                                    (KeyCode::Char(ch), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
+                                    (
+                                        KeyCode::Char(ch),
+                                        KeyModifiers::NONE | KeyModifiers::SHIFT,
+                                    ) => {
                                         ss.query.push(ch);
                                         ss.sel = 0;
                                         changed = true;
@@ -1455,34 +1496,29 @@ async fn run_app(
                                     if let Some(info) = sessions.get(sel) {
                                         picker = false;
                                         input = info.name.clone();
-                                        phase =
-                                            Phase::Renaming { id: Some(info.id.clone()) };
+                                        phase = Phase::Renaming {
+                                            id: Some(info.id.clone()),
+                                        };
                                         status = format!("renaming '{}'", info.name);
                                     }
                                 }
                                 KeyCode::Char('d') => {
-                                    match sessions
-                                        .get(sel)
-                                        .map(|s| (s.id.clone(), s.name.clone()))
+                                    match sessions.get(sel).map(|s| (s.id.clone(), s.name.clone()))
                                     {
                                         Some((id, _)) if id == engine.session.id => {
                                             status = "cannot delete the active session".into();
                                         }
                                         Some((id, name)) => {
                                             let _ = engine.memory.delete_session(&id);
-                                            sessions = engine
-                                                .memory
-                                                .list_sessions()
-                                                .unwrap_or_default();
+                                            sessions =
+                                                engine.memory.list_sessions().unwrap_or_default();
                                             sel = sel.min(sessions.len().saturating_sub(1));
                                             status = format!("deleted '{name}'");
                                         }
                                         None => {}
                                     }
                                 }
-                                KeyCode::Esc
-                                | KeyCode::Char('s')
-                                | KeyCode::Char('q') => {
+                                KeyCode::Esc | KeyCode::Char('s') | KeyCode::Char('q') => {
                                     picker = false;
                                     status = "ready".into();
                                 }
@@ -1527,7 +1563,10 @@ async fn run_app(
                                     }
                                     None => status = "no session selected".into(),
                                 },
-                                KeyCode::Char('d') => match sessions.get(sel).map(|s| (s.id.clone(), s.name.clone())) {
+                                KeyCode::Char('d') => match sessions
+                                    .get(sel)
+                                    .map(|s| (s.id.clone(), s.name.clone()))
+                                {
                                     Some((id, _name)) if id == engine.session.id => {
                                         status = "cannot delete the active session — select another first".into();
                                     }
@@ -2945,8 +2984,7 @@ async fn run_app(
                                                 });
                                             }
                                             scroll = 0;
-                                            status =
-                                                "command finished — output kept local".into();
+                                            status = "command finished — output kept local".into();
                                         }
                                         Err(e) => status = format!("error: {e}"),
                                     }
@@ -3045,12 +3083,8 @@ async fn run_app(
                             let filtered = filter_entries(&model_entries, &model_filter);
                             let last = filtered.len().saturating_sub(1);
                             match m.kind {
-                                MouseEventKind::ScrollUp => {
-                                    model_sel = model_sel.saturating_sub(1)
-                                }
-                                MouseEventKind::ScrollDown => {
-                                    model_sel = (model_sel + 1).min(last)
-                                }
+                                MouseEventKind::ScrollUp => model_sel = model_sel.saturating_sub(1),
+                                MouseEventKind::ScrollDown => model_sel = (model_sel + 1).min(last),
                                 _ => {}
                             }
                             continue;
@@ -3192,15 +3226,12 @@ async fn run_app(
                                         Ok(s) => {
                                             engine.session = s;
                                             transcript.clear();
-                                            sessions = engine
-                                                .memory
-                                                .list_sessions()
-                                                .unwrap_or_default();
+                                            sessions =
+                                                engine.memory.list_sessions().unwrap_or_default();
                                             sel = 0;
                                             scroll = 0;
                                             persist_settings(|st| {
-                                                st.working_session =
-                                                    Some(engine.session.id.clone())
+                                                st.working_session = Some(engine.session.id.clone())
                                             });
                                             status = format!("created session '{name}'");
                                             phase = Phase::Idle;
@@ -3325,7 +3356,10 @@ fn list_window(len: usize, sel: usize, visible: usize) -> (usize, usize) {
 
 /// The current `@file` completion query (text after a trailing `@` token).
 fn at_query(input: &str) -> Option<String> {
-    let token = input.rsplit(|c: char| c.is_whitespace()).next().unwrap_or("");
+    let token = input
+        .rsplit(|c: char| c.is_whitespace())
+        .next()
+        .unwrap_or("");
     token.strip_prefix('@').map(|q| q.to_string())
 }
 
@@ -3560,7 +3594,17 @@ async fn begin_agentic_turn(
     engine.begin_agentic_with(text, attachments)?;
     *agent_iters = 0;
     *status = format!("{} working… (agent)", engine.provider_name());
-    agentic_advance(engine, transcript, status, phase, changes, agent_iters, defs, ctx).await
+    agentic_advance(
+        engine,
+        transcript,
+        status,
+        phase,
+        changes,
+        agent_iters,
+        defs,
+        ctx,
+    )
+    .await
 }
 
 /// Ask the provider for the next step and react to it.
@@ -3915,7 +3959,10 @@ fn wrapped_height(lines: &[Line], width: u16) -> u16 {
 fn project_context(workspace: &std::path::Path) -> String {
     let mut s = String::new();
     s.push_str("Project files (relative paths):\n");
-    for p in crate::core::builtin_tools::list_files(workspace).iter().take(200) {
+    for p in crate::core::builtin_tools::list_files(workspace)
+        .iter()
+        .take(200)
+    {
         if let Ok(rel) = p.strip_prefix(workspace) {
             s.push_str(&format!("- {}\n", rel.display()));
         }
@@ -4180,10 +4227,7 @@ fn draw_ui(
     if let Some(acc) = account {
         let s = acc.summary();
         if s != "no account data" {
-            header_right = format!(
-                "{} · {s} ",
-                header_right.trim_end()
-            );
+            header_right = format!("{} · {s} ", header_right.trim_end());
         }
     }
     f.render_widget(
@@ -4217,19 +4261,12 @@ fn draw_ui(
         );
         cols[1]
     } else if show_sidebar {
-        let cols = Layout::horizontal([
-            Constraint::Length(SIDEBAR_WIDTH),
-            Constraint::Min(1),
-        ])
-        .split(main[1]);
+        let cols = Layout::horizontal([Constraint::Length(SIDEBAR_WIDTH), Constraint::Min(1)])
+            .split(main[1]);
         draw_sidebar(f, cols[0], engine, sessions, sel, focus);
         cols[1]
     } else if show_info {
-        let cols = Layout::horizontal([
-            Constraint::Min(1),
-            Constraint::Length(34),
-        ])
-        .split(main[1]);
+        let cols = Layout::horizontal([Constraint::Min(1), Constraint::Length(34)]).split(main[1]);
         draw_info_panel(
             f,
             cols[1],
@@ -4263,7 +4300,9 @@ fn draw_ui(
                 lines: entry
                     .text
                     .lines()
-                    .map(|l| Line::from(Span::styled(l.to_string(), Style::default().fg(pal().text))))
+                    .map(|l| {
+                        Line::from(Span::styled(l.to_string(), Style::default().fg(pal().text)))
+                    })
                     .collect(),
                 bg: pal().surface_hi,
                 accent: pal().accent,
@@ -4273,7 +4312,9 @@ fn draw_ui(
                 if entry.text.trim().is_empty() {
                     ls = vec![Line::from(Span::styled(
                         "…",
-                        Style::default().fg(pal().dim).add_modifier(Modifier::ITALIC),
+                        Style::default()
+                            .fg(pal().dim)
+                            .add_modifier(Modifier::ITALIC),
                     ))];
                 }
                 Card {
@@ -4285,7 +4326,9 @@ fn draw_ui(
             Speaker::System => Card {
                 lines: vec![Line::from(Span::styled(
                     entry.text.clone(),
-                    Style::default().fg(pal().dim).add_modifier(Modifier::ITALIC),
+                    Style::default()
+                        .fg(pal().dim)
+                        .add_modifier(Modifier::ITALIC),
                 ))],
                 bg: pal().bg,
                 accent: pal().bg,
@@ -4297,10 +4340,11 @@ fn draw_ui(
                     .map(|l| {
                         // Diff lines get their own colours: + added, - removed.
                         let style = if l.starts_with('+') {
-                            Style::default().fg(pal().green)
+                            Style::default().fg(pal().green).bg(Color::Rgb(0, 42, 18))
                         } else if l.starts_with('-') {
-                            Style::default().fg(pal().red)
-                        } else if l.starts_with("@@") || l.starts_with('…') {
+                            Style::default().fg(pal().red).bg(Color::Rgb(58, 20, 20))
+                        } else if l.starts_with("@@") || l.starts_with("  ") || l.starts_with('…')
+                        {
                             Style::default().fg(pal().dim)
                         } else {
                             Style::default().fg(pal().yellow)
@@ -4465,7 +4509,9 @@ fn draw_ui(
         phase,
         Phase::Confirming { .. } | Phase::ToolConfirm { .. } | Phase::Guard { .. }
     ) {
-        Style::default().fg(pal().yellow).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(pal().yellow)
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(pal().dim)
     };
@@ -4480,8 +4526,8 @@ fn draw_ui(
         String::new()
     };
 
-    let foot = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(main[4]);
+    let foot =
+        Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).split(main[4]);
     let mut left = vec![
         Span::styled(
             format!(" {} · {} ", engine.provider_name(), engine.model),
@@ -4490,10 +4536,7 @@ fn draw_ui(
                 .bg(pal().accent)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(
-            format!(" {shown_status}{scroll_note}"),
-            status_style,
-        ),
+        Span::styled(format!(" {shown_status}{scroll_note}"), status_style),
     ];
     if !attachments.is_empty() {
         left.push(Span::styled(
@@ -4531,7 +4574,9 @@ fn draw_ui(
         overlay_bg(f, box_area, pal().accent);
         let mut lines = vec![Line::from(Span::styled(
             "shortcuts",
-            Style::default().fg(pal().accent).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(pal().accent)
+                .add_modifier(Modifier::BOLD),
         ))];
         lines.extend(welcome_lines(tools_enabled));
         lines.push(plain_line(""));
@@ -4558,7 +4603,9 @@ fn draw_ui(
         overlay_bg(f, box_area, pal().accent);
         let mut lines: Vec<Line> = vec![Line::from(Span::styled(
             "sessions",
-            Style::default().fg(pal().accent).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(pal().accent)
+                .add_modifier(Modifier::BOLD),
         ))];
         if sessions.is_empty() {
             lines.push(Line::from(Span::styled(
@@ -4630,7 +4677,9 @@ fn draw_ui(
         };
         let mut lines: Vec<Line> = vec![Line::from(Span::styled(
             title,
-            Style::default().fg(pal().accent).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(pal().accent)
+                .add_modifier(Modifier::BOLD),
         ))];
         lines.push(Line::from(vec![
             Span::styled("  filter: ", Style::default().fg(pal().dim)),
@@ -4666,7 +4715,9 @@ fn draw_ui(
                 let marker = if selected { "› " } else { "  " };
                 let bullet = if current { "●" } else { "○" };
                 let prefix = format!("{marker}{bullet} ");
-                let id_cols = 40.min(content_w.saturating_sub(prefix.chars().count() + 1)).max(4);
+                let id_cols = 40
+                    .min(content_w.saturating_sub(prefix.chars().count() + 1))
+                    .max(4);
                 let id_trim: String = id.chars().take(id_cols).collect();
                 let used = prefix.chars().count() + id_cols + 1;
                 let meta_trim: String = meta.chars().take(content_w.saturating_sub(used)).collect();
@@ -4721,8 +4772,8 @@ fn draw_ui(
             height: h,
         };
         overlay_bg(f, box_area, pal().accent);
-        let overlay = Paragraph::new(lines)
-            .block(Block::default().padding(Padding::new(2, 1, 0, 0)));
+        let overlay =
+            Paragraph::new(lines).block(Block::default().padding(Padding::new(2, 1, 0, 0)));
         f.render_widget(overlay, box_area);
     }
     // Reasoning-effort picker overlay (opened automatically after choosing a
@@ -4732,7 +4783,9 @@ fn draw_ui(
         let current = engine.reasoning_effort.as_deref().unwrap_or("default");
         let mut lines: Vec<Line> = vec![Line::from(Span::styled(
             format!("reasoning effort — {}", engine.model),
-            Style::default().fg(pal().accent).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(pal().accent)
+                .add_modifier(Modifier::BOLD),
         ))];
         lines.push(Line::from(Span::styled(
             "  used by models that support it (OpenRouter/OpenAI)",
@@ -4763,10 +4816,14 @@ fn draw_ui(
             ]));
         }
         lines.push(Line::from(
-            [chip("↑↓", "move"), chip("Enter", "choose"), chip("Esc", "close")]
-                .into_iter()
-                .flatten()
-                .collect::<Vec<Span>>(),
+            [
+                chip("↑↓", "move"),
+                chip("Enter", "choose"),
+                chip("Esc", "close"),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<Span>>(),
         ));
         let h = (lines.len() as u16 + 2).min(area.height.saturating_sub(1));
         let box_area = Rect {
@@ -4776,8 +4833,8 @@ fn draw_ui(
             height: h,
         };
         overlay_bg(f, box_area, pal().accent);
-        let overlay = Paragraph::new(lines)
-            .block(Block::default().padding(Padding::new(2, 1, 0, 0)));
+        let overlay =
+            Paragraph::new(lines).block(Block::default().padding(Padding::new(2, 1, 0, 0)));
         f.render_widget(overlay, box_area);
     }
     // Command palette (Ctrl-P): pick a slash command to insert into the input.
@@ -4788,14 +4845,23 @@ fn draw_ui(
         let (start, end) = list_window(PALETTE_COMMANDS.len(), palette_sel, visible);
         let mut lines: Vec<Line> = Vec::new();
         lines.push(Line::from(Span::styled(
-            format!("command palette · {}/{}", palette_sel + 1, PALETTE_COMMANDS.len()),
-            Style::default().fg(pal().accent).add_modifier(Modifier::BOLD),
+            format!(
+                "command palette · {}/{}",
+                palette_sel + 1,
+                PALETTE_COMMANDS.len()
+            ),
+            Style::default()
+                .fg(pal().accent)
+                .add_modifier(Modifier::BOLD),
         )));
         for (j, (cmd, desc)) in PALETTE_COMMANDS[start..end].iter().enumerate() {
             let i = start + j;
             let selected = i == palette_sel;
             let cmd_style = if selected {
-                Style::default().fg(pal().bg).bg(pal().accent).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(pal().bg)
+                    .bg(pal().accent)
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(pal().accent)
             };
@@ -4810,10 +4876,14 @@ fn draw_ui(
             ]));
         }
         lines.push(Line::from(
-            [chip("↑↓", "move"), chip("Enter", "insert"), chip("Esc", "close")]
-                .into_iter()
-                .flatten()
-                .collect::<Vec<Span>>(),
+            [
+                chip("↑↓", "move"),
+                chip("Enter", "insert"),
+                chip("Esc", "close"),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<Span>>(),
         ));
         let h = (lines.len() as u16 + 2).min(area.height.saturating_sub(1));
         let box_area = Rect {
@@ -4834,13 +4904,18 @@ fn draw_ui(
         let w = 46.min(area.width.saturating_sub(4));
         let mut lines: Vec<Line> = vec![Line::from(Span::styled(
             "theme",
-            Style::default().fg(pal().accent).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(pal().accent)
+                .add_modifier(Modifier::BOLD),
         ))];
         for (i, name) in names.iter().enumerate() {
             let selected = i == theme_sel;
             let bullet = if *name == theme_current { "●" } else { "○" };
             let style = if selected {
-                Style::default().fg(pal().bg).bg(pal().accent).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(pal().bg)
+                    .bg(pal().accent)
+                    .add_modifier(Modifier::BOLD)
             } else if *name == theme_current {
                 Style::default().fg(pal().green)
             } else {
@@ -4852,10 +4927,14 @@ fn draw_ui(
             )));
         }
         lines.push(Line::from(
-            [chip("↑↓", "move"), chip("Enter", "choose"), chip("Esc", "close")]
-                .into_iter()
-                .flatten()
-                .collect::<Vec<Span>>(),
+            [
+                chip("↑↓", "move"),
+                chip("Enter", "choose"),
+                chip("Esc", "close"),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<Span>>(),
         ));
         let h = (lines.len() as u16 + 2).min(area.height.saturating_sub(1));
         let box_area = Rect {
@@ -4876,18 +4955,27 @@ fn draw_ui(
         let w = 56.min(area.width.saturating_sub(4));
         let mut lines: Vec<Line> = vec![Line::from(Span::styled(
             "provider — switch model backend",
-            Style::default().fg(pal().accent).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(pal().accent)
+                .add_modifier(Modifier::BOLD),
         ))];
         for (i, name) in names.iter().enumerate() {
             let selected = i == provider_sel;
-            let bullet = if *name == engine.provider_name() { "●" } else { "○" };
+            let bullet = if *name == engine.provider_name() {
+                "●"
+            } else {
+                "○"
+            };
             let hint = if crate::providers::requires_api_key(name) {
                 "needs an API key"
             } else {
                 "local (no key)"
             };
             let style = if selected {
-                Style::default().fg(pal().bg).bg(pal().accent).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(pal().bg)
+                    .bg(pal().accent)
+                    .add_modifier(Modifier::BOLD)
             } else if *name == engine.provider_name() {
                 Style::default().fg(pal().green)
             } else {
@@ -4899,15 +4987,22 @@ fn draw_ui(
                 Style::default().fg(pal().dim)
             };
             lines.push(Line::from(vec![
-                Span::styled(format!("{} {bullet} {name:<10}", if selected { "›" } else { " " }), style),
+                Span::styled(
+                    format!("{} {bullet} {name:<10}", if selected { "›" } else { " " }),
+                    style,
+                ),
                 Span::styled(hint.to_string(), hint_style),
             ]));
         }
         lines.push(Line::from(
-            [chip("↑↓", "move"), chip("Enter", "switch"), chip("Esc", "close")]
-                .into_iter()
-                .flatten()
-                .collect::<Vec<Span>>(),
+            [
+                chip("↑↓", "move"),
+                chip("Enter", "switch"),
+                chip("Esc", "close"),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<Span>>(),
         ));
         let h = (lines.len() as u16 + 2).min(area.height.saturating_sub(1));
         let box_area = Rect {
@@ -5032,7 +5127,9 @@ fn draw_ui(
                     .bg(pal().accent)
                     .add_modifier(Modifier::BOLD)
             } else if row.is_current {
-                Style::default().fg(pal().green).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(pal().green)
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(pal().text)
             };
@@ -5060,7 +5157,9 @@ fn draw_ui(
                 "copy — {} line(s) selected · y copy · a all · e last reply · Esc",
                 b.saturating_sub(a) + 1
             ),
-            Style::default().fg(pal().accent).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(pal().accent)
+                .add_modifier(Modifier::BOLD),
         )));
         for i in start..end {
             let selected = i >= a && i <= b;
@@ -5111,7 +5210,9 @@ fn draw_ui(
         lines.push(Line::from(vec![
             Span::styled(
                 "find ",
-                Style::default().fg(pal().accent).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(pal().accent)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::styled(fs.query.clone(), Style::default().fg(pal().text)),
             Span::styled(
@@ -5120,7 +5221,9 @@ fn draw_ui(
             ),
         ]));
         if matches.is_empty() {
-            lines.push(plain_line("  no matches — keep typing (Ctrl-U clears), Esc closes"));
+            lines.push(plain_line(
+                "  no matches — keep typing (Ctrl-U clears), Esc closes",
+            ));
         } else {
             for (rank, &idx) in matches[start..end].iter().enumerate() {
                 let selected = start + rank == fs.sel;
@@ -5167,7 +5270,9 @@ fn draw_ui(
         lines.push(Line::from(vec![
             Span::styled(
                 "search ",
-                Style::default().fg(pal().accent).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(pal().accent)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::styled(ss.query.clone(), Style::default().fg(pal().text)),
             Span::styled(
@@ -5176,7 +5281,9 @@ fn draw_ui(
             ),
         ]));
         if ss.hits.is_empty() {
-            lines.push(plain_line("  type to search the encrypted database, Enter opens, Esc closes"));
+            lines.push(plain_line(
+                "  type to search the encrypted database, Enter opens, Esc closes",
+            ));
         } else {
             for (rank, h) in ss.hits[start..end].iter().enumerate() {
                 let selected = start + rank == ss.sel;
@@ -5430,7 +5537,13 @@ fn decisions_to_text(ds: &[crate::privacy::Decision]) -> String {
             };
             let first = d.body.lines().next().unwrap_or("");
             if first.is_empty() {
-                format!("{}  [{}] {}{}", &d.id[..8.min(d.id.len())], d.status, truncate(&d.title, 70), tags)
+                format!(
+                    "{}  [{}] {}{}",
+                    &d.id[..8.min(d.id.len())],
+                    d.status,
+                    truncate(&d.title, 70),
+                    tags
+                )
             } else {
                 format!(
                     "{}  [{}] {}{}\n        {}",
@@ -5452,7 +5565,7 @@ fn exposure_text(
     guard: &GuardSettings,
     tools: &ToolsSettings,
 ) -> crate::error::Result<String> {
-    use crate::privacy::exposure::{ScoreInputs, blast_radius, privacy_score};
+    use crate::privacy::exposure::{blast_radius, privacy_score, ScoreInputs};
 
     let summary = engine.memory.egress_summary(None)?;
     let br = blast_radius(&summary);
@@ -5476,7 +5589,11 @@ fn exposure_text(
     if br.providers.is_empty() {
         out.push_str("providers: (nothing recorded)\n");
     } else {
-        let p: Vec<String> = br.providers.iter().map(|(n, c)| format!("{n}×{c}")).collect();
+        let p: Vec<String> = br
+            .providers
+            .iter()
+            .map(|(n, c)| format!("{n}×{c}"))
+            .collect();
         out.push_str(&format!("providers: {}\n", p.join(", ")));
     }
     if br.kinds.is_empty() {
@@ -5538,12 +5655,18 @@ fn context_text(engine: &ChatEngine) -> String {
     }
     out.push_str(&format!(
         "taint: {}\n",
-        if r.taint { "on (flagged turns re-redacted)" } else { "off" }
+        if r.taint {
+            "on (flagged turns re-redacted)"
+        } else {
+            "off"
+        }
     ));
     if let Some(budget) = r.limit_tokens {
         let pct = ((r.est_tokens as f64 / budget as f64) * 100.0).round() as u64;
         let filled = ((r.est_tokens.min(budget) as f64 / budget as f64) * 10.0).round() as usize;
-        let bar: String = (0..10).map(|i| if i < filled { '#' } else { '-' }).collect();
+        let bar: String = (0..10)
+            .map(|i| if i < filled { '#' } else { '-' })
+            .collect();
         out.push_str(&format!(
             "total sent: {} chars · ~{} tokens\nbudget: {}/{} tokens ({pct}%) [{bar}]",
             r.total_chars, r.est_tokens, r.est_tokens, budget
@@ -5641,7 +5764,9 @@ fn welcome_lines(tools_enabled: bool) -> Vec<Line<'static>> {
         Line::from(vec![
             Span::styled(
                 format!("  {k:<10}"),
-                Style::default().fg(pal().accent).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(pal().accent)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::raw(d.to_string()),
         ])
@@ -5724,7 +5849,9 @@ fn welcome_lines(tools_enabled: bool) -> Vec<Line<'static>> {
         plain(""),
     ];
     if tools_enabled {
-        v.push(dim("  the assistant may propose shell commands: each one asks [y/n] first"));
+        v.push(dim(
+            "  the assistant may propose shell commands: each one asks [y/n] first",
+        ));
     } else {
         v.push(dim("  tools disabled: no shell proposals will be offered"));
     }
@@ -5764,7 +5891,9 @@ fn draw_info_panel(
     let label = |k: &str| Span::styled(format!("{k:<9}"), Style::default().fg(pal().dim));
     let mut lines: Vec<Line> = vec![Line::from(Span::styled(
         "info",
-        Style::default().fg(pal().accent).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(pal().accent)
+            .add_modifier(Modifier::BOLD),
     ))];
     lines.push(Line::from(vec![
         label("session"),
@@ -5795,7 +5924,11 @@ fn draw_info_panel(
         label("mode"),
         Span::styled(
             engine.mode.label().to_string(),
-            Style::default().fg(if engine.mode.is_plan() { pal().yellow } else { pal().text }),
+            Style::default().fg(if engine.mode.is_plan() {
+                pal().yellow
+            } else {
+                pal().text
+            }),
         ),
     ]));
     if let Some(rules) = &engine.rules {
@@ -5842,19 +5975,38 @@ fn draw_info_panel(
         label("tools"),
         Span::raw(if tools_enabled { "on" } else { "off" }),
     ]));
-    lines.push(Line::from(vec![label("guard"), Span::raw(guard_state.to_string())]));
+    lines.push(Line::from(vec![
+        label("guard"),
+        Span::raw(guard_state.to_string()),
+    ]));
     lines.push(Line::from(vec![
         label("air-gap"),
         Span::styled(
-            if engine.air_gap { "on (local only)" } else { "off" },
-            Style::default().fg(if engine.air_gap { pal().yellow } else { pal().dim }),
+            if engine.air_gap {
+                "on (local only)"
+            } else {
+                "off"
+            },
+            Style::default().fg(if engine.air_gap {
+                pal().yellow
+            } else {
+                pal().dim
+            }),
         ),
     ]));
     lines.push(Line::from(vec![
         label("routing"),
         Span::styled(
-            if engine.route_sensitive { "sensitive → local" } else { "off" },
-            Style::default().fg(if engine.route_sensitive { pal().green } else { pal().dim }),
+            if engine.route_sensitive {
+                "sensitive → local"
+            } else {
+                "off"
+            },
+            Style::default().fg(if engine.route_sensitive {
+                pal().green
+            } else {
+                pal().dim
+            }),
         ),
     ]));
     lines.push(plain_line(""));
@@ -5864,7 +6016,10 @@ fn draw_info_panel(
     )));
     lines.push(Line::from(vec![
         label("db"),
-        Span::raw(format!("{} · SQLCipher", fmt_bytes(engine.memory.disk_bytes()))),
+        Span::raw(format!(
+            "{} · SQLCipher",
+            fmt_bytes(engine.memory.disk_bytes())
+        )),
     ]));
     lines.push(Line::from(vec![
         label("data"),
@@ -5932,7 +6087,9 @@ fn draw_sidebar(
         } else {
             "sessions"
         },
-        Style::default().fg(pal().accent).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(pal().accent)
+            .add_modifier(Modifier::BOLD),
     ))];
     if sessions.is_empty() {
         lines.push(Line::from(Span::styled(
@@ -5941,7 +6098,11 @@ fn draw_sidebar(
         )));
     }
     for (i, s) in sessions.iter().enumerate() {
-        let marker = if s.id == engine.session.id { "●" } else { "○" };
+        let marker = if s.id == engine.session.id {
+            "●"
+        } else {
+            "○"
+        };
         let name: String = s.name.chars().take(18).collect();
         let style = if i == sel {
             Style::default()
@@ -5972,7 +6133,10 @@ mod tests {
     #[test]
     fn filter_entries_is_case_insensitive_and_matches_meta() {
         let entries = vec![
-            ("mistralai/mistral-large-4-0".to_string(), "131k ctx".to_string()),
+            (
+                "mistralai/mistral-large-4-0".to_string(),
+                "131k ctx".to_string(),
+            ),
             ("google/gemma-4-31b-it:free".to_string(), "FREE".to_string()),
             ("openai/gpt-4o".to_string(), "128k ctx".to_string()),
         ];
@@ -6080,9 +6244,15 @@ mod tests {
     fn alt_enter_is_newline_not_send() {
         use crossterm::event::{KeyCode, KeyModifiers};
         let alt = KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT);
-        assert!(matches!(handle_key(alt, &mut String::new()), KeyAction::Newline));
+        assert!(matches!(
+            handle_key(alt, &mut String::new()),
+            KeyAction::Newline
+        ));
         let plain = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
-        assert!(matches!(handle_key(plain, &mut String::new()), KeyAction::Send));
+        assert!(matches!(
+            handle_key(plain, &mut String::new()),
+            KeyAction::Send
+        ));
     }
 
     #[test]
@@ -6164,7 +6334,10 @@ mod tests {
             handle_proposal_key(press('y')),
             ProposalAction::Approve
         ));
-        assert!(matches!(handle_proposal_key(press('n')), ProposalAction::Deny));
+        assert!(matches!(
+            handle_proposal_key(press('n')),
+            ProposalAction::Deny
+        ));
         assert!(matches!(
             handle_proposal_key(press('a')),
             ProposalAction::ApproveAll

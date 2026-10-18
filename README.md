@@ -1,8 +1,77 @@
-# 🛡️ Enclave
+<p align="center">
+  <img src="assets/banner.png" alt="Enclave — privacy-first AI coding assistant" width="900">
+</p>
+
+<p align="center">
+  <a href="LICENSE"><img alt="license: MIT" src="https://img.shields.io/badge/license-MIT-a78bfa"></a>
+  <img alt="rust 1.99" src="https://img.shields.io/badge/rust-1.99-a78bfa">
+  <img alt="platforms macOS | Linux" src="https://img.shields.io/badge/platforms-macOS%20%7C%20Linux-a78bfa">
+  <img alt="telemetry: none" src="https://img.shields.io/badge/telemetry-none-7fd88f">
+  <img alt="tests: 221 passing" src="https://img.shields.io/badge/tests-221%20passing-7fd88f">
+</p>
+
+**Enclave** is a privacy-first AI coding assistant that runs in your terminal — and in a local web UI. Encryption is the main feature, not an afterthought: your conversations live in an encrypted SQLCipher database, your keys never sit in plaintext, and you can *see* — and prove — exactly what leaves your machine.
 
 > *A digital enclave: a fully isolated, encrypted space for your AI conversations.*
 
-**Enclave** is a privacy-first AI CLI where encryption is the main feature, not an afterthought. Like its geographic namesake, your data stays sealed inside.
+<p align="center">
+  <img src="assets/tui.png" alt="Enclave terminal UI" width="900">
+  <br>
+  <em>The terminal UI — sessions, transcript, live privacy bar and info panel.</em>
+</p>
+
+<p align="center">
+  <img src="assets/web.png" alt="Enclave local web UI" width="900">
+  <br>
+  <em>The local web UI (<code>enclave serve</code>, loopback + token): inline composer, code windows and before/after diffs.</em>
+</p>
+
+## Highlights
+
+- 🔐 **Encrypted by design** — SQLCipher (AES-256) memory, Argon2id master key, `mlock` + zeroize, core dumps disabled.
+- 🛡️ **Privacy guard** — detects emails, cards, secrets and names (local NER) *before* sending: send, redact or refuse. Flagged data is auto-scrubbed on later turns (taint tracking).
+- 🧾 **Egress ledger** — every outbound request is logged (payload fingerprint, model, redaction map) in a hash-chained, encrypted ledger; `/exposure` shows your blast-radius and a privacy score.
+- 🚧 **Air-gap & routing** — refuse remote providers entirely (`--airgap`), or route sensitive turns to local Ollama automatically.
+- ⚙️ **Agentic tools** — read/write/edit/apply_patch/glob/grep/run_shell with ask-always approval, OS sandbox and Plan/Build modes.
+- 🌿 **Conversation Git** — branch, merge, diff, graph, blame and provenance over your chat history.
+- 🖥️ **Two interfaces** — a full TUI and a local web UI, same engine, same encryption.
+- 🧠 **Project memory** — long-term memory, an ADR decision log, and a context inspector with a live token budget.
+- 🔌 **Local models** — OpenRouter, OpenAI, Anthropic or **Ollama** (fully offline, nothing leaves the machine).
+
+## Quickstart
+
+```bash
+# 1. Build / install
+cargo install --path .        # or: cargo build --release && ./target/release/enclave
+
+# 2. Store a provider key (written to a 0600 file; OS keychain optional)
+enclave keys set openrouter
+# ...or use an env var instead (no keychain prompt at all):
+# export ENCLAVE_OPENROUTER_API_KEY=sk-or-...
+
+# 3. Talk
+enclave tui                   # full-screen TUI
+enclave chat                  # line-based chat
+enclave serve                 # local web UI on 127.0.0.1 with a per-run token
+
+# 4. Fully offline (no API key, nothing leaves the machine)
+ollama pull llama3.1
+enclave tui --provider ollama
+```
+
+## Documentation
+
+| Document | What it covers |
+|----------|----------------|
+| [docs/INSTALL.md](docs/INSTALL.md) | Requirements, install methods, first run, providers, troubleshooting |
+| [docs/USAGE.md](docs/USAGE.md) | Full manual: CLI, TUI, web UI, privacy features, configuration |
+| [docs/architecture.md](docs/architecture.md) | Modules, data flow, and where data lives on disk |
+| [docs/privacy.md](docs/privacy.md) | Threat model and what is (not) encrypted |
+| [docs/tools.md](docs/tools.md) | Shell proposals, agentic tools, permissions |
+| [docs/providers.md](docs/providers.md) | Provider setup and how to add one |
+| [SECURITY.md](SECURITY.md) | How to report a vulnerability |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Development setup and PR workflow |
+| [CHANGELOG.md](CHANGELOG.md) | Release history |
 
 ## Why
 
@@ -11,7 +80,7 @@ Existing AI CLIs store your history in plaintext and your API keys in plain file
 | Aspect | Typical AI CLI | Enclave |
 |--------|----------------|---------|
 | Chat history | ❌ Plaintext on disk | ✅ AES-256 (SQLCipher) |
-| API keys | ❌ Plaintext file (`auth.json`) | ✅ OS Keychain |
+| API keys | ❌ Plaintext file (`auth.json`) | ✅ Local `keys.toml` (0600) or OS keychain |
 | Master key | ❌ None | ✅ Argon2id (or PBKDF2) + mlock/no-swap |
 | Telemetry | ⚠️ Unclear | ✅ Zero by default |
 | Local models | ⚠️ Limited | ✅ Ollama (100% offline) |
@@ -19,7 +88,7 @@ Existing AI CLIs store your history in plaintext and your API keys in plain file
 ## Security model
 
 - **Zero plaintext at rest** — chat history lives in a SQLCipher database (AES-256, HMAC-SHA512, 256k KDF iterations). Nothing readable without the master key.
-- **API keys in the OS keychain** — macOS Keychain, Windows Credential Manager, Linux Secret Service. Never in a file.
+- **API keys never in plaintext** — by default keys are stored in a local `keys.toml` with mode `0600`, or read from an environment variable (`ENCLAVE_<PROVIDER>_API_KEY`). The OS keychain (macOS Keychain, Windows Credential Manager, Linux Secret Service) is supported via `enclave keys set --keychain` and used as a fallback.
 - **Password-derived master key** — Argon2id (memory-hard) by default, PBKDF2-HMAC-SHA256 (600k) for legacy vaults, with a random 32-byte salt. The key is zeroized on drop and `mlock`-ed so it never hits swap; core dumps are disabled.
 - **Zero telemetry** — no data leaves the machine unless you chat with a remote provider. For sensitive content, use Ollama: fully offline.
 
@@ -819,6 +888,13 @@ It prints a one-off URL with a random per-run token, e.g.
   privacy bar and footer.
 - **Live chat** with server-sent-event streaming; everything is stored in the same
   encrypted vault (SQLCipher).
+- **Inline composer** — the message box lives at the end of the transcript (no fixed
+  bottom bar): your turns are right-aligned bubbles and the conversation reads as a
+  continuous Q&A. The view stays pinned to the newest message while replies stream in.
+- **Code windows & before/after diffs** — fenced code is shown in a framed window with
+  line numbers and a copy button; when a snippet is a diff (or a tool edits a file) it is
+  rendered as **two panes side by side with added lines in green and removed in red**.
+  The TUI mirrors this with framed `╭─`/`╰─` code windows and coloured diff lines.
 - **Agentic mode** (`agent` chip in the footer, or `/agent`): the assistant can run the
   built-in tools (read/write/edit files, glob, grep, run_shell, …); every call is shown in
   a yellow “nothing runs without your approval” panel with **Run / Skip** buttons, tool

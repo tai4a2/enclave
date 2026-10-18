@@ -89,7 +89,10 @@ async fn local_provider_is_never_restricted_by_policy() {
     )
     .unwrap();
     engine.policy = Some(policy(EgressAction::Block));
-    if let Err(e) = engine.stream_reply_with("write to a@b.com", Vec::new()).await {
+    if let Err(e) = engine
+        .stream_reply_with("write to a@b.com", Vec::new())
+        .await
+    {
         assert!(
             !e.to_string().contains("egress blocked by policy"),
             "local provider must not be blocked: {e}"

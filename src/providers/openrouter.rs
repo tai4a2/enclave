@@ -65,7 +65,10 @@ pub fn parse_models(value: &serde_json::Value) -> Vec<OpenRouterModel> {
             continue;
         };
         let price_str = |field: &str| -> f64 {
-            e["pricing"][field].as_str().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0)
+            e["pricing"][field]
+                .as_str()
+                .and_then(|s| s.parse::<f64>().ok())
+                .unwrap_or(0.0)
         };
         models.push(OpenRouterModel {
             id: id.to_string(),
@@ -313,14 +316,20 @@ fn auth(req: reqwest::RequestBuilder, api_key: &str) -> reqwest::RequestBuilder 
 /// Provider endpoints that serve `model` (author/slug).
 pub async fn fetch_endpoints(api_key: &str, model: &str) -> Result<Vec<OpenRouterEndpoint>> {
     let url = format!("https://openrouter.ai/api/v1/models/{model}/endpoints");
-    let r = auth(crate::providers::http::client().get(url), api_key).send().await?.error_for_status()?;
+    let r = auth(crate::providers::http::client().get(url), api_key)
+        .send()
+        .await?
+        .error_for_status()?;
     Ok(parse_endpoints(&r.json().await?))
 }
 
 /// Stats for a single generation id.
 pub async fn fetch_generation(api_key: &str, id: &str) -> Result<OpenRouterGeneration> {
     let url = format!("https://openrouter.ai/api/v1/generation?id={id}");
-    let r = auth(crate::providers::http::client().get(url), api_key).send().await?.error_for_status()?;
+    let r = auth(crate::providers::http::client().get(url), api_key)
+        .send()
+        .await?
+        .error_for_status()?;
     Ok(parse_generation(&r.json().await?))
 }
 
@@ -330,7 +339,10 @@ pub async fn fetch_activity(api_key: &str, date: Option<&str>) -> Result<serde_j
         .map(str::to_string)
         .unwrap_or_else(|| chrono::Utc::now().format("%Y-%m-%d").to_string());
     let url = format!("https://openrouter.ai/api/v1/activity?date={date}");
-    let r = auth(crate::providers::http::client().get(url), api_key).send().await?.error_for_status()?;
+    let r = auth(crate::providers::http::client().get(url), api_key)
+        .send()
+        .await?
+        .error_for_status()?;
     Ok(r.json().await?)
 }
 
@@ -349,10 +361,13 @@ pub async fn fetch_providers() -> Result<Vec<String>> {
 /// Provisioning-key management. These calls require a *provisioning* key, not a
 /// regular inference key.
 pub async fn list_keys(provisioning_key: &str) -> Result<serde_json::Value> {
-    let r = auth(crate::providers::http::client().get("https://openrouter.ai/api/v1/keys"), provisioning_key)
-        .send()
-        .await?
-        .error_for_status()?;
+    let r = auth(
+        crate::providers::http::client().get("https://openrouter.ai/api/v1/keys"),
+        provisioning_key,
+    )
+    .send()
+    .await?
+    .error_for_status()?;
     Ok(r.json().await?)
 }
 
@@ -365,11 +380,14 @@ pub async fn create_key(
     if let Some(l) = limit {
         body["limit"] = serde_json::json!(l);
     }
-    let r = auth(crate::providers::http::client().post("https://openrouter.ai/api/v1/keys"), provisioning_key)
-        .json(&body)
-        .send()
-        .await?
-        .error_for_status()?;
+    let r = auth(
+        crate::providers::http::client().post("https://openrouter.ai/api/v1/keys"),
+        provisioning_key,
+    )
+    .json(&body)
+    .send()
+    .await?
+    .error_for_status()?;
     Ok(r.json().await?)
 }
 
@@ -400,20 +418,26 @@ pub async fn update_key(
         body["limit"] = serde_json::json!(l);
     }
     let url = format!("https://openrouter.ai/api/v1/keys/{hash}");
-    let r = auth(crate::providers::http::client().patch(url), provisioning_key)
-        .json(&body)
-        .send()
-        .await?
-        .error_for_status()?;
+    let r = auth(
+        crate::providers::http::client().patch(url),
+        provisioning_key,
+    )
+    .json(&body)
+    .send()
+    .await?
+    .error_for_status()?;
     Ok(r.json().await?)
 }
 
 pub async fn delete_key(provisioning_key: &str, hash: &str) -> Result<serde_json::Value> {
     let url = format!("https://openrouter.ai/api/v1/keys/{hash}");
-    let r = auth(crate::providers::http::client().delete(url), provisioning_key)
-        .send()
-        .await?
-        .error_for_status()?;
+    let r = auth(
+        crate::providers::http::client().delete(url),
+        provisioning_key,
+    )
+    .send()
+    .await?
+    .error_for_status()?;
     Ok(r.json().await.unwrap_or(serde_json::json!({})))
 }
 
@@ -456,7 +480,9 @@ impl Provider for OpenRouterProvider {
         if !response.status().is_success() {
             let status = response.status();
             let text = response.text().await.unwrap_or_default();
-            return Err(EnclaveError::provider(format!("openrouter {status}: {text}")));
+            return Err(EnclaveError::provider(format!(
+                "openrouter {status}: {text}"
+            )));
         }
 
         let mut response_stream = response.bytes_stream();
@@ -528,7 +554,9 @@ impl Provider for OpenRouterProvider {
         if !response.status().is_success() {
             let status = response.status();
             let text = response.text().await.unwrap_or_default();
-            return Err(EnclaveError::provider(format!("openrouter {status}: {text}")));
+            return Err(EnclaveError::provider(format!(
+                "openrouter {status}: {text}"
+            )));
         }
 
         let value: serde_json::Value = response.json().await?;
@@ -582,7 +610,9 @@ mod tests {
         let models = parse_models(&json);
         assert_eq!(models.len(), 2);
         // Missing pricing degrades to 0 (free-flagged) rather than panicking.
-        assert!(models.iter().any(|m| m.id == "missing/pricing" && m.is_free()));
+        assert!(models
+            .iter()
+            .any(|m| m.id == "missing/pricing" && m.is_free()));
     }
 
     #[test]
@@ -654,6 +684,9 @@ mod tests {
     #[test]
     fn parse_providers_sorts_names() {
         let json = serde_json::json!({"data": [{"name": "B"}, {"name": "A"}, {"nope": 1}]});
-        assert_eq!(parse_providers(&json), vec!["A".to_string(), "B".to_string()]);
+        assert_eq!(
+            parse_providers(&json),
+            vec!["A".to_string(), "B".to_string()]
+        );
     }
 }

@@ -15,3 +15,5 @@ salt.bin
 .idea/
 .vscode/
 .DS_Store
+# Never commit a local key store
+keys.toml

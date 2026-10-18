@@ -36,7 +36,9 @@ fn memories_crud_and_search() {
     assert!(memory.set_memory_pinned(&id1, false).unwrap());
     assert!(!memory.get_memory(&id1).unwrap().unwrap().pinned);
 
-    assert!(memory.update_memory(&id1, "prefers light mode", "ui").unwrap());
+    assert!(memory
+        .update_memory(&id1, "prefers light mode", "ui")
+        .unwrap());
     assert_eq!(
         memory.get_memory(&id1).unwrap().unwrap().text,
         "prefers light mode"
@@ -88,7 +90,10 @@ fn memories_are_injected_into_the_system_prompt() {
     engine.reload_memories().unwrap();
 
     let text = engine.system_text().unwrap();
-    assert!(text.contains("Memory"), "system prompt should have a Memory section");
+    assert!(
+        text.contains("Memory"),
+        "system prompt should have a Memory section"
+    );
     assert!(text.contains("the user's name is Mauro"));
     assert!(
         !text.contains("secret local note"),
@@ -104,7 +109,13 @@ fn context_report_shows_composition_and_provenance() {
         .add_memory("the user prefers Rust", "pref", "note", None, false)
         .unwrap();
     memory
-        .add_decision(None, "Use SQLCipher", "encrypt the vault at rest", "security", "accepted")
+        .add_decision(
+            None,
+            "Use SQLCipher",
+            "encrypt the vault at rest",
+            "security",
+            "accepted",
+        )
         .unwrap();
 
     let sid = memory.create_session("t").unwrap();

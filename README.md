@@ -244,6 +244,16 @@ Also available in the TUI (`/context`) and the web UI (toolbar **context**
 button / `/context`). Nothing is sent by inspecting — it reads the same
 composition the engine would send.
 
+**Budget.** Set a soft token budget and the inspector shows a live usage bar,
+turning yellow past `warn_pct`% and red past 100% (rough estimate: one token per
+four characters):
+
+```toml
+[context]
+budget_tokens = 128000
+warn_pct = 80
+```
+
 ## Conversation branches (Conversation Git)
 
 Enclave can treat a conversation like **git treats code**: instead of a single

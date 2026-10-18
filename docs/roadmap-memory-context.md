@@ -57,6 +57,11 @@ senza consenso esplicito, coerente con `docs/security-roadmap.md`.
 9. **Context budgeter con quota per fonte.** Ogni turno un budget ripartito tra
    system / memoria di progetto / RAG / storico, con packing deterministico per
    priorità e **composizione del contesto visibile in tempo reale** (barra).
+   **Stato: implementato (v1).** Budget soft in token (`[context] budget_tokens` +
+   `warn_pct`, default 80) con stima token (caratteri/4) e barra di utilizzo in
+   `enclave context`, TUI `/context` (riga info panel che diventa gialla/rossa) e
+   web `/context`. (Manca ancora la quota per singola fonte e il packing
+   deterministico.)
 10. **Recupero ibrido = "contesto minimo sufficiente".** Invece di incollare tutto lo
     storico: selezione semantica (embedding locali) + lessicale (BM25) sotto un tetto
     di token. Meno costo, meno leakage, risposte più pulite.

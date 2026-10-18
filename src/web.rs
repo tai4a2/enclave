@@ -1273,6 +1273,9 @@ async fn api_context(
         "redactions": r.redactions,
         "taint": r.taint,
         "total_chars": r.total_chars,
+        "est_tokens": r.est_tokens,
+        "limit_tokens": r.limit_tokens,
+        "warn_pct": r.warn_pct,
     }))
     .into_response()
 }
@@ -2158,7 +2161,15 @@ async function openContext(){
   rows.push({k:'history',d:r.messages+' message(s) · '+r.history_chars+' chars'});
   rows.push({k:'redactions',d:r.redactions||'none'});
   rows.push({k:'taint',d:r.taint?'on (flagged turns re-redacted)':'off'});
-  rows.push({k:'total sent',d:r.total_chars+' chars'});
+  let total='~'+r.est_tokens+' tokens · '+r.total_chars+' chars';
+  if(r.limit_tokens){
+    const pct=Math.round(r.est_tokens/r.limit_tokens*100);
+    const filled=Math.round(Math.min(r.est_tokens,r.limit_tokens)/r.limit_tokens*10);
+    const bar='['+('#'.repeat(filled))+('-'.repeat(10-filled))+']';
+    total+=' · budget '+r.est_tokens+'/'+r.limit_tokens+' ('+pct+'%) '+bar;
+    if(pct>=r.warn_pct) rows.push({k:'⚠ budget',d:'over '+r.warn_pct+'% — consider /compact or trimming memory/decisions'});
+  }
+  rows.push({k:'total sent',d:total});
   openOverlay({title:'context this turn',rows,
     hint:'this is exactly what composes the request — Esc close',onPick:()=>{}});
 }

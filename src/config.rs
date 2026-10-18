@@ -446,6 +446,34 @@ impl Default for SecuritySettings {
     }
 }
 
+/// Context budgeting (`[context]`).
+///
+/// Enclave estimates the size of every outgoing request (roughly one token per
+/// four characters). When `budget_tokens` is set, the Context Inspector shows a
+/// usage bar and warns once the estimate crosses `warn_pct`% of the budget.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ContextSettings {
+    /// Soft budget in tokens (0 or absent = no budget shown).
+    #[serde(default)]
+    pub budget_tokens: Option<usize>,
+    /// Percentage of the budget at which the inspector warns (default 80).
+    #[serde(default = "default_warn_pct")]
+    pub warn_pct: u8,
+}
+
+fn default_warn_pct() -> u8 {
+    80
+}
+
+impl Default for ContextSettings {
+    fn default() -> Self {
+        Self {
+            budget_tokens: None,
+            warn_pct: 80,
+        }
+    }
+}
+
 /// Persisted, non-sensitive application settings.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Settings {
@@ -519,6 +547,9 @@ pub struct Settings {
     /// Network egress: proxy, Tor and TLS pinning.
     #[serde(default)]
     pub network: NetworkSettings,
+    /// Context budgeting for the Context Inspector.
+    #[serde(default)]
+    pub context: ContextSettings,
 }
 
 fn default_true() -> bool {
@@ -569,6 +600,7 @@ impl Default for Settings {
             air_gap: false,
             routing: RoutingSettings::default(),
             network: NetworkSettings::default(),
+            context: ContextSettings::default(),
         }
     }
 }
@@ -629,6 +661,23 @@ mod tests {
         assert_eq!(srv.command, "mcp-time");
         assert_eq!(srv.tools, vec!["now".to_string()]);
         assert_eq!(srv.env_allow, vec!["TZ".to_string()]);
+    }
+
+    #[test]
+    fn context_defaults_and_parsing() {
+        let c = ContextSettings::default();
+        assert!(c.budget_tokens.is_none());
+        assert_eq!(c.warn_pct, 80);
+
+        let toml = "budget_tokens = 128000\nwarn_pct = 90\n";
+        let c: ContextSettings = toml::from_str(toml).expect("parse");
+        assert_eq!(c.budget_tokens, Some(128_000));
+        assert_eq!(c.warn_pct, 90);
+
+        // A bare section keeps the defaults.
+        let c: ContextSettings = toml::from_str("").expect("parse empty");
+        assert!(c.budget_tokens.is_none());
+        assert_eq!(c.warn_pct, 80);
     }
 
     #[test]

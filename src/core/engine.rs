@@ -29,6 +29,17 @@ pub struct ContextReport {
     pub taint: bool,
     /// Total size of everything sent, in characters.
     pub total_chars: usize,
+    /// Rough token estimate for the whole request (chars / 4).
+    pub est_tokens: usize,
+    /// Configured soft budget in tokens (from `[context] budget_tokens`).
+    pub limit_tokens: Option<usize>,
+    /// Percentage of the budget at which the inspector warns.
+    pub warn_pct: u8,
+}
+
+/// Rough token estimate: about one token per four characters.
+pub fn estimate_tokens(chars: usize) -> usize {
+    chars.div_ceil(4)
 }
 
 use std::collections::HashMap;
@@ -212,6 +223,10 @@ pub struct ChatEngine {
     pub dlp_judge: Option<String>,
     /// Action taken when the DLP judge flags a payload as sensitive.
     pub judge_action: EgressAction,
+    /// Soft context budget in tokens (from `[context] budget_tokens`).
+    pub context_budget: Option<usize>,
+    /// Percentage of the budget at which the inspector warns.
+    pub context_warn_pct: u8,
 }
 
 impl ChatEngine {
@@ -251,6 +266,8 @@ impl ChatEngine {
             local_provider: None,
             dlp_judge: None,
             judge_action: EgressAction::Allow,
+            context_budget: None,
+            context_warn_pct: 80,
         }
     }
 
@@ -310,6 +327,8 @@ impl ChatEngine {
             local_provider: None,
             dlp_judge: None,
             judge_action: EgressAction::Allow,
+            context_budget: None,
+            context_warn_pct: 80,
         })
     }
 
@@ -561,6 +580,9 @@ impl ChatEngine {
                 .unwrap_or_default(),
             taint: self.taint && self.session.messages.iter().any(|m| m.tainted),
             total_chars,
+            est_tokens: estimate_tokens(total_chars),
+            limit_tokens: self.context_budget,
+            warn_pct: self.context_warn_pct,
         }
     }
 

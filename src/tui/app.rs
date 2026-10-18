@@ -5537,10 +5537,29 @@ fn context_text(engine: &ChatEngine) -> String {
         out.push_str(&format!("redactions: {}\n", r.redactions));
     }
     out.push_str(&format!(
-        "taint: {}\ntotal sent: {} chars",
-        if r.taint { "on (flagged turns re-redacted)" } else { "off" },
-        r.total_chars
+        "taint: {}\n",
+        if r.taint { "on (flagged turns re-redacted)" } else { "off" }
     ));
+    if let Some(budget) = r.limit_tokens {
+        let pct = ((r.est_tokens as f64 / budget as f64) * 100.0).round() as u64;
+        let filled = ((r.est_tokens.min(budget) as f64 / budget as f64) * 10.0).round() as usize;
+        let bar: String = (0..10).map(|i| if i < filled { '#' } else { '-' }).collect();
+        out.push_str(&format!(
+            "total sent: {} chars · ~{} tokens\nbudget: {}/{} tokens ({pct}%) [{bar}]",
+            r.total_chars, r.est_tokens, r.est_tokens, budget
+        ));
+        if pct >= r.warn_pct as u64 {
+            out.push_str(&format!(
+                "\n⚠ over {}% of the budget — consider /compact, /clear or trimming memories/decisions",
+                r.warn_pct
+            ));
+        }
+    } else {
+        out.push_str(&format!(
+            "total sent: {} chars · ~{} tokens (set [context] budget_tokens to track a budget)",
+            r.total_chars, r.est_tokens
+        ));
+    }
     out
 }
 
@@ -5787,10 +5806,29 @@ fn draw_info_panel(
             Span::styled(format!("{short}…"), Style::default().fg(pal().dim)),
         ]));
     }
-    lines.push(Line::from(vec![
-        label("context"),
-        Span::raw(format!("~{est_tokens} tok · {transcript_len} lines")),
-    ]));
+    match engine.context_budget {
+        Some(budget) if budget > 0 => {
+            let pct = ((est_tokens as f64 / budget as f64) * 100.0).round() as u64;
+            let color = if pct >= 100 {
+                pal().red
+            } else if pct >= engine.context_warn_pct as u64 {
+                pal().yellow
+            } else {
+                pal().text
+            };
+            lines.push(Line::from(vec![
+                label("context"),
+                Span::styled(
+                    format!("~{est_tokens}/{budget} tok ({pct}%)"),
+                    Style::default().fg(color),
+                ),
+            ]));
+        }
+        _ => lines.push(Line::from(vec![
+            label("context"),
+            Span::raw(format!("~{est_tokens} tok · {transcript_len} lines")),
+        ])),
+    }
     if let Some(acc) = account {
         let s = acc.summary();
         if s != "no account data" {

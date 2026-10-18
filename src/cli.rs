@@ -709,6 +709,8 @@ fn build_engine(
     engine.policy = crate::privacy::policy::Policy::from_settings(&settings.policy);
     engine.dlp_judge = settings.policy.judge.clone().filter(|m| !m.trim().is_empty());
     engine.judge_action = settings.policy.judge_action;
+    engine.context_budget = settings.context.budget_tokens.filter(|n| *n > 0);
+    engine.context_warn_pct = settings.context.warn_pct;
     engine.reload_memories()?;
     engine.reload_decisions()?;
     persist_working_session(paths, &engine.session.id);
@@ -1542,8 +1544,40 @@ fn context_cmd(paths: &Paths, settings: &Settings, session_id: Option<String>) -
             "off"
         }
     );
-    println!("total sent: {} chars", r.total_chars);
+    if let Some(budget) = r.limit_tokens {
+        let pct = ((r.est_tokens as f64 / budget as f64) * 100.0).round() as u64;
+        let bar = budget_bar(r.est_tokens, budget);
+        println!(
+            "total sent: {} chars · ~{} tokens · budget {} ({pct}%) {bar}",
+            r.total_chars, r.est_tokens, budget
+        );
+        if pct >= r.warn_pct as u64 {
+            println!(
+                "⚠ over {}% of the budget — consider /compact, /clear or trimming memories/decisions",
+                r.warn_pct
+            );
+        }
+    } else {
+        println!(
+            "total sent: {} chars · ~{} tokens (set [context] budget_tokens to track a budget)",
+            r.total_chars, r.est_tokens
+        );
+    }
     Ok(())
+}
+
+/// A small ASCII usage bar, e.g. `[####----]`.
+fn budget_bar(used: usize, budget: usize) -> String {
+    if budget == 0 {
+        return String::new();
+    }
+    let filled = ((used.min(budget) as f64 / budget as f64) * 10.0).round() as usize;
+    let mut s = String::from("[");
+    for i in 0..10 {
+        s.push(if i < filled { '#' } else { '-' });
+    }
+    s.push(']');
+    s
 }
 
 fn exposure_cmd(paths: &Paths, settings: &Settings, session_only: bool) -> Result<()> {

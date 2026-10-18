@@ -123,4 +123,15 @@ fn context_report_shows_composition_and_provenance() {
     assert!(r.total_chars >= r.parts.iter().map(|p| p.chars).sum::<usize>());
     assert!(r.redactions.is_empty());
     assert!(!r.taint);
+    // Token estimate and (absent) budget.
+    assert_eq!(r.est_tokens, r.total_chars.div_ceil(4));
+    assert!(r.limit_tokens.is_none());
+    assert_eq!(r.warn_pct, 80);
+
+    // With a budget configured the report exposes it.
+    engine.context_budget = Some(100);
+    engine.context_warn_pct = 75;
+    let r = engine.context_report();
+    assert_eq!(r.limit_tokens, Some(100));
+    assert_eq!(r.warn_pct, 75);
 }

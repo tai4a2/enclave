@@ -5,7 +5,7 @@ Run the built binary from `./dist/enclave`; the user mostly uses `./dist/enclave
 
 ## Build & verify loop (ALWAYS)
 After every change:
-1. `cargo test` — must stay green (currently 219 tests).
+1. `cargo test` — must stay green (currently 220 tests).
 2. `cargo clippy --all-targets` — must be 0 warnings.
 3. `cargo build --release`
 4. `cp target/release/enclave dist/enclave && codesign --force --sign - dist/enclave`
@@ -15,8 +15,10 @@ macOS re-prompts the keychain on launch.
 
 ## Git
 - Commit ONLY on explicit user request. Do not commit proactively.
-- Branch `main`. Last commit: `9205be5`
-  ("Add project decisions (ADR log) and privacy blast-radius/score").
+- Branch `main`. Last commit: `8cf67c6`
+  ("Add context inspector (what is sent this turn)").
+  HEAD~1 = `9205be5` ("Add project decisions (ADR log) and privacy blast-radius/score").
+  UNCOMMITTED working tree: the **context budgeter (#9)** (config/engine/cli/tui/web + tests).
 
 ## Environment
 - Config dir: `~/Library/Application Support/dev.enclave.enclave`
@@ -70,8 +72,14 @@ The conversation is treated like git: encrypted, branchable, verifiable.
 - CLI: `enclave sessions branch|log|diff|merge|provenance`.
 - Tests: `tests/branch.rs` (9). Docs: README "Conversation branches".
 
-### Project memory & privacy posture (DONE; committed at 9205be5 + new Context Inspector)
-- **Context Inspector** (#16, new): `ChatEngine::system_parts()` + `context_report()`
+### Project memory & privacy posture (DONE; committed at 9205be5 + uncommitted Context Inspector/budgeter)
+- **Context budgeter** (#9, new, UNCOMMITTED): `[context] budget_tokens` + `warn_pct`
+  (`ContextSettings` in `src/config.rs`); `ChatEngine.context_budget`/`context_warn_pct`;
+  `ContextReport.est_tokens`/`limit_tokens`/`warn_pct` (+ `estimate_tokens`, chars/4);
+  CLI `context_cmd` prints `~N tokens · budget X (P%) [####------]` + a ⚠ warning past
+  warn_pct; TUI info-panel `context` row shows `~N/B tok (P%)` coloured yellow/red;
+  web `/api/context` + `openContext()` show the bar. v1 (no per-source quota yet).
+- **Context Inspector** (#16): `ChatEngine::system_parts()` + `context_report()`
   (`ContextReport`/`ContextPart` in `src/core/engine.rs`) break the outgoing request
   into labelled parts (prompt, rules, plan, memory, decisions, anti-injection) with
   preview + size, plus history/redactions/taint. CLI `enclave context [--session]`,

@@ -411,9 +411,7 @@ impl EncryptedMemory {
             |r| r.get(0),
         )?;
         if has_meta == 0 {
-            conn.execute_batch(
-                "ALTER TABLE messages ADD COLUMN meta TEXT NOT NULL DEFAULT '';",
-            )?;
+            conn.execute_batch("ALTER TABLE messages ADD COLUMN meta TEXT NOT NULL DEFAULT '';")?;
         }
         // Migration (C4): commitment to the pre-redaction payload.
         let has_orig: i64 = conn.query_row(
@@ -453,7 +451,11 @@ impl EncryptedMemory {
             return 0;
         };
         let mut total = 0u64;
-        for candidate in [path.clone(), sidecar(path, "-journal"), sidecar(path, "-wal")] {
+        for candidate in [
+            path.clone(),
+            sidecar(path, "-journal"),
+            sidecar(path, "-wal"),
+        ] {
             if let Ok(m) = std::fs::metadata(&candidate) {
                 total += m.len();
             }
@@ -516,7 +518,13 @@ impl EncryptedMemory {
         self.conn.execute(
             "INSERT INTO messages (session_id, role, content, timestamp, meta) \
              VALUES (?1, ?2, ?3, ?4, ?5)",
-            rusqlite::params![session_id, message.role.as_str(), message.content, now, meta],
+            rusqlite::params![
+                session_id,
+                message.role.as_str(),
+                message.content,
+                now,
+                meta
+            ],
         )?;
         self.conn.execute(
             "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
@@ -589,7 +597,11 @@ impl EncryptedMemory {
             Ok(BranchNode {
                 id: row.get(0)?,
                 name: row.get(1)?,
-                parent: if parent.is_empty() { None } else { Some(parent) },
+                parent: if parent.is_empty() {
+                    None
+                } else {
+                    Some(parent)
+                },
                 from: row.get(3)?,
                 message_count: row.get(4)?,
                 updated_at: row.get(5)?,
@@ -603,14 +615,13 @@ impl EncryptedMemory {
     }
 
     /// Delete a session and all of its messages.
-    pub fn delete_session(&self, id: &str) -> Result<()> {        self.conn.execute(
+    pub fn delete_session(&self, id: &str) -> Result<()> {
+        self.conn.execute(
             "DELETE FROM messages WHERE session_id = ?1",
             rusqlite::params![id],
         )?;
-        self.conn.execute(
-            "DELETE FROM sessions WHERE id = ?1",
-            rusqlite::params![id],
-        )?;
+        self.conn
+            .execute("DELETE FROM sessions WHERE id = ?1", rusqlite::params![id])?;
         Ok(())
     }
 
@@ -679,7 +690,8 @@ impl EncryptedMemory {
 
     /// Delete every session (and, by cascade/loop, all messages).
     /// Returns the number of deleted sessions.
-    pub fn delete_all_sessions(&self) -> Result<usize> {        let sessions = self.list_sessions()?;
+    pub fn delete_all_sessions(&self) -> Result<usize> {
+        let sessions = self.list_sessions()?;
         for s in &sessions {
             self.delete_session(&s.id)?;
         }
@@ -709,10 +721,12 @@ impl EncryptedMemory {
                 Err(e) => Err(e.into()),
             }
         };
-        let sessions: i64 =
-            self.conn.query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get(0))?;
-        let messages: i64 =
-            self.conn.query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))?;
+        let sessions: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get(0))?;
+        let messages: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))?;
         Ok(DbStats {
             page_size: read_pragma("page_size")?,
             page_count: read_pragma("page_count")?,
@@ -804,7 +818,10 @@ impl EncryptedMemory {
     /// Fetch a single memory by id.
     pub fn get_memory(&self, id: &str) -> Result<Option<Memory>> {
         let sql = format!("SELECT {} FROM memories WHERE id = ?1", Self::MEMORY_COLS);
-        let found = self.conn.query_row(&sql, rusqlite::params![id], map_memory).optional()?;
+        let found = self
+            .conn
+            .query_row(&sql, rusqlite::params![id], map_memory)
+            .optional()?;
         Ok(found)
     }
 
@@ -875,7 +892,11 @@ impl EncryptedMemory {
     ) -> Result<String> {
         let id = uuid::Uuid::new_v4().to_string();
         let now = chrono::Utc::now().to_rfc3339();
-        let status = if status.trim().is_empty() { "accepted" } else { status };
+        let status = if status.trim().is_empty() {
+            "accepted"
+        } else {
+            status
+        };
         self.conn.execute(
             "INSERT INTO decisions \
                 (id, session_id, title, body, status, tags, created_at, updated_at) \
@@ -924,8 +945,14 @@ impl EncryptedMemory {
 
     /// Fetch a single decision by id.
     pub fn get_decision(&self, id: &str) -> Result<Option<Decision>> {
-        let sql = format!("SELECT {} FROM decisions WHERE id = ?1", Self::DECISION_COLS);
-        let found = self.conn.query_row(&sql, rusqlite::params![id], map_decision).optional()?;
+        let sql = format!(
+            "SELECT {} FROM decisions WHERE id = ?1",
+            Self::DECISION_COLS
+        );
+        let found = self
+            .conn
+            .query_row(&sql, rusqlite::params![id], map_decision)
+            .optional()?;
         Ok(found)
     }
 
@@ -1044,7 +1071,11 @@ impl EncryptedMemory {
     }
 
     /// Egress entries for one session, newest first (provenance per conversation).
-    pub fn list_egress_for_session(&self, session_id: &str, limit: usize) -> Result<Vec<EgressEntry>> {
+    pub fn list_egress_for_session(
+        &self,
+        session_id: &str,
+        limit: usize,
+    ) -> Result<Vec<EgressEntry>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, ts, session_id, provider, model, payload_sha, payload_bytes, redactions, original_sha, hash \
              FROM egress WHERE session_id = ?1 ORDER BY id DESC LIMIT ?2",
@@ -1091,7 +1122,8 @@ impl EncryptedMemory {
             total: entries.len() as i64,
             ..Default::default()
         };
-        let mut providers: std::collections::BTreeMap<String, i64> = std::collections::BTreeMap::new();
+        let mut providers: std::collections::BTreeMap<String, i64> =
+            std::collections::BTreeMap::new();
         let mut kinds: std::collections::BTreeMap<String, i64> = std::collections::BTreeMap::new();
         for entry in &entries {
             summary.bytes += entry.payload_bytes;

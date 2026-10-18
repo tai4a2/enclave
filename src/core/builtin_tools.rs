@@ -299,7 +299,9 @@ pub fn defs(with_delegate: bool) -> Vec<ToolDef> {
 pub fn resolve_in_workspace(workspace: &Path, raw: &str) -> Result<PathBuf> {
     let p = Path::new(raw);
     if p.components().any(|c| c == std::path::Component::ParentDir) {
-        return Err(EnclaveError::other("path traversal rejected ('..' not allowed)"));
+        return Err(EnclaveError::other(
+            "path traversal rejected ('..' not allowed)",
+        ));
     }
     // Canonicalize the workspace too: on macOS /var is a symlink to /private/var.
     let ws = workspace
@@ -311,9 +313,7 @@ pub fn resolve_in_workspace(workspace: &Path, raw: &str) -> Result<PathBuf> {
         ws.join(p)
     };
     // Best effort canonicalization (fails for not-yet-existing files).
-    let canon = joined
-        .canonicalize()
-        .unwrap_or_else(|_| joined.clone());
+    let canon = joined.canonicalize().unwrap_or_else(|_| joined.clone());
     if !canon.starts_with(&ws) {
         return Err(EnclaveError::other(format!(
             "path '{}' is outside the workspace",
@@ -331,10 +331,7 @@ fn cap(data: &[u8], max: usize) -> (String, bool) {
         while end > 0 && std::str::from_utf8(&data[..end]).is_err() {
             end -= 1;
         }
-        (
-            String::from_utf8_lossy(&data[..end]).into_owned(),
-            true,
-        )
+        (String::from_utf8_lossy(&data[..end]).into_owned(), true)
     }
 }
 
@@ -576,7 +573,10 @@ pub async fn execute_detailed(
                 matches.truncate(200);
                 let mut body = matches.join("\n");
                 if total > 200 {
-                    body.push_str(&format!("\n… {} more matches (narrow the pattern)", total - 200));
+                    body.push_str(&format!(
+                        "\n… {} more matches (narrow the pattern)",
+                        total - 200
+                    ));
                 }
                 body
             };
@@ -764,7 +764,13 @@ pub async fn execute_detailed(
         "run_shell" => {
             let command = arg_str("command");
             let timeout = std::time::Duration::from_secs(ctx.shell_timeout_secs.max(1));
-            let out = shell::run_sandboxed(&command, timeout, ctx.max_output_bytes, ctx.sandbox.as_ref()).await?;
+            let out = shell::run_sandboxed(
+                &command,
+                timeout,
+                ctx.max_output_bytes,
+                ctx.sandbox.as_ref(),
+            )
+            .await?;
             Ok(ToolOutcome {
                 text: out.render(),
                 change: None,
@@ -796,7 +802,9 @@ pub async fn execute_detailed(
                 })
                 .unwrap_or_default();
             if items.is_empty() {
-                return Err(EnclaveError::other("todo requires a non-empty 'items' array"));
+                return Err(EnclaveError::other(
+                    "todo requires a non-empty 'items' array",
+                ));
             }
             if let Some(shared) = &ctx.todos {
                 if let Ok(mut guard) = shared.lock() {
@@ -852,8 +860,8 @@ pub async fn execute_detailed(
                 let registry = ctx.mcp.as_ref().ok_or_else(|| {
                     EnclaveError::other(format!("mcp tool '{other}' has no connected server"))
                 })?;
-                let args: serde_json::Value = serde_json::from_str(&call.arguments)
-                    .unwrap_or_else(|_| serde_json::json!({}));
+                let args: serde_json::Value =
+                    serde_json::from_str(&call.arguments).unwrap_or_else(|_| serde_json::json!({}));
                 return Ok(ToolOutcome {
                     text: registry.call(other, args)?,
                     change: None,
@@ -969,18 +977,22 @@ mod tests {
             arguments: serde_json::json!({"path":"a.txt","old_string":"zzz","new_string":"y"})
                 .to_string(),
         };
-        assert!(execute_detailed(&missing, &ctx_at(dir.path()), &mut AllowAll)
-            .await
-            .is_err());
+        assert!(
+            execute_detailed(&missing, &ctx_at(dir.path()), &mut AllowAll)
+                .await
+                .is_err()
+        );
         let ambiguous = ToolCall {
             id: "2".into(),
             name: "edit_file".into(),
             arguments: serde_json::json!({"path":"a.txt","old_string":"x","new_string":"y"})
                 .to_string(),
         };
-        assert!(execute_detailed(&ambiguous, &ctx_at(dir.path()), &mut AllowAll)
-            .await
-            .is_err());
+        assert!(
+            execute_detailed(&ambiguous, &ctx_at(dir.path()), &mut AllowAll)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -1012,7 +1024,8 @@ mod tests {
         let call = ToolCall {
             id: "1".into(),
             name: "question".into(),
-            arguments: serde_json::json!({"question":"which file?","options":["a","b"]}).to_string(),
+            arguments: serde_json::json!({"question":"which file?","options":["a","b"]})
+                .to_string(),
         };
         let out = execute_detailed(&call, &ctx_at(dir.path()), &mut AllowAll)
             .await

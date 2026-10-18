@@ -65,7 +65,10 @@ fn vacuum_removes_freed_pages() {
 
     memory.delete_all_sessions().unwrap();
     let size_after_delete = std::fs::metadata(&db_path).unwrap().len();
-    assert_eq!(size_after_delete, size_full, "VACUUM not yet run: file must keep its size");
+    assert_eq!(
+        size_after_delete, size_full,
+        "VACUUM not yet run: file must keep its size"
+    );
 
     memory.vacuum().unwrap();
     let size_after_vacuum = std::fs::metadata(&db_path).unwrap().len();

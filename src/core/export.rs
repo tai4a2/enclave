@@ -497,10 +497,7 @@ pub fn render_pdf(name: &str, model: &str, messages: &[Message]) -> Vec<u8> {
         .collect();
     objects.push((
         2,
-        format!(
-            "<< /Type /Pages /Kids [{}] /Count {n} >>",
-            kids.join(" ")
-        ),
+        format!("<< /Type /Pages /Kids [{}] /Count {n} >>", kids.join(" ")),
     ));
     for (p, content) in pages.iter().enumerate() {
         let page_obj = first_page_obj + p * 2;
@@ -515,7 +512,10 @@ pub fn render_pdf(name: &str, model: &str, messages: &[Message]) -> Vec<u8> {
         ));
         objects.push((
             content_obj,
-            format!("<< /Length {} >>\nstream\n{content}endstream", content.len()),
+            format!(
+                "<< /Length {} >>\nstream\n{content}endstream",
+                content.len()
+            ),
         ));
     }
     objects.push((
@@ -600,7 +600,11 @@ mod tests {
     #[test]
     fn pdf_escapes_parentheses_and_wraps() {
         let long = "word ".repeat(2000);
-        let bytes = render_pdf("t", "m", &[Message::user("a (b) c \\ d"), Message::assistant(long)]);
+        let bytes = render_pdf(
+            "t",
+            "m",
+            &[Message::user("a (b) c \\ d"), Message::assistant(long)],
+        );
         let text = String::from_utf8_lossy(&bytes);
         assert!(text.contains("\\("));
         assert!(text.contains("/Count "));

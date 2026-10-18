@@ -14,7 +14,11 @@ use crate::providers::known_providers;
 
 /// Top-level CLI.
 #[derive(Parser, Debug)]
-#[command(name = "enclave", version, about = "Privacy-first AI CLI with encrypted memory")]
+#[command(
+    name = "enclave",
+    version,
+    about = "Privacy-first AI CLI with encrypted memory"
+)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,
@@ -365,7 +369,9 @@ pub enum OrKeysAction {
         #[arg(short, long)]
         limit: Option<f64>,
     },
-    Get { hash: String },
+    Get {
+        hash: String,
+    },
     Update {
         hash: String,
         #[arg(short, long)]
@@ -375,7 +381,9 @@ pub enum OrKeysAction {
         #[arg(short, long)]
         limit: Option<f64>,
     },
-    Delete { hash: String },
+    Delete {
+        hash: String,
+    },
 }
 
 /// `enclave rag` sub-commands.
@@ -430,9 +438,11 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::Decisions { action } => decisions_cmd(&paths, &settings, action),
         Command::Exposure { session } => exposure_cmd(&paths, &settings, session),
         Command::Context { session } => context_cmd(&paths, &settings, session),
-        Command::Ledger { verify, limit, proof } => {
-            ledger_cmd(&paths, &settings, verify, limit, proof)
-        }
+        Command::Ledger {
+            verify,
+            limit,
+            proof,
+        } => ledger_cmd(&paths, &settings, verify, limit, proof),
         Command::Rag { action } => rag_cmd(&paths, &settings, action),
         Command::Or { action } => {
             let runtime = tokio::runtime::Runtime::new()
@@ -445,8 +455,8 @@ pub fn run(cli: Cli) -> Result<()> {
             limit,
             free,
         } => {
-            let runtime = tokio::runtime::Runtime::new()
-                .map_err(|e| EnclaveError::other(e.to_string()))?;
+            let runtime =
+                tokio::runtime::Runtime::new().map_err(|e| EnclaveError::other(e.to_string()))?;
             runtime.block_on(models_cmd(&paths, search, set, limit, free))
         }
         Command::Db => db_cmd(&paths, &settings),
@@ -464,7 +474,8 @@ pub fn run(cli: Cli) -> Result<()> {
             engine.air_gap = settings.air_gap;
             engine.injection = guard.enabled && guard.injection;
             engine.arm_canary();
-            engine.route_sensitive = guard.enabled && settings.routing.sensitive == crate::config::RoutingMode::Local;
+            engine.route_sensitive =
+                guard.enabled && settings.routing.sensitive == crate::config::RoutingMode::Local;
             let runtime = tokio::runtime::Runtime::new()
                 .map_err(|e| EnclaveError::other(format!("runtime: {e}")))?;
             runtime.block_on(crate::web::serve(engine, tools, guard, port))
@@ -501,11 +512,14 @@ pub fn run(cli: Cli) -> Result<()> {
             engine.air_gap = air_gap || settings.air_gap;
             engine.injection = guard.enabled && guard.injection;
             engine.arm_canary();
-            engine.route_sensitive = guard.enabled && settings.routing.sensitive == crate::config::RoutingMode::Local;
-            let agent_mode = (agent || tools.mode == crate::config::ToolsMode::Agent)
-                && tools.enabled;
+            engine.route_sensitive =
+                guard.enabled && settings.routing.sensitive == crate::config::RoutingMode::Local;
+            let agent_mode =
+                (agent || tools.mode == crate::config::ToolsMode::Agent) && tools.enabled;
             let runner = if agent_mode {
-                Some(std::sync::Arc::new(crate::core::AgentRunner::from_settings(&settings)))
+                Some(std::sync::Arc::new(
+                    crate::core::AgentRunner::from_settings(&settings),
+                ))
             } else {
                 None
             };
@@ -516,8 +530,8 @@ pub fn run(cli: Cli) -> Result<()> {
                     Err(e) => eprintln!("attach failed: {e}"),
                 }
             }
-            let runtime = tokio::runtime::Runtime::new()
-                .map_err(|e| EnclaveError::other(e.to_string()))?;
+            let runtime =
+                tokio::runtime::Runtime::new().map_err(|e| EnclaveError::other(e.to_string()))?;
             runtime.block_on(chat_loop(engine, tools, guard, runner, attachments))
         }
         Command::Tui {
@@ -550,9 +564,10 @@ pub fn run(cli: Cli) -> Result<()> {
             engine.air_gap = air_gap || settings.air_gap;
             engine.injection = guard.enabled && guard.injection;
             engine.arm_canary();
-            engine.route_sensitive = guard.enabled && settings.routing.sensitive == crate::config::RoutingMode::Local;
-            let runtime = tokio::runtime::Runtime::new()
-                .map_err(|e| EnclaveError::other(e.to_string()))?;
+            engine.route_sensitive =
+                guard.enabled && settings.routing.sensitive == crate::config::RoutingMode::Local;
+            let runtime =
+                tokio::runtime::Runtime::new().map_err(|e| EnclaveError::other(e.to_string()))?;
             runtime.block_on(crate::tui::run(engine, tools, guard, agent))
         }
     }
@@ -707,7 +722,11 @@ fn build_engine(
     engine.mcp = crate::core::mcp::McpRegistry::connect_all(&settings.mcp, Some(&mcp_sandbox))
         .map(std::sync::Arc::new);
     engine.policy = crate::privacy::policy::Policy::from_settings(&settings.policy);
-    engine.dlp_judge = settings.policy.judge.clone().filter(|m| !m.trim().is_empty());
+    engine.dlp_judge = settings
+        .policy
+        .judge
+        .clone()
+        .filter(|m| !m.trim().is_empty());
     engine.judge_action = settings.policy.judge_action;
     engine.context_budget = settings.context.budget_tokens.filter(|n| *n > 0);
     engine.context_warn_pct = settings.context.warn_pct;
@@ -902,7 +921,10 @@ impl crate::core::engine::ToolGate for CliGate {
         println!("— proposed tool call —");
         println!("  tool: {}", call.name);
         match serde_json::from_str::<serde_json::Value>(&call.arguments) {
-            Ok(v) => println!("  args: {}", serde_json::to_string_pretty(&v).unwrap_or_default()),
+            Ok(v) => println!(
+                "  args: {}",
+                serde_json::to_string_pretty(&v).unwrap_or_default()
+            ),
             Err(_) => println!("  args: {}", call.arguments),
         }
         let answer = prompt_run_choice().unwrap_or_default();
@@ -1201,7 +1223,9 @@ async fn models_cmd(
 
     let models = OpenRouterModel::fetch_all().await?;
     if models.is_empty() {
-        return Err(EnclaveError::provider("empty model catalogue from openrouter"));
+        return Err(EnclaveError::provider(
+            "empty model catalogue from openrouter",
+        ));
     }
 
     let needle = search.map(|s| s.to_lowercase());
@@ -1250,15 +1274,14 @@ async fn models_cmd(
         let (p, c) = if m.is_free() {
             ("FREE".to_string(), String::new())
         } else {
-            (format!("{:.3}", m.prompt_price), format!("{:.3}", m.completion_price))
+            (
+                format!("{:.3}", m.prompt_price),
+                format!("{:.3}", m.completion_price),
+            )
         };
         println!(
             "{:<44} {:<30} {:>8}  {:>10}  {:>10}",
-            m.id,
-            name,
-            m.context_length,
-            p,
-            c
+            m.id, name, m.context_length, p, c
         );
     }
     Ok(())
@@ -1273,7 +1296,9 @@ fn db_cmd(paths: &Paths, settings: &Settings) -> Result<()> {
     let memory = EncryptedMemory::open(&paths.db_path, &key)?;
     let stats = memory.stats()?;
 
-    let file_size = std::fs::metadata(&paths.db_path).map(|m| m.len()).unwrap_or(0);
+    let file_size = std::fs::metadata(&paths.db_path)
+        .map(|m| m.len())
+        .unwrap_or(0);
     let fmt_size = |bytes: u64| -> String {
         if bytes >= 1_048_576 {
             format!("{:.1} MB", bytes as f64 / 1_048_576.0)
@@ -1288,8 +1313,15 @@ fn db_cmd(paths: &Paths, settings: &Settings) -> Result<()> {
     println!("Enclave encrypted database");
     println!("  file         : {}", paths.db_path.display());
     println!("  size on disk : {}", fmt_size(file_size));
-    println!("  encryption   : SQLCipher AES-256 (page {} B, {} pages)", stats.page_size, stats.page_count);
-    println!("  freed pages  : {} ({} — run 'enclave sessions vacuum' to reclaim)", stats.freelist_count, fmt_size(stats.freelist_count as u64 * stats.page_size as u64));
+    println!(
+        "  encryption   : SQLCipher AES-256 (page {} B, {} pages)",
+        stats.page_size, stats.page_count
+    );
+    println!(
+        "  freed pages  : {} ({} — run 'enclave sessions vacuum' to reclaim)",
+        stats.freelist_count,
+        fmt_size(stats.freelist_count as u64 * stats.page_size as u64)
+    );
     println!("  computed     : {}", fmt_size(computed));
     println!("  sessions     : {}", stats.sessions);
     println!("  messages     : {}", stats.messages);
@@ -1337,7 +1369,13 @@ fn memory_cmd(paths: &Paths, settings: &Settings, action: MemoryAction) -> Resul
                 println!("no memories stored (add one with: enclave memory add \"...\")");
             } else {
                 for m in mems {
-                    println!("{}  {}{}{}", short(&m.id), m.text, tags_suffix(&m.tags), flags_suffix(m.pinned, m.local_only));
+                    println!(
+                        "{}  {}{}{}",
+                        short(&m.id),
+                        m.text,
+                        tags_suffix(&m.tags),
+                        flags_suffix(m.pinned, m.local_only)
+                    );
                 }
                 println!("\n{} memories", memory.memory_count()?);
             }
@@ -1348,13 +1386,23 @@ fn memory_cmd(paths: &Paths, settings: &Settings, action: MemoryAction) -> Resul
                 println!("no memories match '{query}'");
             } else {
                 for m in mems {
-                    println!("{}  {}{}{}", short(&m.id), m.text, tags_suffix(&m.tags), flags_suffix(m.pinned, m.local_only));
+                    println!(
+                        "{}  {}{}{}",
+                        short(&m.id),
+                        m.text,
+                        tags_suffix(&m.tags),
+                        flags_suffix(m.pinned, m.local_only)
+                    );
                 }
             }
         }
         MemoryAction::Pin { id, off } => {
             if memory.set_memory_pinned(&id, !off)? {
-                println!("{} [{}]", if off { "unpinned" } else { "pinned" }, short(&id));
+                println!(
+                    "{} [{}]",
+                    if off { "unpinned" } else { "pinned" },
+                    short(&id)
+                );
             } else {
                 println!("no memory with id '{id}'");
             }
@@ -1377,7 +1425,10 @@ fn memory_cmd(paths: &Paths, settings: &Settings, action: MemoryAction) -> Resul
                 if n == 0 {
                     println!("no memory matched '{what}'");
                 } else {
-                    println!("forgot {n} memor{} matching '{what}'", if n == 1 { "y" } else { "ies" });
+                    println!(
+                        "forgot {n} memor{} matching '{what}'",
+                        if n == 1 { "y" } else { "ies" }
+                    );
                 }
             }
         }
@@ -1429,7 +1480,13 @@ fn decisions_cmd(paths: &Paths, settings: &Settings, action: DecisionsAction) ->
                 println!("no decisions recorded (add one with: enclave decisions add \"...\")");
             } else {
                 for d in &ds {
-                    println!("{}  [{}] {}{}", short(&d.id), d.status, d.title, tags_suffix(&d.tags));
+                    println!(
+                        "{}  [{}] {}{}",
+                        short(&d.id),
+                        d.status,
+                        d.title,
+                        tags_suffix(&d.tags)
+                    );
                     let first = d.body.lines().next().unwrap_or("");
                     if !first.is_empty() {
                         println!("      {}", truncate_line(first, 100));
@@ -1444,7 +1501,13 @@ fn decisions_cmd(paths: &Paths, settings: &Settings, action: DecisionsAction) ->
                 println!("no decisions match '{query}'");
             } else {
                 for d in &ds {
-                    println!("{}  [{}] {}{}", short(&d.id), d.status, d.title, tags_suffix(&d.tags));
+                    println!(
+                        "{}  [{}] {}{}",
+                        short(&d.id),
+                        d.status,
+                        d.title,
+                        tags_suffix(&d.tags)
+                    );
                     let first = d.body.lines().next().unwrap_or("");
                     if !first.is_empty() {
                         println!("      {}", truncate_line(first, 100));
@@ -1502,7 +1565,9 @@ fn human_bytes(n: u64) -> String {
 
 /// Show the privacy blast-radius and a posture score.
 fn context_cmd(paths: &Paths, settings: &Settings, session_id: Option<String>) -> Result<()> {
-    let mut engine = build_engine(paths, settings, None, None, session_id, false, None, false, false)?;
+    let mut engine = build_engine(
+        paths, settings, None, None, session_id, false, None, false, false,
+    )?;
     let guard = settings.effective_guard(false);
     engine.taint = guard.enabled && guard.taint;
     engine.air_gap = settings.air_gap;
@@ -1521,10 +1586,7 @@ fn context_cmd(paths: &Paths, settings: &Settings, session_id: Option<String>) -
         println!("  (none)");
     } else {
         for p in &r.parts {
-            println!(
-                "  • {:<22} {:>6} chars  — {}",
-                p.label, p.chars, p.detail
-            );
+            println!("  • {:<22} {:>6} chars  — {}", p.label, p.chars, p.detail);
         }
     }
     println!(
@@ -1582,8 +1644,8 @@ fn budget_bar(used: usize, budget: usize) -> String {
 
 fn exposure_cmd(paths: &Paths, settings: &Settings, session_only: bool) -> Result<()> {
     use crate::config::SandboxMode;
+    use crate::privacy::exposure::{blast_radius, privacy_score, ScoreInputs};
     use crate::privacy::EncryptedMemory;
-    use crate::privacy::exposure::{ScoreInputs, blast_radius, privacy_score};
 
     let vault = Vault::new(&paths.config_dir);
     let key = unlock_master_key(&vault, settings, false)?;
@@ -1605,7 +1667,11 @@ fn exposure_cmd(paths: &Paths, settings: &Settings, session_only: bool) -> Resul
 
     println!(
         "privacy blast-radius — {}",
-        if session_only { "this session" } else { "whole vault" }
+        if session_only {
+            "this session"
+        } else {
+            "whole vault"
+        }
     );
     println!(
         "  {} outbound request(s): {} remote · {} local · {} redacted · {} sent",
@@ -1618,7 +1684,11 @@ fn exposure_cmd(paths: &Paths, settings: &Settings, session_only: bool) -> Resul
     if br.providers.is_empty() {
         println!("  providers         : (nothing recorded)");
     } else {
-        let prov: Vec<String> = br.providers.iter().map(|(p, c)| format!("{p}×{c}")).collect();
+        let prov: Vec<String> = br
+            .providers
+            .iter()
+            .map(|(p, c)| format!("{p}×{c}"))
+            .collect();
         println!("  providers         : {}", prov.join(", "));
     }
     if br.kinds.is_empty() {
@@ -1647,7 +1717,10 @@ fn exposure_cmd(paths: &Paths, settings: &Settings, session_only: bool) -> Resul
     };
     let score = privacy_score(&inputs);
     println!();
-    println!("privacy score: {} / 100  (grade {})", score.score, score.grade);
+    println!(
+        "privacy score: {} / 100  (grade {})",
+        score.score, score.grade
+    );
     for (label, delta) in &score.factors {
         println!("  {:+3}  {label}", delta);
     }
@@ -1751,7 +1824,10 @@ fn rag_cmd(paths: &Paths, settings: &Settings, action: RagAction) -> Result<()> 
     let memory = EncryptedMemory::open(&paths.db_path, &key)?;
 
     match action {
-        RagAction::Index { paths: inputs, replace } => {
+        RagAction::Index {
+            paths: inputs,
+            replace,
+        } => {
             let mut files = Vec::new();
             for input in &inputs {
                 collect_files(std::path::Path::new(input), &mut files, 0);
@@ -1816,7 +1892,11 @@ fn rag_cmd(paths: &Paths, settings: &Settings, action: RagAction) -> Result<()> 
                 for (src, n) in &sources {
                     println!("{n:>5}  {src}");
                 }
-                println!("\n{} source(s), {} chunk(s)", sources.len(), memory.rag_count()?);
+                println!(
+                    "\n{} source(s), {} chunk(s)",
+                    sources.len(),
+                    memory.rag_count()?
+                );
             }
         }
         RagAction::Clear { force } => {
@@ -1855,9 +1935,7 @@ async fn or_cmd(action: OrAction) -> Result<()> {
             .filter(|s| !s.trim().is_empty())
             .or_else(|| SecureCredentials::local_api_key("openrouter-provisioning"))
             .ok_or_else(|| {
-                EnclaveError::auth(
-                    "no provisioning key — set ENCLAVE_OPENROUTER_PROVISIONING_KEY",
-                )
+                EnclaveError::auth("no provisioning key — set ENCLAVE_OPENROUTER_PROVISIONING_KEY")
             })
     }
 
@@ -1899,7 +1977,10 @@ async fn or_cmd(action: OrAction) -> Result<()> {
             if eps.is_empty() {
                 println!("no endpoints found for '{model}'");
             } else {
-                println!("{:<24} {:>10} {:>12} {:>12}  QUANT", "PROVIDER", "CTX", "$PROMPT/M", "$COMPL/M");
+                println!(
+                    "{:<24} {:>10} {:>12} {:>12}  QUANT",
+                    "PROVIDER", "CTX", "$PROMPT/M", "$COMPL/M"
+                );
                 for e in eps {
                     println!(
                         "{:<24} {:>10} {:>12.3} {:>12.3}  {}",
@@ -1949,7 +2030,11 @@ async fn or_cmd(action: OrAction) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn collect_files(path: &std::path::Path, out: &mut Vec<std::path::PathBuf>, depth: usize) {
+pub(crate) fn collect_files(
+    path: &std::path::Path,
+    out: &mut Vec<std::path::PathBuf>,
+    depth: usize,
+) {
     if depth > 12 {
         return;
     }
@@ -2066,7 +2151,10 @@ fn sessions_cmd(paths: &Paths, settings: &Settings, action: SessionsAction) -> R
                 println!("no sessions stored");
             } else {
                 for s in sessions {
-                    println!("{}  {}  ({} messages, {})", s.id, s.name, s.message_count, s.updated_at);
+                    println!(
+                        "{}  {}  ({} messages, {})",
+                        s.id, s.name, s.message_count, s.updated_at
+                    );
                 }
             }
             Ok(())
@@ -2127,11 +2215,17 @@ fn sessions_cmd(paths: &Paths, settings: &Settings, action: SessionsAction) -> R
             let branch_name = name.unwrap_or_else(|| {
                 let n = memory
                     .branch_nodes()
-                    .map(|ns| ns.iter().filter(|x| x.name.starts_with(&format!("{}~", parent.1))).count() + 1)
+                    .map(|ns| {
+                        ns.iter()
+                            .filter(|x| x.name.starts_with(&format!("{}~", parent.1)))
+                            .count()
+                            + 1
+                    })
                     .unwrap_or(1);
                 format!("{}~{n}", parent.1)
             });
-            let child = crate::core::session::Session::fork(&memory, &parent.0, &branch_name, keep)?;
+            let child =
+                crate::core::session::Session::fork(&memory, &parent.0, &branch_name, keep)?;
             println!(
                 "branched '{}' -> '{}' ({} messages copied)",
                 parent.1,
@@ -2190,9 +2284,7 @@ fn sessions_cmd(paths: &Paths, settings: &Settings, action: SessionsAction) -> R
                     .ok_or_else(|| EnclaveError::other("no session has messages yet"))?,
             };
             if src_id == target_id {
-                return Err(EnclaveError::other(
-                    "cannot merge a session into itself",
-                ));
+                return Err(EnclaveError::other("cannot merge a session into itself"));
             }
             let mut session = crate::core::session::Session::load(&memory, &target_id)?;
             let added = session.merge_from(&memory, &src_id)?;
@@ -2219,7 +2311,10 @@ fn sessions_cmd(paths: &Paths, settings: &Settings, action: SessionsAction) -> R
                 println!("no egress recorded for session '{name}' ({sid})");
                 return Ok(());
             }
-            println!("provenance for '{name}' ({sid}) — {} send(s)", entries.len());
+            println!(
+                "provenance for '{name}' ({sid}) — {} send(s)",
+                entries.len()
+            );
             for e in entries.iter().rev() {
                 let red = if e.redactions.is_empty() {
                     String::new()
@@ -2229,7 +2324,10 @@ fn sessions_cmd(paths: &Paths, settings: &Settings, action: SessionsAction) -> R
                 let commit = if e.original_sha.is_empty() {
                     String::new()
                 } else {
-                    format!("  commit {}", &e.original_sha[..12.min(e.original_sha.len())])
+                    format!(
+                        "  commit {}",
+                        &e.original_sha[..12.min(e.original_sha.len())]
+                    )
                 };
                 println!(
                     "  #{} {} {}-{}  {} B  sha {}{}{}",
@@ -2259,10 +2357,7 @@ fn sessions_cmd(paths: &Paths, settings: &Settings, action: SessionsAction) -> R
                 std::path::Path::new(&path),
                 &pass,
             )?;
-            println!(
-                "exported {count} messages to '{}' (encrypted)",
-                path
-            );
+            println!("exported {count} messages to '{}' (encrypted)", path);
             Ok(())
         }
         SessionsAction::Import { path } => {
@@ -2302,13 +2397,14 @@ fn sessions_cmd(paths: &Paths, settings: &Settings, action: SessionsAction) -> R
             Ok(())
         }
         SessionsAction::Vacuum => {
-            let before = std::fs::metadata(&paths.db_path).map(|m| m.len()).unwrap_or(0);
+            let before = std::fs::metadata(&paths.db_path)
+                .map(|m| m.len())
+                .unwrap_or(0);
             memory.vacuum()?;
-            let after = std::fs::metadata(&paths.db_path).map(|m| m.len()).unwrap_or(0);
-            println!(
-                "database compacted: {} → {} bytes",
-                before, after
-            );
+            let after = std::fs::metadata(&paths.db_path)
+                .map(|m| m.len())
+                .unwrap_or(0);
+            println!("database compacted: {} → {} bytes", before, after);
             Ok(())
         }
     }
@@ -2323,7 +2419,11 @@ fn print_config(paths: &Paths, settings: &Settings) {
     println!("  key store  : OS keychain");
     println!(
         "  tools      : {} (ask-always, timeout {}s, output cap {}B)",
-        if settings.tools.enabled { "enabled" } else { "disabled" },
+        if settings.tools.enabled {
+            "enabled"
+        } else {
+            "disabled"
+        },
         settings.tools.timeout_secs,
         settings.tools.max_output_bytes
     );

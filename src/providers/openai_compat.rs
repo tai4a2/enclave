@@ -1,7 +1,7 @@
 //! Shared helpers for OpenAI-compatible chat-completions APIs
 //! (OpenRouter, OpenAI, and Ollama's native chat use near-identical shapes).
 
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use crate::core::message::{Message, Role, ToolCall};
 use crate::providers::ToolDef;
@@ -137,15 +137,15 @@ pub fn parse_response(value: &Value) -> (String, Vec<ToolCall>) {
     let mut calls = Vec::new();
     if let Some(array) = message["tool_calls"].as_array() {
         for (i, c) in array.iter().enumerate() {
-            let name = c["function"]["name"].as_str().unwrap_or_default().to_string();
+            let name = c["function"]["name"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
             if name.is_empty() {
                 continue;
             }
             calls.push(ToolCall {
-                id: c["id"]
-                    .as_str()
-                    .unwrap_or(&format!("call_{i}"))
-                    .to_string(),
+                id: c["id"].as_str().unwrap_or(&format!("call_{i}")).to_string(),
                 name,
                 arguments: c["function"]["arguments"]
                     .as_str()
@@ -164,7 +164,10 @@ pub fn parse_ollama_response(value: &Value) -> (String, Vec<ToolCall>) {
     let mut calls = Vec::new();
     if let Some(array) = message["tool_calls"].as_array() {
         for (i, c) in array.iter().enumerate() {
-            let name = c["function"]["name"].as_str().unwrap_or_default().to_string();
+            let name = c["function"]["name"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
             if name.is_empty() {
                 continue;
             }
@@ -217,7 +220,10 @@ mod tests {
         }];
         let msgs = vec![Message::assistant_with_tool_calls(String::new(), calls)];
         let wire = ollama_wire_messages(&msgs);
-        assert_eq!(wire[0]["tool_calls"][0]["function"]["arguments"]["path"], ".");
+        assert_eq!(
+            wire[0]["tool_calls"][0]["function"]["arguments"]["path"],
+            "."
+        );
     }
 
     #[test]

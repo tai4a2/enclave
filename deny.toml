@@ -36,6 +36,8 @@ allow = [
     "OpenSSL",
     "CC0-1.0",
     "MPL-2.0",
+    # Permissive data license used by the Mozilla `webpki-roots` certificate bundle.
+    "CDLA-Permissive-2.0",
 ]
 confidence-threshold = 0.9
 

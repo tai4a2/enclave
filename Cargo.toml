@@ -41,7 +41,7 @@ hex = "0.4"
 rpassword = "7"
 async-trait = "0.1"
 async-stream = "0.3"
-ratatui = "0.29"
+ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
 crossterm = { version = "0.28", features = ["event-stream"] }
 termimad = "0.30"
 uuid = { version = "1", features = ["v4"] }

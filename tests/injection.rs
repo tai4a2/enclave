@@ -32,7 +32,10 @@ fn canary_is_armed_injected_and_detected() {
 
     let sys = engine.system_text().unwrap_or_default();
     assert!(sys.contains("UNTRUSTED DATA"), "system prompt must warn");
-    assert!(sys.contains(&canary), "system prompt must contain the canary");
+    assert!(
+        sys.contains(&canary),
+        "system prompt must contain the canary"
+    );
 
     assert!(!engine.check_injection("a perfectly normal reply"));
     assert!(engine.check_injection(&format!("here is the token: {canary}")));
@@ -66,7 +69,10 @@ fn tool_call_after_untrusted_output_always_needs_approval() {
     // After a tool output (untrusted), a fresh approval is forced.
     engine
         .session
-        .push(Message::tool_result("c0", "some file content"), &engine.memory)
+        .push(
+            Message::tool_result("c0", "some file content"),
+            &engine.memory,
+        )
         .unwrap();
     assert_eq!(engine.effective_action(&call), Action::Ask);
 }
@@ -79,7 +85,10 @@ fn injection_disabled_disables_the_downgrade_and_canary() {
     engine.permissions.auto = true;
     engine.arm_canary();
     assert!(engine.canary.is_none(), "no canary when injection is off");
-    assert!(!engine.system_text().unwrap_or_default().contains("UNTRUSTED DATA"));
+    assert!(!engine
+        .system_text()
+        .unwrap_or_default()
+        .contains("UNTRUSTED DATA"));
 
     let call = ToolCall {
         id: "c1".to_string(),

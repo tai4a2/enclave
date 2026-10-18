@@ -29,7 +29,10 @@ async fn tool_calls_persist_across_reload() {
         arguments: r#"{"path":"a.txt"}"#.into(),
     }];
     memory
-        .save_message_full(&sid, &Message::assistant_with_tool_calls(String::new(), calls))
+        .save_message_full(
+            &sid,
+            &Message::assistant_with_tool_calls(String::new(), calls),
+        )
         .unwrap();
     memory
         .save_message_full(&sid, &Message::tool_result("tc1", "file contents"))
@@ -268,5 +271,7 @@ async fn tainted_message_is_auto_redacted_on_later_turns() {
     // Redaction stays stable across turns (same persistent redactor).
     let out2 = engine.outgoing_messages();
     assert!(out2.iter().any(|m| m.content.contains("[EMAIL_1]")));
-    assert!(!out2.iter().any(|m| m.content.contains("secret@example.com")));
+    assert!(!out2
+        .iter()
+        .any(|m| m.content.contains("secret@example.com")));
 }

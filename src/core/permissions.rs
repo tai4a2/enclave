@@ -29,7 +29,11 @@ fn rank(action: Action) -> u8 {
 
 /// The stricter (more restrictive) of two actions.
 pub fn combine(a: Action, b: Action) -> Action {
-    if rank(a) >= rank(b) { a } else { b }
+    if rank(a) >= rank(b) {
+        a
+    } else {
+        b
+    }
 }
 
 fn field(perms: &Permissions, tool: &str) -> Option<Action> {
@@ -174,19 +178,35 @@ mod tests {
     fn defaults_are_read_only_friendly() {
         let perms = Permissions::default();
         assert_eq!(
-            resolve(&perms, &call("read_file", serde_json::json!({"path": "a.txt"})), false),
+            resolve(
+                &perms,
+                &call("read_file", serde_json::json!({"path": "a.txt"})),
+                false
+            ),
             Action::Allow
         );
         assert_eq!(
-            resolve(&perms, &call("glob", serde_json::json!({"pattern": "*.rs"})), false),
+            resolve(
+                &perms,
+                &call("glob", serde_json::json!({"pattern": "*.rs"})),
+                false
+            ),
             Action::Allow
         );
         assert_eq!(
-            resolve(&perms, &call("run_shell", serde_json::json!({"command": "ls"})), false),
+            resolve(
+                &perms,
+                &call("run_shell", serde_json::json!({"command": "ls"})),
+                false
+            ),
             Action::Ask
         );
         assert_eq!(
-            resolve(&perms, &call("write_file", serde_json::json!({"path": "a"})), false),
+            resolve(
+                &perms,
+                &call("write_file", serde_json::json!({"path": "a"})),
+                false
+            ),
             Action::Ask
         );
     }
@@ -198,7 +218,11 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            resolve(&perms, &call("run_shell", serde_json::json!({"command": "ls"})), false),
+            resolve(
+                &perms,
+                &call("run_shell", serde_json::json!({"command": "ls"})),
+                false
+            ),
             Action::Deny
         );
     }
@@ -209,11 +233,22 @@ mod tests {
         perms.bash_rules.insert("git *".into(), Action::Allow);
         perms.bash_rules.insert("git push*".into(), Action::Deny);
         assert_eq!(
-            resolve(&perms, &call("run_shell", serde_json::json!({"command": "git status"})), false),
+            resolve(
+                &perms,
+                &call("run_shell", serde_json::json!({"command": "git status"})),
+                false
+            ),
             Action::Allow
         );
         assert_eq!(
-            resolve(&perms, &call("run_shell", serde_json::json!({"command": "git push origin"})), false),
+            resolve(
+                &perms,
+                &call(
+                    "run_shell",
+                    serde_json::json!({"command": "git push origin"})
+                ),
+                false
+            ),
             Action::Deny
         );
     }

@@ -97,7 +97,9 @@ fn history_limit_returns_most_recent_in_order() {
     let id = memory.create_session("limit").unwrap();
 
     for i in 0..5 {
-        memory.save_message(&id, "user", &format!("msg-{i}")).unwrap();
+        memory
+            .save_message(&id, "user", &format!("msg-{i}"))
+            .unwrap();
     }
 
     let history = memory.get_history(&id, 2).unwrap();
@@ -127,9 +129,13 @@ fn search_messages_finds_across_sessions() {
 
     let a = memory.create_session("alpha").unwrap();
     let b = memory.create_session("beta").unwrap();
-    memory.save_message(&a, "user", "the secret code is 42").unwrap();
+    memory
+        .save_message(&a, "user", "the secret code is 42")
+        .unwrap();
     memory.save_message(&a, "assistant", "noted").unwrap();
-    memory.save_message(&b, "user", "unrelated message").unwrap();
+    memory
+        .save_message(&b, "user", "unrelated message")
+        .unwrap();
     memory
         .save_message(&b, "assistant", "the secret plan is ready")
         .unwrap();
@@ -142,7 +148,10 @@ fn search_messages_finds_across_sessions() {
 
     // Wildcards in the query must be treated literally, not as LIKE patterns.
     assert!(memory.search_messages("%", 50).unwrap().is_empty());
-    assert!(memory.search_messages("nomatch-xyz", 50).unwrap().is_empty());
+    assert!(memory
+        .search_messages("nomatch-xyz", 50)
+        .unwrap()
+        .is_empty());
 }
 
 #[test]
@@ -153,7 +162,14 @@ fn egress_ledger_records_and_verifies() {
     let sid = memory.create_session("chat").unwrap();
 
     memory
-        .add_egress(Some(&sid), "openrouter", "model-x", b"hello", "1 EMAIL", "abc123")
+        .add_egress(
+            Some(&sid),
+            "openrouter",
+            "model-x",
+            b"hello",
+            "1 EMAIL",
+            "abc123",
+        )
         .unwrap();
     memory
         .add_egress(Some(&sid), "openrouter", "model-x", b"world", "", "")

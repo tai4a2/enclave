@@ -34,6 +34,9 @@ pub async fn judge(model: &str, base_url: &str, text: &str) -> Result<bool> {
         .json()
         .await
         .map_err(|e| EnclaveError::provider(format!("dlp judge: {e}")))?;
-    let answer = value["response"].as_str().unwrap_or("").to_ascii_uppercase();
+    let answer = value["response"]
+        .as_str()
+        .unwrap_or("")
+        .to_ascii_uppercase();
     Ok(answer.trim_start().starts_with("YES"))
 }

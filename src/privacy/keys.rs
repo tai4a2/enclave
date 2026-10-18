@@ -172,7 +172,8 @@ impl SecureCredentials {
     /// API key from environment or the local file, WITHOUT touching the keychain
     /// (used for silent, prompt-free requests such as credit lookups).
     pub fn local_api_key(provider: &str) -> Option<String> {
-        Self::env_key(provider, |name| std::env::var(name).ok()).or_else(|| Self::file_get(provider))
+        Self::env_key(provider, |name| std::env::var(name).ok())
+            .or_else(|| Self::file_get(provider))
     }
 
     /// Environment-only API key (never touches file or keychain).
@@ -187,7 +188,10 @@ impl SecureCredentials {
         F: Fn(&str) -> Option<String>,
     {
         let upper = provider.to_ascii_uppercase();
-        for name in [format!("ENCLAVE_{upper}_API_KEY"), format!("{upper}_API_KEY")] {
+        for name in [
+            format!("ENCLAVE_{upper}_API_KEY"),
+            format!("{upper}_API_KEY"),
+        ] {
             if let Some(value) = lookup(&name) {
                 let value = value.trim();
                 if !value.is_empty() {
@@ -201,7 +205,10 @@ impl SecureCredentials {
     /// Name of the environment variable providing `provider`'s key, if any.
     pub fn env_var_name(provider: &str) -> Option<String> {
         let upper = provider.to_ascii_uppercase();
-        for name in [format!("ENCLAVE_{upper}_API_KEY"), format!("{upper}_API_KEY")] {
+        for name in [
+            format!("ENCLAVE_{upper}_API_KEY"),
+            format!("{upper}_API_KEY"),
+        ] {
             if let Ok(value) = std::env::var(&name) {
                 if !value.trim().is_empty() {
                     return Some(name);

@@ -53,11 +53,11 @@ use crate::core::builtin_tools::{self, ToolContext};
 use crate::core::message::{Message, ToolCall};
 use crate::core::session::Session;
 use crate::error::{EnclaveError, Result};
-use crate::privacy::guard::{Redactor, redact_messages, redact_tainted};
+use crate::privacy::guard::{redact_messages, redact_tainted, Redactor};
 use crate::privacy::keys::SecureCredentials;
 use crate::privacy::memory::EncryptedMemory;
 use crate::providers::{
-    ChunkStream, Provider, ToolDef, create_provider, default_model_for, requires_api_key,
+    create_provider, default_model_for, requires_api_key, ChunkStream, Provider, ToolDef,
 };
 
 /// Lazily-created provider: avoids touching the OS keychain until the first
@@ -138,10 +138,7 @@ pub enum AgentStep {
     /// The assistant asked to run tools: the caller approves/executes them and
     /// feeds the results back via [`ChatEngine::push_tool_result`], then calls
     /// [`ChatEngine::agentic_step`] again.
-    ToolCalls {
-        text: String,
-        calls: Vec<ToolCall>,
-    },
+    ToolCalls { text: String, calls: Vec<ToolCall> },
 }
 
 /// Operating mode of the engine (opencode-style Plan/Build).
@@ -373,8 +370,8 @@ impl ChatEngine {
     pub fn execute_stateful(&mut self, call: &ToolCall) -> Option<Result<String>> {
         match call.name.as_str() {
             "decide" => {
-                let args: serde_json::Value = serde_json::from_str(&call.arguments)
-                    .unwrap_or_else(|_| serde_json::json!({}));
+                let args: serde_json::Value =
+                    serde_json::from_str(&call.arguments).unwrap_or_else(|_| serde_json::json!({}));
                 let title = args["title"].as_str().unwrap_or("").trim().to_string();
                 if title.is_empty() {
                     return Some(Err(EnclaveError::other("decide: 'title' is required")));
@@ -384,7 +381,9 @@ impl ChatEngine {
                 let status = args["status"].as_str().unwrap_or("accepted").to_string();
                 let sid = self.session.id.clone();
                 let out = (|| -> Result<String> {
-                    let id = self.memory.add_decision(Some(&sid), &title, &body, &tags, &status)?;
+                    let id = self
+                        .memory
+                        .add_decision(Some(&sid), &title, &body, &tags, &status)?;
                     Ok(format!(
                         "decision recorded [{}] {}",
                         &id[..8.min(id.len())],
@@ -394,8 +393,8 @@ impl ChatEngine {
                 Some(out)
             }
             "remember" => {
-                let args: serde_json::Value = serde_json::from_str(&call.arguments)
-                    .unwrap_or_else(|_| serde_json::json!({}));
+                let args: serde_json::Value =
+                    serde_json::from_str(&call.arguments).unwrap_or_else(|_| serde_json::json!({}));
                 let text = args["text"].as_str().unwrap_or("").trim().to_string();
                 if text.is_empty() {
                     return Some(Err(EnclaveError::other("remember: 'text' is required")));
@@ -404,17 +403,17 @@ impl ChatEngine {
                 let local_only = args["local_only"].as_bool().unwrap_or(false);
                 let sid = self.session.id.clone();
                 let out = (|| -> Result<String> {
-                    let id = self
-                        .memory
-                        .add_memory(&text, &tags, "note", Some(&sid), local_only)?;
+                    let id =
+                        self.memory
+                            .add_memory(&text, &tags, "note", Some(&sid), local_only)?;
                     self.reload_memories()?;
                     Ok(format!("remembered [{}] {}", &id[..8.min(id.len())], text))
                 })();
                 Some(out)
             }
             "rag_search" => {
-                let args: serde_json::Value = serde_json::from_str(&call.arguments)
-                    .unwrap_or_else(|_| serde_json::json!({}));
+                let args: serde_json::Value =
+                    serde_json::from_str(&call.arguments).unwrap_or_else(|_| serde_json::json!({}));
                 let query = args["query"].as_str().unwrap_or("").trim().to_string();
                 if query.is_empty() {
                     return Some(Err(EnclaveError::other("rag_search: 'query' is required")));
@@ -616,8 +615,7 @@ impl ChatEngine {
             && self.has_sensitive();
         if route_local {
             if self.local_provider.is_none() {
-                self.local_provider =
-                    Some(create_provider("ollama", None, &self.ollama_base_url)?);
+                self.local_provider = Some(create_provider("ollama", None, &self.ollama_base_url)?);
             }
             let model = default_model_for("ollama").unwrap_or("unknown").to_string();
             let provider: &dyn Provider = self.local_provider.as_deref().unwrap();
@@ -818,7 +816,9 @@ impl ChatEngine {
         let _ = self.record_egress(&messages);
         let effort = self.reasoning_effort.clone();
         let (provider, model) = self.route().await?;
-        provider.chat_stream(messages, &model, effort.as_deref()).await
+        provider
+            .chat_stream(messages, &model, effort.as_deref())
+            .await
     }
 
     /// Persist a completed assistant reply.
@@ -893,7 +893,7 @@ impl ChatEngine {
         for _ in 0..max_iterations.max(1) {
             self.apply_egress_policy()?;
             self.apply_dlp_judge().await?;
-        self.apply_dlp_judge().await?;
+            self.apply_dlp_judge().await?;
             let messages = self.outgoing_messages();
             let _ = self.record_egress(&messages);
             let effort = self.reasoning_effort.clone();
@@ -909,7 +909,10 @@ impl ChatEngine {
             }
 
             self.session.push(
-                Message::assistant_with_tool_calls(response.text.clone(), response.tool_calls.clone()),
+                Message::assistant_with_tool_calls(
+                    response.text.clone(),
+                    response.tool_calls.clone(),
+                ),
                 &self.memory,
             )?;
 
@@ -945,8 +948,10 @@ impl ChatEngine {
 
                 let output = match decision {
                     ToolDecision::Stop => {
-                        self.session
-                            .push(Message::tool_result(&call.id, "[stopped by user]"), &self.memory)?;
+                        self.session.push(
+                            Message::tool_result(&call.id, "[stopped by user]"),
+                            &self.memory,
+                        )?;
                         return Ok(String::new());
                     }
                     ToolDecision::Deny => {

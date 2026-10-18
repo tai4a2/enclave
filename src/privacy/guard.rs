@@ -93,7 +93,11 @@ struct Pattern {
 }
 
 fn luhn_ok(s: &str) -> bool {
-    let digits: Vec<u32> = s.chars().filter(|c| c.is_ascii_digit()).map(|c| c as u32 - '0' as u32).collect();
+    let digits: Vec<u32> = s
+        .chars()
+        .filter(|c| c.is_ascii_digit())
+        .map(|c| c as u32 - '0' as u32)
+        .collect();
     if !(13..=19).contains(&digits.len()) {
         return false;
     }
@@ -114,7 +118,8 @@ fn luhn_ok(s: &str) -> bool {
 }
 
 fn ip_ok(s: &str) -> bool {
-    s.split('.').all(|o| o.parse::<u16>().map(|v| v <= 255).unwrap_or(false))
+    s.split('.')
+        .all(|o| o.parse::<u16>().map(|v| v <= 255).unwrap_or(false))
 }
 
 fn phone_ok(s: &str) -> bool {
@@ -202,17 +207,114 @@ fn ner_enabled() -> bool {
 
 /// Common capitalised words that must not be mistaken for a person name.
 const NAME_STOPWORDS: &[&str] = &[
-    "the", "this", "that", "then", "there", "these", "those", "when", "where", "what", "which",
-    "while", "with", "you", "your", "they", "their", "some", "such", "just", "also", "note",
-    "please", "thanks", "here", "now", "let", "use", "make", "sure", "but", "and", "not", "for",
-    "from", "into", "over", "only", "have", "has", "will", "would", "could", "should", "can",
-    "may", "must", "does", "did", "was", "were", "hello", "world", "ciao", "perche", "perché",
-    "quindi", "quando", "dove", "cosa", "come", "anche", "rust", "cargo", "github", "http",
-    "https", "json", "api", "url", "cli", "tui", "sql", "html", "css", "enclave", "ollama",
-    "openrouter", "openai", "anthropic", "python", "javascript", "linux", "macos", "windows",
-    "google", "amazon", "microsoft", "apple", "lunedì", "martedì", "mercoledì", "giovedì",
-    "venerdì", "sabato", "domenica", "gennaio", "febbraio", "marzo", "aprile", "maggio",
-    "giugno", "luglio", "agosto", "settembre", "ottobre", "novembre", "dicembre",
+    "the",
+    "this",
+    "that",
+    "then",
+    "there",
+    "these",
+    "those",
+    "when",
+    "where",
+    "what",
+    "which",
+    "while",
+    "with",
+    "you",
+    "your",
+    "they",
+    "their",
+    "some",
+    "such",
+    "just",
+    "also",
+    "note",
+    "please",
+    "thanks",
+    "here",
+    "now",
+    "let",
+    "use",
+    "make",
+    "sure",
+    "but",
+    "and",
+    "not",
+    "for",
+    "from",
+    "into",
+    "over",
+    "only",
+    "have",
+    "has",
+    "will",
+    "would",
+    "could",
+    "should",
+    "can",
+    "may",
+    "must",
+    "does",
+    "did",
+    "was",
+    "were",
+    "hello",
+    "world",
+    "ciao",
+    "perche",
+    "perché",
+    "quindi",
+    "quando",
+    "dove",
+    "cosa",
+    "come",
+    "anche",
+    "rust",
+    "cargo",
+    "github",
+    "http",
+    "https",
+    "json",
+    "api",
+    "url",
+    "cli",
+    "tui",
+    "sql",
+    "html",
+    "css",
+    "enclave",
+    "ollama",
+    "openrouter",
+    "openai",
+    "anthropic",
+    "python",
+    "javascript",
+    "linux",
+    "macos",
+    "windows",
+    "google",
+    "amazon",
+    "microsoft",
+    "apple",
+    "lunedì",
+    "martedì",
+    "mercoledì",
+    "giovedì",
+    "venerdì",
+    "sabato",
+    "domenica",
+    "gennaio",
+    "febbraio",
+    "marzo",
+    "aprile",
+    "maggio",
+    "giugno",
+    "luglio",
+    "agosto",
+    "settembre",
+    "ottobre",
+    "novembre",
+    "dicembre",
 ];
 
 /// True for a proper-noun-shaped word: initial uppercase, rest lowercase, ≥3 chars.
@@ -369,7 +471,11 @@ pub fn scan(text: &str) -> Vec<Finding> {
     }
     findings.extend(scan_custom(text));
     // Remove overlaps: sort by (start, longest first), keep non-overlapping.
-    findings.sort_by(|a, b| a.start.cmp(&b.start).then((b.end - b.start).cmp(&(a.end - a.start))));
+    findings.sort_by(|a, b| {
+        a.start
+            .cmp(&b.start)
+            .then((b.end - b.start).cmp(&(a.end - a.start)))
+    });
     let mut kept: Vec<Finding> = Vec::new();
     let mut last_end = 0usize;
     for f in findings {
@@ -514,7 +620,9 @@ mod tests {
 
     #[test]
     fn card_requires_luhn() {
-        assert!(scan("card 4532015112830366").iter().any(|f| f.kind == FindingKind::Card));
+        assert!(scan("card 4532015112830366")
+            .iter()
+            .any(|f| f.kind == FindingKind::Card));
         assert!(scan("number 4532015112830367").is_empty()); // Luhn fails
         assert!(scan("year 202312345678901").is_empty());
     }
@@ -535,7 +643,8 @@ mod tests {
     #[test]
     fn redact_mixed_kinds_and_preserves_text() {
         let mut r = Redactor::new();
-        let out = r.apply("write mario@x.it or call +39 333 1234567 about IT60X0542811101000000123456");
+        let out =
+            r.apply("write mario@x.it or call +39 333 1234567 about IT60X0542811101000000123456");
         assert!(out.starts_with("write "));
         assert!(out.contains("[EMAIL_1]"));
         assert!(out.contains("[PHONE_1]"));
@@ -558,7 +667,9 @@ mod tests {
     #[test]
     fn ip_validation_rejects_bad_octets() {
         assert!(scan("host 999.888.1.1").is_empty());
-        assert!(scan("host 10.0.0.255").iter().any(|f| f.kind == FindingKind::Ip));
+        assert!(scan("host 10.0.0.255")
+            .iter()
+            .any(|f| f.kind == FindingKind::Ip));
     }
 
     #[test]

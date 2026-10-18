@@ -11,9 +11,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::config::{Settings, ToolsMode};
-use crate::core::engine::{ToolGate, ToolDecision};
 use crate::core::builtin_tools::{self, DelegateFn, ToolContext};
 use crate::core::engine::ChatEngine;
+use crate::core::engine::{ToolDecision, ToolGate};
 use crate::core::message::ToolCall;
 use crate::core::session::Session;
 use crate::error::{EnclaveError, Result};
@@ -55,7 +55,10 @@ impl AgentRunner {
             .iter()
             .map(|(name, p)| Persona {
                 name: name.clone(),
-                provider: p.provider.clone().unwrap_or_else(|| settings.default_provider.clone()),
+                provider: p
+                    .provider
+                    .clone()
+                    .unwrap_or_else(|| settings.default_provider.clone()),
                 model: p.model.clone(),
                 system_prompt: p.system_prompt.clone().unwrap_or_else(|| {
                     "You are a focused sub-agent. Complete the delegated task and \
@@ -150,20 +153,30 @@ impl AgentRunner {
         task: &str,
         gate: &mut dyn ToolGate,
     ) -> Result<String> {
-        let persona = self.personas.iter().find(|p| p.name == agent).ok_or_else(|| {
-            EnclaveError::other(format!(
-                "unknown agent '{agent}' (configured: {})",
-                self.personas.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(", ")
-            ))
-        })?;
+        let persona = self
+            .personas
+            .iter()
+            .find(|p| p.name == agent)
+            .ok_or_else(|| {
+                EnclaveError::other(format!(
+                    "unknown agent '{agent}' (configured: {})",
+                    self.personas
+                        .iter()
+                        .map(|p| p.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ))
+            })?;
 
         let api_key = if requires_api_key(&persona.provider) {
-            Some(SecureCredentials::local_api_key(&persona.provider).ok_or_else(|| {
-                EnclaveError::auth(format!(
+            Some(
+                SecureCredentials::local_api_key(&persona.provider).ok_or_else(|| {
+                    EnclaveError::auth(format!(
                     "no API key for provider '{}' (agent '{agent}') — run `enclave keys set {}`",
                     persona.provider, persona.provider
                 ))
-            })?)
+                })?,
+            )
         } else {
             None
         };
@@ -178,14 +191,17 @@ impl AgentRunner {
         let key = MasterKey::from_bytes(crypto::random_key());
         let memory = EncryptedMemory::open_ephemeral(&key)?;
         let session = Session::ephemeral(&format!("agent:{agent}"));
-        let mut engine =
-            ChatEngine::new(provider, model, memory, session, Some(persona.system_prompt.clone()));
+        let mut engine = ChatEngine::new(
+            provider,
+            model,
+            memory,
+            session,
+            Some(persona.system_prompt.clone()),
+        );
 
         let defs = self.sub_defs();
         let ctx = self.sub_context();
-        engine
-            .turn_agentic(task, &defs, &ctx, gate, 6)
-            .await
+        engine.turn_agentic(task, &defs, &ctx, gate, 6).await
     }
 
     /// Convenience for tests / direct use: run one tool call synchronously.

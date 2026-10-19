@@ -195,6 +195,32 @@ fn sandbox_write_dirs(workspace: &std::path::Path) -> Vec<String> {
     ] {
         dirs.push(extra.to_string());
     }
+    // Toolchain caches: build/test commands need their registry/cache writable
+    // (e.g. `~/.cargo`, `~/.rustup`, `~/.npm`, Go's module/build cache). These
+    // are caches, not secret stores, so allowing writes keeps `cargo test` and
+    // friends working inside the jail.
+    for var in [
+        "CARGO_HOME",
+        "RUSTUP_HOME",
+        "GOPATH",
+        "GOCACHE",
+        "GOMODCACHE",
+    ] {
+        if let Ok(dir) = std::env::var(var) {
+            if !dir.is_empty() {
+                dirs.push(dir);
+            }
+        }
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = std::path::PathBuf::from(home);
+        for rel in [".cargo", ".rustup", ".npm", ".cache", "go"] {
+            let dir = home.join(rel);
+            if dir.is_dir() {
+                dirs.push(dir.display().to_string());
+            }
+        }
+    }
     dirs
 }
 

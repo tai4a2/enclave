@@ -131,7 +131,7 @@ fn surface() -> Style {
 
 /// Text shown by `/help`.
 const SLASH_HELP: &str =
-    "commands: /help · /new · /switch · /branch [name] [--from N] · /log · /graph · /checkout <name> · /diff <a> <b> · /merge <branch> · /blame <text> · /provenance · /clear · /undo · /redo · /retry · /compact · /find <text> · /search <text> · /model [id] · /effort · /connect [provider] · /thinking · /details · /plan · /build · /attach <path> · /detach · /export [md|html|pdf] [path] · /editor · /init · /mcp · /ledger · /rag [index <paths>|search <q>|status|clear] · /airgap [on|off] · /route [on|off] · /remember <text> · /memory [search <q>|pin <id>] · /forget <id|text> · /checkpoint · /decide <title> [:: why] · /decisions [query] · /exposure · /context · /theme [name] · /commands · /credits · /panic · /quit   (Ctrl-P palette · Ctrl-S picker · Ctrl-R search sessions · Ctrl-Y copy · Ctrl-O editor · Shift+Tab plan/build · @file refs · !shell)";
+    "commands: /help · /new · /switch · /branch [name] [--from N] · /log · /graph · /checkout <name> · /diff <a> <b> · /merge <branch> · /blame <text> · /provenance · /clear · /undo · /redo · /retry · /compact · /find <text> · /search <text> · /model [id] · /effort · /connect [provider] · /thinking · /details · /plan · /build · /attach <path> · /detach · /export [md|html|pdf] [path] · /editor · /init · /mcp · /ledger · /rag [index <paths>|search <q>|status|clear] · /airgap [on|off] · /route [on|off] · /remember <text> · /memory [search <q>|pin <id>] · /forget <id|text> · /checkpoint · /snapshots · /snapshot [label] · /rewind <id|n> · /decide <title> [:: why] · /decisions [query] · /exposure · /traffic · /context · /verify · /theme [name] · /commands · /credits · /panic · /quit   (Ctrl-P palette · Ctrl-S picker · Ctrl-R search sessions · Ctrl-Y copy · Ctrl-O editor · Shift+Tab plan/build · @file refs · !shell)";
 
 /// Command palette entries (Ctrl-P): (command, one-line description).
 const PALETTE_COMMANDS: &[(&str, &str)] = &[
@@ -179,10 +179,18 @@ const PALETTE_COMMANDS: &[(&str, &str)] = &[
     ("/memory", "list / search / pin memories"),
     ("/forget", "delete a memory"),
     ("/checkpoint", "summarise this session into memory"),
+    ("/snapshots", "list workspace checkpoints"),
+    ("/snapshot", "snapshot the workspace now"),
+    ("/rewind", "restore the workspace to a checkpoint"),
     ("/decide", "record a decision with its rationale"),
     ("/decisions", "list/search recorded decisions"),
     ("/exposure", "privacy blast-radius + posture score"),
     ("/context", "show what goes into the context this turn"),
+    (
+        "/traffic",
+        "what left the machine + what was intercepted as sensitive",
+    ),
+    ("/verify", "run the project's checks locally (tests/lint)"),
     ("/commands", "list custom .md commands"),
     ("/credits", "show OpenRouter credits / usage"),
     ("/mcp", "list tools exposed by MCP servers"),
@@ -2798,6 +2806,94 @@ async fn run_app(
                                             }
                                         }
                                     }
+                                    "snapshots" | "ckpt" => match &engine.checkpoints {
+                                        None => {
+                                            status = "checkpoints are disabled ([checkpoints] enabled = false)".into()
+                                        }
+                                        Some(store) => {
+                                            let n = arg.trim().parse::<usize>().unwrap_or(20);
+                                            match store.list(n) {
+                                                Ok(items) if items.is_empty() => {
+                                                    status = "no checkpoints yet — they are taken automatically before file edits".into()
+                                                }
+                                                Ok(items) => {
+                                                    let mut text =
+                                                        String::from("workspace checkpoints:\n");
+                                                    for c in &items {
+                                                        text.push_str(&format!(
+                                                            "  {}  {}  {}\n",
+                                                            c.id, c.when, c.label
+                                                        ));
+                                                    }
+                                                    text.push_str(
+                                                        "\nuse /rewind <id|n> to restore (a safety snapshot is taken first)",
+                                                    );
+                                                    transcript.push(ChatLine {
+                                                        speaker: Speaker::System,
+                                                        text,
+                                                    });
+                                                    status = format!("{} checkpoint(s)", items.len());
+                                                }
+                                                Err(e) => status = format!("error: {e}"),
+                                            }
+                                        }
+                                    },
+                                    "snapshot" | "save-point" => {
+                                        let label = if arg.trim().is_empty() {
+                                            "manual checkpoint".to_string()
+                                        } else {
+                                            arg.trim().to_string()
+                                        };
+                                        match engine.snapshot(&label) {
+                                            Some(id) => {
+                                                transcript.push(ChatLine {
+                                                    speaker: Speaker::System,
+                                                    text: format!("checkpoint {id} — {label}"),
+                                                });
+                                                status = format!("checkpoint {id}");
+                                            }
+                                            None => {
+                                                status = "nothing to snapshot (no changes) or checkpoints disabled".into()
+                                            }
+                                        }
+                                    }
+                                    "rewind" | "undo-edit" => {
+                                        let target = arg.trim();
+                                        if target.is_empty() {
+                                            status =
+                                                "usage: /rewind <id|n>  (n = position in /snapshots)"
+                                                    .into();
+                                        } else {
+                                            let id = match target.parse::<usize>() {
+                                                Ok(n) => match &engine.checkpoints {
+                                                    Some(store) => store
+                                                        .list(n.max(1))
+                                                        .ok()
+                                                        .and_then(|items| {
+                                                            items
+                                                                .get(n.saturating_sub(1))
+                                                                .map(|c| c.id.clone())
+                                                        })
+                                                        .unwrap_or_else(|| target.to_string()),
+                                                    None => target.to_string(),
+                                                },
+                                                Err(_) => target.to_string(),
+                                            };
+                                            match &engine.checkpoints {
+                                                None => status = "checkpoints are disabled".into(),
+                                                Some(store) => match store.restore(&id) {
+                                                    Ok(()) => {
+                                                        transcript.push(ChatLine {
+                                                            speaker: Speaker::System,
+                                                            text: format!("workspace rewound to checkpoint {id} (a safety snapshot was taken first)"),
+                                                        });
+                                                        status = format!("rewound to {id}");
+                                                    }
+                                                    Err(e) => status = format!("error: {e}"),
+                                                },
+                                            }
+                                        }
+                                    }
                                     "checkpoint" => match engine
                                         .summarize(
                                             "Summarise the key facts, decisions, preferences and open questions from this conversation into a short bullet list suitable for long-term memory. Reply with the bullet list only.",
@@ -2904,6 +3000,47 @@ async fn run_app(
                                             text: context_text(engine),
                                         });
                                         status = "context inspects what is sent".into();
+                                    }
+                                    "traffic" | "sent" => {
+                                        match traffic_text(engine) {
+                                            Ok(t) => {
+                                                transcript.push(ChatLine {
+                                                    speaker: Speaker::System,
+                                                    text: t,
+                                                });
+                                                status = "traffic — what left the machine".into();
+                                            }
+                                            Err(e) => status = format!("error: {e}"),
+                                        }
+                                    }
+                                    "verify" => {
+                                        match engine.verify_program() {
+                                            None => {
+                                                status = "no verification command detected — set [verify] command".into()
+                                            }
+                                            Some(prog) => {
+                                                match engine.run_verification(&ctx).await {
+                                                    Ok(Some(rep)) => {
+                                                        for line in rep.output.lines() {
+                                                            transcript.push(ChatLine {
+                                                                speaker: Speaker::Tool,
+                                                                text: line.to_string(),
+                                                            });
+                                                        }
+                                                        transcript.push(ChatLine {
+                                                            speaker: Speaker::System,
+                                                            text: format!(
+                                                                "[verify] {} — {}",
+                                                                prog.command, rep.summary
+                                                            ),
+                                                        });
+                                                        status = rep.summary;
+                                                    }
+                                                    Ok(None) => status = "nothing to verify".into(),
+                                                    Err(e) => status = format!("error: {e}"),
+                                                }
+                                            }
+                                        }
                                     }
                                     "panic" => {
                                         locked = true;
@@ -4419,8 +4556,12 @@ fn draw_ui(
                 .ok()
                 .and_then(|v| serde_json::to_string_pretty(&v).ok())
                 .unwrap_or_else(|| call.arguments.clone());
+            let risk = engine
+                .risk_of(call)
+                .map(|h| format!("\n⚠ {} command — {}", h.risk.label(), h.reason))
+                .unwrap_or_default();
             let body = format!(
-                "⚙ {} — tool call {}/{} · nothing runs without your approval\n{}\nrun? [y]es / [n]o / [a]ll / [q]uit",
+                "⚙ {} — tool call {}/{} · nothing runs without your approval{risk}\n{}\nrun? [y]es / [n]o / [a]ll / [q]uit",
                 call.name,
                 idx + 1,
                 calls.len(),
@@ -5559,6 +5700,44 @@ fn decisions_to_text(ds: &[crate::privacy::Decision]) -> String {
         .join("\n")
 }
 
+/// Build the "traffic" text: the outbound requests and what was intercepted
+/// as sensitive (fingerprints only — never payloads).
+fn traffic_text(engine: &ChatEngine) -> crate::error::Result<String> {
+    let entries = engine.memory.list_egress(30)?;
+    if entries.is_empty() {
+        return Ok("traffic — nothing has left this machine yet".into());
+    }
+    let mut out = String::from("traffic — outbound requests (fingerprints only)\n\n");
+    let mut intercepted = 0usize;
+    for e in &entries {
+        let sensitive = !e.redactions.trim().is_empty();
+        if sensitive {
+            intercepted += 1;
+        }
+        let mark = if sensitive {
+            format!("⛔ intercepted: {}", e.redactions)
+        } else {
+            "ok".to_string()
+        };
+        out.push_str(&format!(
+            "  #{:<4} {}  {} · {}  {}  {}\n",
+            e.id,
+            e.ts.get(..16).unwrap_or(&e.ts),
+            e.provider,
+            e.model,
+            fmt_bytes(e.payload_bytes.max(0) as u64),
+            mark,
+        ));
+    }
+    out.push_str(&format!(
+        "\n{} request(s) · {} intercepted as sensitive · nothing stored in clear\n",
+        entries.len(),
+        intercepted,
+    ));
+    out.push_str("tip: /exposure shows the aggregate + privacy score");
+    Ok(out)
+}
+
 /// Build the "privacy blast-radius" + score text for the TUI.
 fn exposure_text(
     engine: &ChatEngine,
@@ -5816,10 +5995,15 @@ fn welcome_lines(tools_enabled: bool) -> Vec<Line<'static>> {
         key("/memory", "list memories (/memory search <q> · /memory pin <id>)"),
         key("/forget", "delete a memory by id or text"),
         key("/checkpoint", "summarise this session into long-term memory"),
+        key("/snapshots", "list workspace checkpoints (local, git-backed)"),
+        key("/snapshot", "snapshot the workspace now: /snapshot [label]"),
+        key("/rewind", "restore the workspace to a checkpoint: /rewind <id|n>"),
         key("/decide", "record a decision: /decide title :: rationale"),
         key("/decisions", "list or search recorded decisions"),
         key("/exposure", "privacy blast-radius and posture score"),
         key("/context", "explain what is sent this turn (why is this in context?)"),
+        key("/traffic", "what left the machine and what was intercepted as sensitive"),
+        key("/verify", "run the project's tests/lint locally in the sandbox"),
         key("/copy", "copy the last reply (or the last N replies: /copy 3)"),
         key("/save", "save this conversation as a Markdown file (plaintext)"),
         key("/undo /redo", "undo the last turn / restore it"),

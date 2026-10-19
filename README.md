@@ -323,6 +323,68 @@ budget_tokens = 128000
 warn_pct = 80
 ```
 
+## Workspace checkpoints (snapshot & rewind)
+
+Before the assistant changes a file in **agentic mode**, Enclave takes a
+**local snapshot** of your working directory into a private *shadow* git repo
+(kept in the app data dir — never your project's own `.git`, never the network,
+with a neutral `Enclave` commit identity so your git identity never leaks).
+If an edit goes wrong you can rewind.
+
+```bash
+enclave checkpoint list            # recent snapshots (id · when · label)
+enclave checkpoint create "wip"    # snapshot now (nothing to do if unchanged)
+enclave checkpoint diff <id>       # what that snapshot changed
+enclave checkpoint restore <id>    # rewind the workspace (a safety snapshot is taken first)
+```
+
+In the TUI: `/snapshots` (list), `/snapshot [label]`, `/rewind <id|n>`.
+In the web UI: the **snapshots** toolbar button (list + ↺ restore), or
+`/snapshots`, `/snapshot`, `/rewind`. History stays **linear and reversible** —
+a rewind is itself a new snapshot, so you can always go back.
+
+Disable with `[checkpoints] enabled = false` in `config.toml`.
+
+## Auto verification loop
+
+After the assistant edits files in agentic mode, Enclave can run your project's
+own checks **locally** and hand failures back to the model so it fixes them by
+itself — no need to copy/paste test output. Enclave auto-detects the command
+from `Cargo.toml` (`cargo test`), `package.json` (`npm test`), `pyproject.toml`
+(`pytest`), `go.mod` (`go test ./...`) or a `Makefile` test target.
+
+```bash
+enclave verify                     # run the detected checks now
+enclave verify --command "make lint"
+```
+
+In the TUI: `/verify`. In the web UI: the **verify** toolbar button or `/verify`.
+Configure with:
+
+```toml
+[verify]
+auto = true                 # verify after edits and feed failures back (default)
+command = "cargo test"      # optional: override auto-detection
+max_attempts = 2            # how many times a failure is fed back
+timeout_secs = 300
+```
+
+## Command risk classifier
+
+Shell commands proposed by the model are classified **offline** before they
+run. Clearly destructive ones — `rm -rf /` or `~/`, `dd of=/dev/…`, `mkfs`,
+`curl … | sh`, `shutdown`, a fork bomb — are **refused by default** and, as a
+badge, marked in every approval panel (`⚠ dangerous — piping a download
+directly into a shell`). Risky-but-recoverable ones (`git push --force`,
+`git reset --hard`, `sudo`, `history -c`) are flagged `⚠ risky`. Ordinary
+commands (`cargo test`, `git status`, `rm -rf target/`) are not flagged.
+
+```toml
+[permissions]
+block_destructive = true    # refuse dangerous commands (default);
+                            # set false to always ask instead
+```
+
 ## Conversation branches (Conversation Git)
 
 Enclave can treat a conversation like **git treats code**: instead of a single
@@ -866,6 +928,8 @@ launch.
 | `enclave or endpoints <model>` | Provider endpoints, context and prices for a model |
 | `enclave or keys list\|create\|get\|update\|delete` | Manage OpenRouter provisioning keys (needs `ENCLAVE_OPENROUTER_PROVISIONING_KEY`) |
 | `enclave serve [-p 7878]` | Start the local-only web UI of your encrypted memory (loopback + per-run token) |
+| `enclave checkpoint list\|create\|restore\|diff` | Local workspace snapshots (shadow git) — rewind agent edits |
+| `enclave verify [--command <cmd>]` | Run the project's tests/lint locally in the sandbox |
 
 Security/privacy audit: see [docs/audit.md](docs/audit.md).
 

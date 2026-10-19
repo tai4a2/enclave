@@ -293,6 +293,11 @@ pub struct Permissions {
     /// Command-pattern rules for `run_shell` (e.g. `"git status*" = "allow"`).
     #[serde(default)]
     pub bash_rules: std::collections::BTreeMap<String, Action>,
+    /// Refuse clearly destructive shell commands (wiping disks, piping a
+    /// download into a shell, `rm -rf` on a system/home path…). When false they
+    /// still always ask, even under `--auto`. See `src/core/risk.rs`.
+    #[serde(default = "default_true")]
+    pub block_destructive: bool,
 }
 
 /// One sub-agent persona (`[agent.personas.<name>]`).
@@ -474,6 +479,73 @@ impl Default for ContextSettings {
     }
 }
 
+/// Workspace checkpoints: snapshot the working directory (into a private local
+/// shadow git repository, never the project's own `.git`) before Enclave edits
+/// files, so a change can be rewound. Fully local — no remote, no network.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct CheckpointSettings {
+    /// Enable automatic snapshots before file-modifying tool calls.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// How many recent snapshots to keep for listing (informational).
+    #[serde(default = "default_checkpoint_max")]
+    pub max: usize,
+}
+
+fn default_checkpoint_max() -> usize {
+    100
+}
+
+impl Default for CheckpointSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max: 100,
+        }
+    }
+}
+
+/// Auto verification loop (see `src/core/verify.rs`).
+///
+/// After agentic file edits Enclave can run the project's own checks locally
+/// (tests, lint, typecheck) in the command sandbox and hand failures back to
+/// the model so it fixes them by itself. Fully offline.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct VerifySettings {
+    /// Enable the automatic post-edit verification loop.
+    #[serde(default = "default_true")]
+    pub auto: bool,
+    /// Explicit command to run. When empty, Enclave auto-detects one from
+    /// `Cargo.toml` / `package.json` / `pyproject.toml` / `go.mod` / `Makefile`.
+    #[serde(default)]
+    pub command: Option<String>,
+    /// How many times a failing verification may be fed back to the model.
+    #[serde(default = "default_verify_attempts")]
+    pub max_attempts: u8,
+    /// Timeout for one verification run.
+    #[serde(default = "default_verify_timeout")]
+    pub timeout_secs: u64,
+}
+
+fn default_verify_attempts() -> u8 {
+    2
+}
+
+fn default_verify_timeout() -> u64 {
+    300
+}
+
+impl Default for VerifySettings {
+    fn default() -> Self {
+        Self {
+            auto: true,
+            command: None,
+            max_attempts: 2,
+            timeout_secs: 300,
+        }
+    }
+}
+
 /// Persisted, non-sensitive application settings.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Settings {
@@ -550,6 +622,12 @@ pub struct Settings {
     /// Context budgeting for the Context Inspector.
     #[serde(default)]
     pub context: ContextSettings,
+    /// Workspace checkpoint snapshots (local, git-backed).
+    #[serde(default)]
+    pub checkpoints: CheckpointSettings,
+    /// Auto verification loop after agentic file edits.
+    #[serde(default)]
+    pub verify: VerifySettings,
 }
 
 fn default_true() -> bool {
@@ -601,6 +679,8 @@ impl Default for Settings {
             routing: RoutingSettings::default(),
             network: NetworkSettings::default(),
             context: ContextSettings::default(),
+            checkpoints: CheckpointSettings::default(),
+            verify: VerifySettings::default(),
         }
     }
 }

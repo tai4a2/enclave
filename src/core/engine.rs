@@ -50,6 +50,7 @@ use async_trait::async_trait;
 use crate::config::{Action, EgressAction, Permissions};
 use crate::core::attachment::Attachment;
 use crate::core::builtin_tools::{self, ToolContext};
+use crate::core::checkpoint::CheckpointStore;
 use crate::core::message::{Message, ToolCall};
 use crate::core::session::Session;
 use crate::error::{EnclaveError, Result};
@@ -165,7 +166,10 @@ impl AgentMode {
 }
 
 fn is_mutating_tool(name: &str) -> bool {
-    matches!(name, "write_file" | "edit_file" | "run_shell" | "delegate")
+    matches!(
+        name,
+        "write_file" | "edit_file" | "apply_patch" | "run_shell" | "delegate"
+    )
 }
 
 /// Orchestrates a conversation turn by turn.
@@ -224,6 +228,16 @@ pub struct ChatEngine {
     pub context_budget: Option<usize>,
     /// Percentage of the budget at which the inspector warns.
     pub context_warn_pct: u8,
+    /// Local, git-backed workspace snapshots (checkpoints).
+    pub checkpoints: Option<CheckpointStore>,
+    /// Auto verification loop: run the project's checks after agentic edits.
+    pub verify_auto: bool,
+    /// Explicit verification command (`[verify] command`).
+    pub verify_command: Option<String>,
+    /// How many failing verification runs are fed back to the model.
+    pub verify_max_attempts: u8,
+    /// Timeout for one verification run, in seconds.
+    pub verify_timeout_secs: u64,
 }
 
 impl ChatEngine {
@@ -265,6 +279,11 @@ impl ChatEngine {
             judge_action: EgressAction::Allow,
             context_budget: None,
             context_warn_pct: 80,
+            checkpoints: None,
+            verify_auto: true,
+            verify_command: None,
+            verify_max_attempts: 2,
+            verify_timeout_secs: 300,
         }
     }
 
@@ -326,6 +345,11 @@ impl ChatEngine {
             judge_action: EgressAction::Allow,
             context_budget: None,
             context_warn_pct: 80,
+            checkpoints: None,
+            verify_auto: true,
+            verify_command: None,
+            verify_max_attempts: 2,
+            verify_timeout_secs: 300,
         })
     }
 
@@ -362,6 +386,25 @@ impl ChatEngine {
     pub fn reload_decisions(&mut self) -> Result<()> {
         self.decisions = self.memory.list_decisions(20)?;
         Ok(())
+    }
+
+    /// Record a workspace snapshot (checkpoint). Best-effort: returns `None`
+    /// when checkpoints are disabled, git is unavailable, or nothing changed.
+    pub fn snapshot(&mut self, label: &str) -> Option<String> {
+        let store = self.checkpoints.as_ref()?;
+        store.snapshot(label).ok().flatten()
+    }
+
+    /// Snapshot the workspace *before* a file-modifying tool call, so the edit
+    /// can be rewound. No-op for read-only tools.
+    pub fn checkpoint_before(&mut self, call: &ToolCall) -> Option<String> {
+        if !is_mutating_tool(&call.name) {
+            return None;
+        }
+        let target = crate::core::permissions::call_target_path(call)
+            .map(|p| format!(" {p}"))
+            .unwrap_or_default();
+        self.snapshot(&format!("before {}{target}", call.name))
     }
 
     /// Execute a tool call that needs engine state (`remember`, `decide`),
@@ -783,6 +826,21 @@ impl ChatEngine {
         if action == Action::Ask && self.permissions.auto {
             action = Action::Allow;
         }
+        // Destructive-command safety net: clearly dangerous shell commands are
+        // refused (default) or at least always asked, even under `--auto`.
+        if call.name == "run_shell" {
+            if let Some(hit) =
+                crate::core::risk::classify(&crate::core::permissions::call_command(call))
+            {
+                if hit.risk == crate::core::risk::Risk::High {
+                    action = if self.permissions.block_destructive {
+                        Action::Deny
+                    } else {
+                        crate::core::permissions::combine(action, Action::Ask)
+                    };
+                }
+            }
+        }
         // Prompt-injection hardening: a tool call that follows untrusted tool
         // output always needs a fresh approval, even under `--auto`.
         if self.injection
@@ -796,6 +854,52 @@ impl ChatEngine {
             action = crate::core::permissions::combine(action, Action::Ask);
         }
         action
+    }
+
+    /// Risk classification for a tool call, if any (used for warning badges in
+    /// the CLI / TUI / web approval panels).
+    pub fn risk_of(&self, call: &ToolCall) -> Option<crate::core::risk::RiskHit> {
+        if call.name != "run_shell" {
+            return None;
+        }
+        crate::core::risk::classify(&crate::core::permissions::call_command(call))
+    }
+
+    /// The verification command in effect: the explicit `[verify] command`, or
+    /// one auto-detected from the workspace.
+    pub fn verify_program(&self) -> Option<crate::core::verify::VerifyCommand> {
+        if let Some(cmd) = self.verify_command.as_ref() {
+            if !cmd.trim().is_empty() {
+                return Some(crate::core::verify::VerifyCommand {
+                    command: cmd.clone(),
+                    source: "[verify] command".into(),
+                });
+            }
+        }
+        crate::core::verify::detect(&self.workspace)
+    }
+
+    /// Run the project's verification command (if any). Fully local, in the
+    /// command sandbox.
+    pub async fn run_verification(
+        &mut self,
+        ctx: &ToolContext,
+    ) -> Result<Option<crate::core::verify::VerifyReport>> {
+        let Some(prog) = self.verify_program() else {
+            return Ok(None);
+        };
+        let report = crate::core::verify::run(
+            &self.workspace,
+            &prog.command,
+            self.verify_timeout_secs,
+            ctx.max_output_bytes.max(4096),
+            // Verification is the project's own test/lint command (detected or
+            // configured by the user), so it runs with normal access — like CI.
+            // Jailing it breaks tools that spawn helpers (and nests sandbox-exec).
+            None,
+        )
+        .await?;
+        Ok(Some(report))
     }
 
     /// Persist the user's input and start streaming the assistant reply.
@@ -889,10 +993,11 @@ impl ChatEngine {
         self.push_user(input, attachments)?;
         let mut approve_all = false;
         let mut seen: HashMap<String, u32> = HashMap::new();
+        let mut edits = 0u32;
+        let mut verify_failures = 0u8;
 
         for _ in 0..max_iterations.max(1) {
             self.apply_egress_policy()?;
-            self.apply_dlp_judge().await?;
             self.apply_dlp_judge().await?;
             let messages = self.outgoing_messages();
             let _ = self.record_egress(&messages);
@@ -905,6 +1010,20 @@ impl ChatEngine {
             if response.tool_calls.is_empty() {
                 self.session
                     .push(Message::assistant(response.text.clone()), &self.memory)?;
+                // Auto verification loop: after edits, run the project's own
+                // checks and hand failures back to the model to fix.
+                if self.verify_auto && edits > 0 && verify_failures < self.verify_max_attempts {
+                    if let Ok(Some(report)) = self.run_verification(ctx).await {
+                        if !report.passed {
+                            verify_failures += 1;
+                            self.session.push(
+                                Message::user(crate::core::verify::feedback(&report)),
+                                &self.memory,
+                            )?;
+                            continue;
+                        }
+                    }
+                }
                 return Ok(response.text);
             }
 
@@ -961,14 +1080,20 @@ impl ChatEngine {
                             "[denied by user]".to_string()
                         }
                     }
-                    ToolDecision::Approve => match self.execute_stateful(call) {
-                        Some(Ok(out)) => out,
-                        Some(Err(e)) => format!("[tool error] {e}"),
-                        None => match builtin_tools::execute(call, ctx, gate).await {
-                            Ok(out) => out,
-                            Err(e) => format!("[tool error] {e}"),
-                        },
-                    },
+                    ToolDecision::Approve => {
+                        self.checkpoint_before(call);
+                        if is_mutating_tool(&call.name) {
+                            edits += 1;
+                        }
+                        match self.execute_stateful(call) {
+                            Some(Ok(out)) => out,
+                            Some(Err(e)) => format!("[tool error] {e}"),
+                            None => match builtin_tools::execute(call, ctx, gate).await {
+                                Ok(out) => out,
+                                Err(e) => format!("[tool error] {e}"),
+                            },
+                        }
+                    }
                     ToolDecision::ApproveAll => unreachable!("converted above"),
                 };
 

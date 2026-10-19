@@ -158,6 +158,21 @@ pub enum Command {
         #[arg(long)]
         session: Option<String>,
     },
+    /// Workspace checkpoints: snapshot the working directory and rewind edits.
+    Checkpoint {
+        #[command(subcommand)]
+        action: CheckpointAction,
+    },
+    /// Run the project's verification command locally (tests/lint).
+    Verify {
+        /// Override the detected command (default: auto-detect).
+        #[arg(long)]
+        command: Option<String>,
+        /// Run the command inside the command sandbox (off by default: tests
+        /// need normal access, like CI).
+        #[arg(long)]
+        sandbox: bool,
+    },
     /// Manage the local encrypted RAG index (index files, search offline).
     Rag {
         #[command(subcommand)]
@@ -309,6 +324,32 @@ pub enum MemoryAction {
     },
 }
 
+/// `enclave checkpoint` sub-commands (local workspace snapshots).
+#[derive(Subcommand, Debug)]
+pub enum CheckpointAction {
+    /// List recorded snapshots (most recent first).
+    List {
+        #[arg(short, long, default_value = "20")]
+        limit: usize,
+    },
+    /// Record a snapshot now.
+    Create {
+        /// Optional label (default: "manual checkpoint").
+        #[arg(default_value = "")]
+        label: String,
+    },
+    /// Rewind the workspace to a snapshot (a safety snapshot is taken first).
+    Restore {
+        /// Snapshot id (e.g. `a1b2c3d`).
+        id: String,
+    },
+    /// Show what a snapshot changed.
+    Diff {
+        /// Snapshot id (e.g. `a1b2c3d`).
+        id: String,
+    },
+}
+
 /// `enclave decisions` sub-commands (ADR-style project log).
 #[derive(Subcommand, Debug)]
 pub enum DecisionsAction {
@@ -436,6 +477,12 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::Sessions { action } => sessions_cmd(&paths, &settings, action),
         Command::Memory { action } => memory_cmd(&paths, &settings, action),
         Command::Decisions { action } => decisions_cmd(&paths, &settings, action),
+        Command::Checkpoint { action } => checkpoint_cmd(&paths, &settings, action),
+        Command::Verify { command, sandbox } => {
+            let runtime = tokio::runtime::Runtime::new()
+                .map_err(|e| EnclaveError::other(format!("runtime: {e}")))?;
+            runtime.block_on(verify_cmd(&settings, command, sandbox))
+        }
         Command::Exposure { session } => exposure_cmd(&paths, &settings, session),
         Command::Context { session } => context_cmd(&paths, &settings, session),
         Command::Ledger {
@@ -730,8 +777,18 @@ fn build_engine(
     engine.judge_action = settings.policy.judge_action;
     engine.context_budget = settings.context.budget_tokens.filter(|n| *n > 0);
     engine.context_warn_pct = settings.context.warn_pct;
+    if settings.checkpoints.enabled {
+        engine.checkpoints = Some(crate::core::checkpoint::CheckpointStore::new(
+            &cwd,
+            &paths.data_dir,
+        ));
+    }
     engine.reload_memories()?;
     engine.reload_decisions()?;
+    engine.verify_auto = settings.verify.auto;
+    engine.verify_command = settings.verify.command.clone();
+    engine.verify_max_attempts = settings.verify.max_attempts;
+    engine.verify_timeout_secs = settings.verify.timeout_secs;
     persist_working_session(paths, &engine.session.id);
     Ok(engine)
 }
@@ -926,6 +983,11 @@ impl crate::core::engine::ToolGate for CliGate {
                 serde_json::to_string_pretty(&v).unwrap_or_default()
             ),
             Err(_) => println!("  args: {}", call.arguments),
+        }
+        if let Some(hit) =
+            crate::core::risk::classify(&crate::core::permissions::call_command(call))
+        {
+            println!("  ⚠ {} command: {}", hit.risk.label(), hit.reason);
         }
         let answer = prompt_run_choice().unwrap_or_default();
         match answer.as_str() {
@@ -1452,6 +1514,104 @@ fn memory_cmd(paths: &Paths, settings: &Settings, action: MemoryAction) -> Resul
 }
 
 /// Record and recall the ADR-style project decision log.
+/// `enclave checkpoint` — local workspace snapshots (shadow git repo).
+fn checkpoint_cmd(paths: &Paths, settings: &Settings, action: CheckpointAction) -> Result<()> {
+    let workspace = std::env::current_dir().unwrap_or_default();
+    let store = crate::core::checkpoint::CheckpointStore::new(&workspace, &paths.data_dir);
+    if !store.is_available() {
+        return Err(EnclaveError::other(
+            "git is required for checkpoints but was not found on PATH",
+        ));
+    }
+    match action {
+        CheckpointAction::List { limit } => {
+            let items = store.list(limit)?;
+            if items.is_empty() {
+                println!("no checkpoints yet — they are taken automatically before file edits");
+                return Ok(());
+            }
+            for c in &items {
+                println!("{}  {}  {}", c.id, c.when, c.label);
+            }
+            println!("\n{} checkpoint(s)", items.len());
+        }
+        CheckpointAction::Create { label } => {
+            let label = if label.trim().is_empty() {
+                "manual checkpoint"
+            } else {
+                label.trim()
+            };
+            match store.snapshot(label)? {
+                Some(id) => println!("checkpoint {id} — {label}"),
+                None => println!("nothing to snapshot (no changes since the last checkpoint)"),
+            }
+        }
+        CheckpointAction::Restore { id } => {
+            store.restore(&id)?;
+            println!(
+                "rewound the workspace to checkpoint {id} (a safety snapshot was taken first)"
+            );
+        }
+        CheckpointAction::Diff { id } => {
+            let stat = store.diff_stat(&id)?;
+            if stat.trim().is_empty() {
+                println!("no diff for checkpoint {id}");
+            } else {
+                print!("{stat}");
+            }
+        }
+    }
+    let _ = &settings;
+    Ok(())
+}
+
+/// Run the project's verification command locally (auto-detected by default).
+async fn verify_cmd(settings: &Settings, command: Option<String>, sandboxed: bool) -> Result<()> {
+    let workspace = std::env::current_dir().unwrap_or_default();
+    let program = match command {
+        Some(cmd) if !cmd.trim().is_empty() => crate::core::verify::VerifyCommand {
+            command: cmd,
+            source: "--command".into(),
+        },
+        _ => match crate::core::verify::detect(&workspace) {
+            Some(prog) => prog,
+            None => {
+                println!(
+                    "no verification command detected here — pass --command \"<cmd>\" \
+                     (looked for Cargo.toml, package.json, pyproject.toml, go.mod, Makefile)"
+                );
+                return Ok(());
+            }
+        },
+    };
+    println!("verify: {} (from {})", program.command, program.source);
+    let sandbox = if sandboxed {
+        Some(crate::core::tools::Sandbox::new(
+            settings.tools.sandbox,
+            workspace.clone(),
+        ))
+    } else {
+        None
+    };
+    let report = crate::core::verify::run(
+        &workspace,
+        &program.command,
+        settings.verify.timeout_secs,
+        settings.tools.max_output_bytes.max(4096),
+        sandbox.as_ref(),
+    )
+    .await?;
+    print!("{}", report.output);
+    if !report.output.ends_with('\n') {
+        println!();
+    }
+    println!("{}", report.summary);
+    if !report.passed {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
 fn decisions_cmd(paths: &Paths, settings: &Settings, action: DecisionsAction) -> Result<()> {
     use crate::privacy::EncryptedMemory;
 

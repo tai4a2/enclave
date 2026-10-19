@@ -64,6 +64,21 @@ fn path_of(call: &ToolCall) -> String {
         .unwrap_or_default()
 }
 
+/// The file path a tool call targets, if any (used for checkpoint labels).
+pub fn call_target_path(call: &ToolCall) -> Option<String> {
+    let path = path_of(call);
+    if path.is_empty() {
+        None
+    } else {
+        Some(path)
+    }
+}
+
+/// The shell command of a `run_shell` call (empty string for other tools).
+pub fn call_command(call: &ToolCall) -> String {
+    command_of(call)
+}
+
 /// Best (longest, then strictest) matching command rule for `cmd`.
 fn best_bash_match(perms: &Permissions, cmd: &str) -> Option<Action> {
     let mut best: Option<(usize, Action)> = None;

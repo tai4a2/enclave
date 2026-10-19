@@ -5,7 +5,7 @@ Run the built binary from `./dist/enclave`; the user mostly uses `./dist/enclave
 
 ## Build & verify loop (ALWAYS)
 After every change:
-1. `cargo test` — must stay green (currently 220 tests).
+1. `cargo test` — must stay green (currently 232 tests).
 2. `cargo clippy --all-targets` — must be 0 warnings.
 3. `cargo build --release`
 4. `cp target/release/enclave dist/enclave && codesign --force --sign - dist/enclave`
@@ -15,10 +15,11 @@ macOS re-prompts the keychain on launch.
 
 ## Git
 - Commit ONLY on explicit user request. Do not commit proactively.
-- Branch `main`. Last commit: `8cf67c6`
-  ("Add context inspector (what is sent this turn)").
-  HEAD~1 = `9205be5` ("Add project decisions (ADR log) and privacy blast-radius/score").
-  UNCOMMITTED working tree: the **context budgeter (#9)** (config/engine/cli/tui/web + tests).
+- Branch `main`. Last commit: `9c77225`
+  ("Add documentation, brand assets and publishing preparation").
+  History tail: `eef67aa` (context budgeter) → `8cf67c6` (context inspector) →
+  `9205be5` (decisions + blast-radius/score) → `651f65b` (web UI + TUI polish) → `9c77225`.
+  Working tree CLEAN as of 9c77225.
 
 ## Environment
 - Config dir: `~/Library/Application Support/dev.enclave.enclave`
@@ -30,7 +31,7 @@ macOS re-prompts the keychain on launch.
 - The user has an OpenRouter key (previously 403 "PII detected" — server-side, avoid PII).
 - Toolchain pinned in `rust-toolchain.toml` (1.99.0).
 
-## State (all committed at fc79301)
+## State (committed at 9c77225; 232 tests green, clippy 0)
 Everything through security Waves A–C is implemented and tested (218 tests green,
 clippy 0): crypto/vault/SQLCipher memory; 4 providers (openrouter/openai/anthropic/ollama)
 with streaming + real function calling; privacy guard (regex PII + local NER + placeholders)
@@ -49,8 +50,30 @@ TTL; duress + `/panic`. Build/supply-chain: `deny.toml`, `.github/workflows/ci.y
 `scripts/release.sh`. TUI is an opencode-style borderless dark layout with right info panel,
 cards transcript and inline diffs.
 
-Docs: `README.md`, `docs/{architecture,privacy,tools,audit,jev-idea,security-roadmap}.md`,
-and `docs/Security-Roadmap.pdf`.
+Also done and committed at `9c77225`: the **web UI chat redesign** (inline composer at the
+end of the transcript, right-aligned user bubbles, framed code windows with line numbers +
+copy, before/after split diffs) and the **TUI code windows** (`╭─`/`╰─` framed blocks with
+coloured diff lines); supply-chain fixes (rustls 0.23.46, ratatui 0.30 `default-features=false`
++ `crossterm`, `deny.toml` + `CDLA-Permissive-2.0`); `cargo fmt` across the tree; `keys.toml`
+added to `.gitignore`.
+
+Docs: `README.md` (banner, badges, screenshots, quickstart), `docs/{INSTALL,USAGE,architecture,
+privacy,tools,providers,audit,jev-idea,security-roadmap,roadmap-memory-context}.md`, root
+`SECURITY.md` / `CONTRIBUTING.md` / `CODE_OF_CONDUCT.md` / `CHANGELOG.md`, `assets/` (logo,
+banner, tui.png, web.png), `scripts/install.sh`. Tests: 232. Linux CI simulated green
+(fmt/clippy/test/deny/audit) via a Docker container `enclave-linux`.
+
+## Publishing status (NOT yet pushed anywhere)
+- **Blocker**: `Cargo.toml` still has the placeholder `repository = "https://github.com/enclave/enclave"`.
+  Needs the real GitHub URL. Planned: dedicated identity (e.g. `taikaku@users.noreply.github.com`)
+  and a repo/org (one login; `gh` on this Mac is logged into `tai4a2` with an invalid token).
+- Privacy: no real secrets in the tree (the token-like strings are test fixtures). The only
+  personal path was sanitised. NOTE: earlier commits still contain an absolute home
+  path (`/Users/<name>/...`) in `AGENTS.md`; a clean history would need `git filter-repo`
+  (offered, not done).
+- Windows support was explicitly NOT pursued (macOS + Linux only). The shell invocation is
+  hard-wired to `sh -c` (`src/core/tools.rs`), so Windows would need a `cmd /C` branch; the
+  sandbox and `secure.rs` (mlock) are macOS/unix-only.
 
 ## NEXT WORK
 Security roadmap Waves A–C complete (C2 E2EE sync and C5 split inference are documented
@@ -94,6 +117,55 @@ The conversation is treated like git: encrypted, branchable, verifiable.
   `EgressSummary` (`EncryptedMemory::egress_summary`); CLI `enclave exposure [--session]`;
   TUI `/exposure` (`/blast-radius`); web UI `/api/exposure` + toolbar button. Counts/kinds
   only, never payloads.
+
+### Workspace checkpoints (NEW, UNCOMMITTED)
+Snapshot & rewind for agent file edits, in a private *shadow* git repo (`<data>/checkpoints.git`,
+never the project's `.git`, no network, neutral `Enclave` commit identity).
+- Core: `src/core/checkpoint.rs` (`CheckpointStore::{new,is_available,snapshot,list,count,restore,diff_stat}`;
+  `restore` = checkout `<id> -- .` + `clean -fd` + a new `rewind to <id>` snapshot → history stays
+  linear/reversible). `Checkpoint` struct. Exported from `src/core/mod.rs`.
+- Config `[checkpoints]` (`CheckpointSettings{enabled=true,max=100}` in `src/config.rs`).
+- Engine: `ChatEngine.checkpoints: Option<CheckpointStore>`, `snapshot(label)`, `checkpoint_before(call)`
+  (auto-snapshot before mutating tools; `is_mutating_tool` now also covers `apply_patch`); wired in
+  `build_engine` so CLI/TUI/web all get it.
+- CLI: `enclave checkpoint list|create|diff|restore` (`Command::Checkpoint`/`CheckpointAction`, `checkpoint_cmd`).
+- TUI: `/snapshots` (`/ckpt`), `/snapshot [label]`, `/rewind <id|n>`.
+- Web: `/api/checkpoints[/save|/restore]` + `openCkpt/saveCkpt/restoreCkpt` + toolbar **snapshots** chip.
+- Tests: `tests/checkpoint.rs` (3). Docs: README + docs/USAGE.md + CHANGELOG.
+Wave 2 next: auto verify loop after edits + LSP diagnostics + command risk classifier.
+Wave 3: Agent Skills + repo map/code index + hooks + git worktree per branch.
+
+### Wave 2 — risk classifier, auto-verify, traffic menu (NEW, UNCOMMITTED)
+- **Command risk classifier** `src/core/risk.rs` (`Risk{High,Medium}`, `RiskHit`,
+  `classify(cmd)`): offline heuristics for `rm -rf /|~|*`, `dd of=/dev/`,
+  `mkfs`, fork bomb, `> /dev/sd*`, `shutdown/reboot`, `sudo rm`, `curl|sh`,
+  `eval$(curl` (High) and `git push --force`, `git reset --hard`,
+  `git clean -fd`, `sudo`, `chmod -R 777 /`, `npm/cargo publish`, `history -c`
+  (Medium). Wired in `ChatEngine::effective_action` (High → `Deny` when
+  `[permissions] block_destructive` (default true), else always `Ask`) and
+  exposed via `ChatEngine::risk_of` for badges (CLI `CliGate`, TUI ToolConfirm
+  panel, web approval panel `risk` field).
+- **Auto verification loop** `src/core/verify.rs` (`VerifyCommand`,
+  `VerifyReport`, `detect(ws)`, `run(...)`, `feedback(...)`): detects
+  `cargo test --quiet` / `npm|pnpm|yarn test` / `pytest -q` / `go test ./...` /
+  `make test`; `ChatEngine.verify_auto|verify_command|verify_max_attempts|
+  verify_timeout_secs` + `verify_program()` + `run_verification(&mut self, ctx)`;
+  `turn_agentic_with` counts mutating edits and, on the final text, runs the
+  checks and feeds failures back as a user message (loop, bounded by
+  `max_attempts`). Config `[verify]` (`auto=true`, `command`, `max_attempts=2`,
+  `timeout_secs=300`). CLI `enclave verify [--command <cmd>] [--no-sandbox]`
+  (`verify_cmd`, exit 1 on failure); TUI `/verify`; web `POST /api/verify` +
+  **verify** button.
+- **Traffic menu** (what left the machine + what was intercepted): TUI `/traffic`
+  (`/sent`) via `traffic_text()`; web `openTraffic()` overlay + **traffic**
+  toolbar chip (from `/api/ledger`, flags entries with non-empty `redactions`).
+- Sandbox gained toolchain-cache write dirs (`CARGO_HOME`/`RUSTUP_HOME`/`GOPATH`/
+  `GOCACHE`/`GOMODCACHE` + `~/.cargo`, `~/.rustup`, `~/.npm`, `~/.cache`, `~/go`)
+  so `cargo test` etc. work inside the fs jail.
+- Tests 224 → 232 (risk 3, verify 5). Docs: README (Verify loop + risk classifier
+  sections, `enclave verify` row), docs/USAGE.md (`verify` section + `[verify]`
+  table), CHANGELOG `[Unreleased]`.
+Wave 3: Agent Skills + repo map/code index + hooks + git worktree per branch.
 
 ### Ideas still open (not built yet)
 - **Local Model Committee**: several local Ollama models debate; a verifier

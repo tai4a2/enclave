@@ -7,8 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_Nothing yet — the next release is under development. See the commit history on
-`main` for work in progress._
+### Added
+
+- **Workspace checkpoints (snapshot & rewind).** Before every agentic file edit
+  Enclave snapshots the working directory into a private *shadow* git repo in the
+  app data dir (never the project's `.git`, never the network, neutral `Enclave`
+  commit identity). History is linear and reversible: a rewind is itself a new
+  snapshot and a safety snapshot is taken first. CLI `enclave checkpoint
+  list|create|diff|restore`; TUI `/snapshots`, `/snapshot [label]`,
+  `/rewind <id|n>`; web UI **snapshots** toolbar button. Configurable via
+  `[checkpoints]` (`enabled`, `max`).
+
+- **Auto verification loop.** After agentic file edits Enclave runs the project's
+  own checks locally in the command sandbox (auto-detected: `cargo test`,
+  `npm test`, `pytest`, `go test ./...`, `make test`) and hands failures back to
+  the model so it fixes them, up to `[verify] max_attempts`. CLI
+  `enclave verify [--command <cmd>]`; TUI `/verify`; web UI **verify** button;
+  configurable via `[verify]` (`auto`, `command`, `max_attempts`,
+  `timeout_secs`).
+
+- **Command risk classifier.** Shell commands are classified offline before they
+  run: clearly destructive ones (`rm -rf /`, `dd of=/dev/…`, `mkfs`,
+  `curl … | sh`, `shutdown`, fork bombs) are refused by default
+  (`[permissions] block_destructive`) and badged in every approval panel; risky
+  but recoverable ones (`git push --force`, `git reset --hard`, `sudo`,
+  `history -c`) are flagged `⚠ risky`.
 
 ## [0.1.0] - 2026-10-10
 

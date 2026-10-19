@@ -92,7 +92,11 @@ pub async fn serve(
         .route("/api/exposure", get(api_exposure))
         .route("/api/context", get(api_context))
         .route("/api/ledger", get(api_ledger))
+        .route("/api/checkpoints", get(api_checkpoints))
+        .route("/api/checkpoints/save", post(api_checkpoint_save))
+        .route("/api/checkpoints/restore", post(api_checkpoint_restore))
         .route("/api/rag", post(api_rag))
+        .route("/api/verify", post(api_verify))
         .route("/api/export", post(api_export))
         .route("/api/shell", post(api_shell))
         .with_state(state);
@@ -874,6 +878,7 @@ async fn agent_round(
                 json!({
                     "id": c.id, "name": c.name, "arguments": c.arguments,
                     "suggested": suggested(engine, c),
+                    "risk": engine.risk_of(c).map(|h| format!("{} — {}", h.risk.label(), h.reason)),
                 })
             })
             .collect();
@@ -1627,6 +1632,130 @@ async fn api_ledger(
     .into_response()
 }
 
+async fn api_checkpoints(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    if !authorized(&state, &headers, &q) {
+        return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+    }
+    let limit = q
+        .get("limit")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(30);
+    let engine = state.engine.lock().await;
+    let (available, entries) = match &engine.checkpoints {
+        Some(store) => (true, store.list(limit).unwrap_or_default()),
+        None => (false, Vec::new()),
+    };
+    Json(json!({
+        "available": available,
+        "workdir": engine.workspace,
+        "entries": entries.iter().map(|c| json!({
+            "id": c.id, "when": c.when, "label": c.label,
+        })).collect::<Vec<_>>(),
+    }))
+    .into_response()
+}
+
+async fn api_checkpoint_save(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+    Json(body): Json<Value>,
+) -> Response {
+    if !authorized(&state, &headers, &q) {
+        return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+    }
+    let label = body["label"].as_str().unwrap_or("").trim();
+    let label = if label.is_empty() {
+        "manual checkpoint"
+    } else {
+        label
+    };
+    let engine = state.engine.lock().await;
+    let result = match &engine.checkpoints {
+        Some(store) => match store.snapshot(label) {
+            Ok(Some(id)) => json!({"id": id, "label": label}),
+            Ok(None) => json!({"id": Value::Null, "message": "nothing to snapshot"}),
+            Err(e) => json!({"error": e.to_string()}),
+        },
+        None => json!({"error": "checkpoints are disabled"}),
+    };
+    let s = state_json(
+        &engine,
+        state.tools_enabled,
+        &state.guard_label,
+        agent_on(&state),
+    );
+    Json(json!({"result": result, "state": s})).into_response()
+}
+
+async fn api_checkpoint_restore(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+    Json(body): Json<Value>,
+) -> Response {
+    if !authorized(&state, &headers, &q) {
+        return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+    }
+    let id = body["id"].as_str().unwrap_or("").trim().to_string();
+    let engine = state.engine.lock().await;
+    let result = if id.is_empty() {
+        json!({"error": "checkpoint id is required"})
+    } else {
+        match &engine.checkpoints {
+            Some(store) => match store.restore(&id) {
+                Ok(()) => json!({"ok": true, "id": id}),
+                Err(e) => json!({"error": e.to_string()}),
+            },
+            None => json!({"error": "checkpoints are disabled"}),
+        }
+    };
+    let s = state_json(
+        &engine,
+        state.tools_enabled,
+        &state.guard_label,
+        agent_on(&state),
+    );
+    Json(json!({"result": result, "state": s})).into_response()
+}
+
+async fn api_verify(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    if !authorized(&state, &headers, &q) {
+        return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+    }
+    let mut engine = state.engine.lock().await;
+    let ctx = tool_context(&engine, &state.tools);
+    let program = match engine.verify_program() {
+        Some(p) => p,
+        None => {
+            return Json(json!({
+                "error": "no verification command detected — set [verify] command",
+            }))
+            .into_response();
+        }
+    };
+    match engine.run_verification(&ctx).await {
+        Ok(Some(rep)) => Json(json!({
+            "command": rep.command,
+            "source": program.source,
+            "passed": rep.passed,
+            "summary": rep.summary,
+            "output": rep.output,
+        }))
+        .into_response(),
+        Ok(None) => Json(json!({ "error": "nothing to verify" })).into_response(),
+        Err(e) => Json(json!({ "error": e.to_string() })).into_response(),
+    }
+}
+
 async fn api_rag(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -2099,9 +2228,12 @@ const INDEX_HTML: &str = r#"
   <span class="tb" data-cmd="/airgap">air-gap</span>
   <span class="tb" data-cmd="/route">route</span>
   <span class="tb" data-cmd="/ledger">ledger</span>
+  <span class="tb" data-cmd="/snapshots">snapshots</span>
   <span class="tb" data-cmd="/memory">memory</span>
   <span class="tb" data-cmd="/decisions">decisions</span>
   <span class="tb" data-cmd="/exposure">exposure</span>
+  <span class="tb" data-cmd="/traffic">traffic</span>
+  <span class="tb" data-cmd="/verify">verify</span>
   <span class="tb" data-cmd="/context">context</span>
   <span class="tb" data-cmd="/rag">rag</span>
   <span class="tb" data-cmd="/find">find</span>
@@ -2144,14 +2276,14 @@ const PALETTE_COMMANDS = [
   ["/undo","remove the last turn"],["/redo","restore the last undone turn"],["/retry","re-send the last message"],
   ["/compact","summarise and shrink the session"],["/find","search inside this conversation"],
   ["/search","search across all sessions"],["/export","export the chat (md/html/pdf)"],
-  ["/ledger","show the encrypted egress ledger"],["/provenance","what left the machine for this session"],["/rag","local file index (index/search/status/clear)"],["/merge","merge a branch's new turns into this one"],["/blame","find which turn mentions some text"],["/init","generate an AGENTS.md for this project"],["/mcp","list tools exposed by MCP servers"],["/details","toggle tool detail blocks"],["/airgap","toggle air-gap"],
+  ["/ledger","show the encrypted egress ledger"],["/snapshots","workspace checkpoints (list / restore)"],["/snapshot","snapshot the workspace now"],["/rewind","restore the workspace to a checkpoint"],["/provenance","what left the machine for this session"],["/rag","local file index (index/search/status/clear)"],["/merge","merge a branch's new turns into this one"],["/blame","find which turn mentions some text"],["/init","generate an AGENTS.md for this project"],["/mcp","list tools exposed by MCP servers"],["/details","toggle tool detail blocks"],["/airgap","toggle air-gap"],
   ["/route","toggle routing of sensitive turns"],["/remember","save a fact to memory"],
   ["/memory","list / search memories"],["/forget","delete a memory"],["/checkpoint","summarise into memory"],
-  ["/decide","record a decision with rationale"],["/decisions","list / search decisions"],["/exposure","privacy blast-radius + score"],["/context","explain what is sent this turn"],
+  ["/decide","record a decision with rationale"],["/decisions","list / search decisions"],["/exposure","privacy blast-radius + score"],["/traffic","what left the machine + what was intercepted"],["/verify","run the project's tests/lint locally"],["/context","explain what is sent this turn"],
   ["/panic","lock now"],["/quit","close the web UI"]
 ];
 const THEMES=["default","nord","gruvbox","solarized","mono"];
-const SLASH_REAL = new Set(['/help','/new','/switch','/theme','/themes','/model','/models','/effort','/connect','/provider','/providers','/plan','/build','/agent','/airgap','/route','/clear','/branch','/checkout','/graph','/tree','/log','/diff','/palette','/sessions','/resume','/continue','/quit','/find','/search','/search-all','/shortcuts','/keys','/ledger','/egress','/provenance','/rag','/merge','/init','/mcp','/blame','/details','/thinking','/memory','/memories','/remember','/forget','/checkpoint','/decide','/decisions','/exposure','/context','/export','/undo','/redo','/retry','/compact','/summarize']);
+const SLASH_REAL = new Set(['/help','/new','/switch','/theme','/themes','/model','/models','/effort','/connect','/provider','/providers','/plan','/build','/agent','/airgap','/route','/clear','/branch','/checkout','/graph','/tree','/log','/diff','/palette','/sessions','/resume','/continue','/quit','/find','/search','/search-all','/shortcuts','/keys','/ledger','/egress','/provenance','/traffic','/sent','/verify','/rag','/merge','/snapshots','/ckpt','/snapshot','/rewind','/init','/mcp','/blame','/details','/thinking','/memory','/memories','/remember','/forget','/checkpoint','/decide','/decisions','/exposure','/context','/export','/undo','/redo','/retry','/compact','/summarize']);
 
 // ---------- small utils ----------
 function fmtBytes(n){ n=+n||0; if(n>=1048576) return (n/1048576).toFixed(1)+' MB'; if(n>=1024) return (n/1024).toFixed(1)+' KB'; return n+' B'; }
@@ -2462,7 +2594,8 @@ function showApprove(calls,ask){
   head.textContent='tool call'+(ask.length>1?'s':'')+' — nothing runs without your approval';
   box.appendChild(head);
   calls.forEach(c=>{ let args=c.arguments||''; try{ args=JSON.stringify(JSON.parse(args),null,2); }catch(e){}
-    const d=document.createElement('div'); d.className='cmd'; d.textContent='⚙ '+c.name+'\n'+args; box.appendChild(d); });
+    const d=document.createElement('div'); d.className='cmd';
+    d.textContent='⚙ '+c.name+(c.risk?('\n⚠ '+c.risk):'')+'\n'+args; box.appendChild(d); });
   function resumeAll(){ const d={}; ask.forEach(c=>{ d[c.id]=c._d||'deny'; }); box.remove(); resumeAgent(d); }
   if(ask.length===1){
     const c=ask[0]; const row=document.createElement('div'); row.className='row';
@@ -2588,6 +2721,63 @@ async function openLedger(perSession){
   const title=(perSession?'provenance (this session)':'egress ledger')+' · '+d.count+' entries · chain '+(d.chain_ok?'OK':'BROKEN');
   openOverlay({title,rows,
     hint:'fingerprints only — never payloads or secrets · Esc close',onPick:()=>{}});
+}
+async function openTraffic(){
+  const d=await (await fetch('/api/ledger',{headers:H})).json();
+  const es=(d.entries||[]);
+  const intercepted=es.filter(e=>e.redactions&&e.redactions.trim());
+  const rows=es.map(e=>{
+    const sens=e.redactions&&e.redactions.trim();
+    return {k:'#'+e.id+' '+String(e.ts).slice(0,16).replace('T',' ')+' · '+e.provider,
+      d:e.model+' · '+e.payload_bytes+'B'+(sens?('  ⛔ intercepted: '+e.redactions):'  ok')};
+  });
+  openOverlay({
+    title:'traffic · '+es.length+' request(s) · '+intercepted.length+' intercepted as sensitive',
+    rows: rows.length?rows:[{k:'nothing has left this machine yet',d:''}],
+    filter:true, filterPlaceholder:'filter by provider / model…',
+    hint:'fingerprints only — never payloads · ⛔ = the guard redacted sensitive data · Esc close',
+    onPick:()=>{}
+  });
+}
+async function runVerify(){
+  statusSet('verify: running…');
+  const r=await api('/api/verify',{});
+  if(r.error){ toast(r.error,'error'); statusSet(r.error,'error'); return; }
+  appendCard('assistant','verify — `'+r.command+'`\n\n'+(r.output||'')+'\n\n**'+r.summary+'**');
+  toast(r.passed?'verification passed':'verification failed','ok');
+  statusSet(r.summary, r.passed?'ok':'error');
+  renderAll();
+}
+async function openCkpt(){
+  const d=await (await fetch('/api/checkpoints',{headers:H})).json();
+  if(!d.available){ toast('checkpoints are disabled','error'); return; }
+  const rows=(d.entries||[]).map(c=>({
+    k:c.id, d:c.when+' · '+c.label,
+    onRestore:()=>restoreCkpt(c.id),
+    actions:[{act:'Restore',label:'↺ restore'}]
+  }));
+  openOverlay({
+    title:'workspace checkpoints · '+rows.length,
+    rows: rows.length?rows:[{k:'no checkpoints yet',d:'they are taken automatically before file edits'}],
+    filter:false,
+    hint:'↺ restores the workspace (a safety snapshot is taken first) · Esc close',
+    onPick:(r)=>{ if(r&&r.onRestore) r.onRestore(); }
+  });
+}
+async function saveCkpt(label){
+  const r=await api('/api/checkpoints/save',{label:label||''});
+  if(r.state) applyState(r.state);
+  const res=r.result||{};
+  if(res.error) toast(res.error,'error');
+  else if(res.id){ toast('checkpoint '+res.id,'ok'); }
+  else toast(res.message||'nothing to snapshot','info');
+}
+async function restoreCkpt(id){
+  closeOverlay();
+  const r=await api('/api/checkpoints/restore',{id});
+  if(r.state) applyState(r.state);
+  const res=r.result||{};
+  if(res.error) toast(res.error,'error'); else toast('workspace rewound to '+res.id,'ok');
 }
 async function openDiff(a,b){
   if(!a||!b){ toast('usage: /diff <session a> <session b>','error'); return; }
@@ -3087,6 +3277,11 @@ async function runSlash(text){
     case 'diff': openDiff(parts[1],parts[2]); break;
     case 'ledger': case 'egress': openLedger(false); break;
     case 'provenance': openLedger(true); break;
+    case 'traffic': case 'sent': openTraffic(); break;
+    case 'verify': runVerify(); break;
+    case 'snapshots': case 'ckpt': openCkpt(); break;
+    case 'snapshot': saveCkpt(arg); break;
+    case 'rewind': if(arg) restoreCkpt(arg.split(/\s+/)[0]); else openCkpt(); break;
     case 'rag': openRag(arg); break;
     case 'merge': await doMerge(arg); break;
     case 'init': await doInit(); break;

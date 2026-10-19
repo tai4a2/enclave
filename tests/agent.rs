@@ -71,6 +71,7 @@ async fn agentic_loop_runs_tools_and_returns_final_text() {
     let memory = EncryptedMemory::open(&dir.path().join("v.db"), &key).unwrap();
     let session = Session::create(&memory, "agent-test").unwrap();
     let mut engine = ChatEngine::new(provider, "mock-1".into(), memory, session, None);
+    engine.verify_auto = false;
 
     let mut gate = AutoGate {
         approve_all: true,
@@ -120,6 +121,7 @@ async fn denied_tool_call_is_reported_to_provider() {
     let memory = EncryptedMemory::open(&dir.path().join("v.db"), &key).unwrap();
     let session = Session::create(&memory, "deny-test").unwrap();
     let mut engine = ChatEngine::new(provider, "mock-1".into(), memory, session, None);
+    engine.verify_auto = false;
 
     let mut gate = AutoGate::default(); // denies everything
     let ctx = ToolContext {
@@ -156,6 +158,7 @@ async fn write_file_stays_inside_workspace() {
     let memory = EncryptedMemory::open(&dir.path().join("v.db"), &key).unwrap();
     let session = Session::create(&memory, "write-test").unwrap();
     let mut engine = ChatEngine::new(provider, "mock-1".into(), memory, session, None);
+    engine.verify_auto = false;
 
     let mut gate = AutoGate {
         approve_all: true,
@@ -255,6 +258,7 @@ async fn tainted_message_is_auto_redacted_on_later_turns() {
 
     let provider = Box::new(MockProvider::new(vec![]));
     let mut engine = ChatEngine::new(provider, "mock-1".into(), memory, session, None);
+    engine.verify_auto = false;
     engine.taint = true;
 
     let out = engine.outgoing_messages();

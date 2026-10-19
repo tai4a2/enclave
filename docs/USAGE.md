@@ -208,6 +208,44 @@ Breaks the outgoing request into labelled parts (system prompt, local
 notice) with previews and sizes, plus history size, active redactions, taint
 status and a token-budget bar when `[context] budget_tokens` is set.
 
+### `checkpoint` — workspace snapshots & rewind
+
+Snapshots the working directory into a private local *shadow* git repo (in the
+app data dir — never the project's own `.git`, never the network). A snapshot
+is taken automatically before every agentic file edit, and rewinding is itself
+a new snapshot, so history stays **linear and reversible**.
+
+```bash
+enclave checkpoint list                 # recent snapshots (id, when, label)
+enclave checkpoint create "wip"         # record a snapshot now
+enclave checkpoint create               # label defaults to "manual checkpoint"
+enclave checkpoint diff <id>            # what a snapshot changed
+enclave checkpoint restore <id>         # rewind (a safety snapshot is taken first)
+```
+
+In the TUI: `/snapshots` (list), `/snapshot [label]` (record), `/rewind <id|n>`
+(restore; `n` is the position shown by `/snapshots`). In the web UI use the
+**snapshots** toolbar button (list with a ↺ restore action) or the same slash
+commands. Disable with `[checkpoints] enabled = false`.
+
+### `verify` — run the project's checks locally
+
+After agentic file edits Enclave can run your project's own checks **locally**
+and feed failures back to the model so it fixes them automatically. The command
+is auto-detected from `Cargo.toml` (`cargo test`), `package.json` (`npm test`),
+`pyproject.toml` (`pytest -q`), `go.mod` (`go test ./...`) or a `Makefile` test
+target. It runs with normal access (like CI) so tools that spawn helpers work;
+pass `--sandbox` to jail it.
+
+```bash
+enclave verify                          # run the detected checks
+enclave verify --command "cargo clippy --all-targets"
+enclave verify --sandbox                # run it inside the command sandbox
+```
+
+Exits non-zero when verification fails. In the TUI: `/verify`. In the web UI:
+the **verify** toolbar button or `/verify`.
+
 ### `rag` — local encrypted file index
 
 ```bash
@@ -855,6 +893,22 @@ encrypted database (`vault.db`) and salt (`salt.bin`) live alongside it. Run
 |-----|---------|---------|
 | `budget_tokens` | `None` | Soft token budget shown in the Context Inspector |
 | `warn_pct` | `80` | Warn once the estimate crosses this % of the budget |
+
+### `[checkpoints]`
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `enabled` | `true` | Take shadow-git workspace snapshots before agentic file edits |
+| `max` | `100` | Reserved cap for retained snapshots |
+
+### `[verify]`
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `auto` | `true` | Verify after agentic edits and feed failures back to the model |
+| `command` | `None` | Override the auto-detected command (`cargo test`, `npm test`…) |
+| `max_attempts` | `2` | How many failing runs are handed back to the model |
+| `timeout_secs` | `300` | Timeout for one verification run |
 
 ### `[tui]`
 

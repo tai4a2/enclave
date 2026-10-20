@@ -1,0 +1,14 @@
+# Default owners for everything in the repository.
+# Used by GitHub to auto-request reviews and to enforce
+# "Require review from Code Owners" in branch protection.
+* @tai4a2
+
+# Security-sensitive paths deserve extra care in review.
+/.github/            @tai4a2
+/Cargo.toml          @tai4a2
+/Cargo.lock          @tai4a2
+/deny.toml           @tai4a2
+/scripts/            @tai4a2
+/src/privacy/        @tai4a2
+/src/web.rs          @tai4a2
+/SECURITY.md         @tai4a2

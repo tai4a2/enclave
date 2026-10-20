@@ -1,0 +1,53 @@
+name: Bug report
+description: Something in Enclave does not work as expected
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. **Do not paste secrets, API keys, vault files or
+        personal data.** For security issues use
+        [private reporting](https://github.com/tai4a2/enclave/security/advisories/new).
+  - type: input
+    id: version
+    attributes:
+      label: Enclave version
+      description: Output of `enclave --version`
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - macOS
+        - Linux
+        - other (unsupported)
+    validations:
+      required: true
+  - type: dropdown
+    id: interface
+    attributes:
+      label: Interface
+      options:
+        - TUI (`enclave tui`)
+        - CLI chat (`enclave chat`)
+        - Local web UI (`enclave serve`)
+        - other
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, what you got (redact sensitive parts).
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / output
+      description: Paste only the relevant lines, with secrets removed.
+      render: text
+    validations:
+      required: false

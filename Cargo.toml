@@ -32,7 +32,7 @@ rusqlite = { version = "0.32", features = ["bundled-sqlcipher-vendored-openssl"]
 argon2 = "0.5"
 pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
 libc = "0.2"
-sha2 = "0.10"
+sha2 = "0.11"
 hmac = "0.12"
 rand = "0.8"
 aes-gcm = "0.10"

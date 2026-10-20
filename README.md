@@ -98,6 +98,10 @@ Existing AI CLIs store your history in plaintext and your API keys in plain file
 cargo install --path .
 ```
 
+Linux additionally needs a C toolchain and the D-Bus headers
+(`sudo apt-get install -y build-essential pkg-config libdbus-1-dev`) — see
+[docs/INSTALL.md](docs/INSTALL.md) for Fedora/Arch equivalents.
+
 ## Usage
 
 ```bash

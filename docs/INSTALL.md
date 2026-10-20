@@ -7,6 +7,12 @@ A privacy-first AI coding CLI with encrypted local memory, built in Rust — how
 - **Rust toolchain** — the version is pinned in [`rust-toolchain.toml`](../rust-toolchain.toml) (`1.99.0`, with `rustfmt` and `clippy`). With [rustup](https://rustup.rs) installed, the correct toolchain is selected automatically when you build inside the repo.
 - **macOS or Linux.**
 - **A C toolchain** (clang/gcc and `make`) — the SQLCipher/OpenSSL dependency is vendored and compiled from source on first build.
+- **Linux only: the D-Bus development headers** — the OS keyring backend is built against `libdbus`. On Debian/Ubuntu:
+  ```bash
+  sudo apt-get install -y build-essential pkg-config libdbus-1-dev
+  ```
+  (Fedora/RHEL: `sudo dnf install gcc make pkgconf-pkg-config dbus-devel`; Arch: `sudo pacman -S base-devel pkgconf dbus`.)
+  Without them the build fails in `libdbus-sys` with "failed to run custom build command".
 - **Optional: [Ollama](https://ollama.com)** — for fully offline, 100% local conversations. Nothing leaves the machine with a local model.
 
 ## Install methods

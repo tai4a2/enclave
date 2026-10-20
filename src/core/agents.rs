@@ -128,6 +128,8 @@ impl AgentRunner {
                 self.sandbox,
                 self.workspace.clone(),
             )),
+            skills: None,
+            hooks: None,
         }
     }
 

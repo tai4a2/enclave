@@ -146,3 +146,43 @@ fn context_report_shows_composition_and_provenance() {
     assert_eq!(r.limit_tokens, Some(100));
     assert_eq!(r.warn_pct, 75);
 }
+
+#[test]
+fn skills_and_repo_map_are_injected_into_the_system_prompt() {
+    let tmp = tempfile::tempdir().unwrap();
+    let key = MasterKey::from_bytes([0x42u8; 32]);
+    let memory =
+        enclave::privacy::EncryptedMemory::open(&tmp.path().join("vault.db"), &key).unwrap();
+    let sid = memory.create_session("t").unwrap();
+    let session = Session::load(&memory, &sid).unwrap();
+    let provider = Box::new(MockProvider::new(vec![]));
+    let mut engine = ChatEngine::new(provider, "mock".into(), memory, session, None);
+
+    let skill = enclave::core::skills::Skill {
+        name: "deploy".into(),
+        description: "how to deploy".into(),
+        body: "# Deploy\n\nrun the script".into(),
+        path: std::path::PathBuf::from("/x/SKILL.md"),
+    };
+    engine.skills = Some(std::sync::Arc::new(
+        enclave::core::skills::SkillsRegistry::new(vec![skill]),
+    ));
+    engine.repo_map = Some("src/lib.rs: alpha, beta".to_string());
+
+    let labels: Vec<&str> = engine.system_parts().iter().map(|(l, _)| *l).collect();
+    assert!(labels.contains(&"skills"));
+    assert!(labels.contains(&"repo map"));
+
+    let text = engine.system_text().unwrap();
+    assert!(text.contains("deploy"));
+    assert!(text.contains("src/lib.rs: alpha, beta"));
+
+    // The `skill` tool definition is always offered.
+    let names: Vec<String> = engine
+        .tool_defs(false)
+        .into_iter()
+        .map(|d| d.name)
+        .collect();
+    assert!(names.iter().any(|n| n == "skill"));
+    assert!(names.iter().any(|n| n == "repo_map"));
+}

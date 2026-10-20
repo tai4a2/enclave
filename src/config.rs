@@ -464,6 +464,9 @@ pub struct ContextSettings {
     /// Percentage of the budget at which the inspector warns (default 80).
     #[serde(default = "default_warn_pct")]
     pub warn_pct: u8,
+    /// Inject a compact repository map (files → symbols) into the context.
+    #[serde(default = "default_true")]
+    pub repomap: bool,
 }
 
 fn default_warn_pct() -> u8 {
@@ -475,6 +478,39 @@ impl Default for ContextSettings {
         Self {
             budget_tokens: None,
             warn_pct: 80,
+            repomap: true,
+        }
+    }
+}
+
+/// Local tool hooks (see `src/core/hooks.rs`).
+///
+/// A `pre_tool` shell command runs before every tool call and can block it by
+/// exiting non-zero; `post_tool` runs after it. Both get the tool name and its
+/// JSON arguments in `ENCLAVE_TOOL` / `ENCLAVE_TOOL_ARGS`. Local only.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct HooksSettings {
+    /// Command run before a tool call (non-zero exit blocks the call).
+    #[serde(default)]
+    pub pre_tool: Option<String>,
+    /// Command run after a tool call.
+    #[serde(default)]
+    pub post_tool: Option<String>,
+    /// Timeout for a single hook run, in seconds.
+    #[serde(default = "default_hook_timeout")]
+    pub timeout_secs: u64,
+}
+
+fn default_hook_timeout() -> u64 {
+    30
+}
+
+impl Default for HooksSettings {
+    fn default() -> Self {
+        Self {
+            pre_tool: None,
+            post_tool: None,
+            timeout_secs: 30,
         }
     }
 }
@@ -628,6 +664,9 @@ pub struct Settings {
     /// Auto verification loop after agentic file edits.
     #[serde(default)]
     pub verify: VerifySettings,
+    /// Local pre/post tool hooks.
+    #[serde(default)]
+    pub hooks: HooksSettings,
 }
 
 fn default_true() -> bool {
@@ -681,6 +720,7 @@ impl Default for Settings {
             context: ContextSettings::default(),
             checkpoints: CheckpointSettings::default(),
             verify: VerifySettings::default(),
+            hooks: HooksSettings::default(),
         }
     }
 }

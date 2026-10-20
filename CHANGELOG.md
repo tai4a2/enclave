@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Agent Skills** — local `SKILL.md` instruction packs discovered from
+  `.enclave/skills/` and `<config>/skills/`. Only name + description enter the
+  context; the body is loaded on demand via the `skill` tool (`/skills`,
+  `/skill <name>`, web **skills** button).
+- **Repository map** — a compact offline map of the workspace (file → top-level
+  symbols, Rust/Python/JS/TS/Go/generic). Injected into the context when
+  `[context] repomap = true` and available as the `repo_map` tool (`/repomap`).
+- **Tool hooks** — `[hooks] pre_tool` / `post_tool` local commands run around
+  every tool call, receiving `ENCLAVE_TOOL` / `ENCLAVE_TOOL_ARGS`; a failing
+  `pre_tool` blocks the call.
+- **Git worktrees** — `enclave worktree list|add|remove` (TUI `/worktree`,
+  web button): one working directory per branch, locally under the app data dir.
+
 - **Workspace checkpoints (snapshot & rewind).** Before every agentic file edit
   Enclave snapshots the working directory into a private *shadow* git repo in the
   app data dir (never the project's `.git`, never the network, neutral `Enclave`

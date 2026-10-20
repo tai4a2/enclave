@@ -47,7 +47,7 @@ termimad = "0.30"
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 regex = "1"
-base64 = "0.22"
+base64 = "0.23"
 arboard = "3"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 webpki-roots = "0.26"

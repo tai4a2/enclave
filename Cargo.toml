@@ -26,7 +26,7 @@ toml = "0.8"
 futures = "0.3"
 thiserror = "1"
 anyhow = "1"
-directories = "5"
+directories = "6"
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
 rusqlite = { version = "0.32", features = ["bundled-sqlcipher-vendored-openssl"] }
 argon2 = "0.5"

@@ -238,6 +238,12 @@ pub struct ChatEngine {
     pub verify_max_attempts: u8,
     /// Timeout for one verification run, in seconds.
     pub verify_timeout_secs: u64,
+    /// Discovered Agent Skills (name + description injected, body on demand).
+    pub skills: Option<std::sync::Arc<crate::core::skills::SkillsRegistry>>,
+    /// Local pre/post tool hooks.
+    pub hooks: Option<crate::core::hooks::Hooks>,
+    /// Compact repository map injected into the context (bounded).
+    pub repo_map: Option<String>,
 }
 
 impl ChatEngine {
@@ -284,6 +290,9 @@ impl ChatEngine {
             verify_command: None,
             verify_max_attempts: 2,
             verify_timeout_secs: 300,
+            skills: None,
+            hooks: None,
+            repo_map: None,
         }
     }
 
@@ -350,6 +359,9 @@ impl ChatEngine {
             verify_command: None,
             verify_max_attempts: 2,
             verify_timeout_secs: 300,
+            skills: None,
+            hooks: None,
+            repo_map: None,
         })
     }
 
@@ -549,6 +561,19 @@ impl ChatEngine {
                 block.push('\n');
             }
             parts.push(("decisions", block.trim_end().to_string()));
+        }
+        if let Some(skills) = &self.skills {
+            if !skills.is_empty() {
+                parts.push(("skills", skills.index_text()));
+            }
+        }
+        if let Some(map) = &self.repo_map {
+            if !map.trim().is_empty() {
+                parts.push((
+                    "repo map",
+                    format!("# Repository map (file: symbols)\n{map}"),
+                ));
+            }
         }
         if self.injection {
             let mut block = String::from(

@@ -246,6 +246,47 @@ enclave verify --sandbox                # run it inside the command sandbox
 Exits non-zero when verification fails. In the TUI: `/verify`. In the web UI:
 the **verify** toolbar button or `/verify`.
 
+### `worktree` — git worktrees
+
+One working directory per branch, so several tasks can be in flight at once
+without stashing. Local `git` only.
+
+```bash
+enclave worktree list
+enclave worktree add feature-x                  # <data>/worktrees/feature-x on a new branch
+enclave worktree add feature-x --base main      # fork from a revision
+enclave worktree add feature-x --path ~/wt/x    # custom location
+enclave worktree remove feature-x --force
+```
+
+TUI: `/worktree` (list), `/worktree new <name>`, `/worktree use <name>`
+(switch the agent workspace to that worktree), `/worktree remove <name>`.
+Web UI: the **worktree** toolbar button, or `/worktree`.
+
+### Agent Skills — local instruction packs
+
+Drop a `SKILL.md` in `.enclave/skills/<name>/` (project) or
+`<config>/skills/<name>/` (global). Front-matter carries `name` and
+`description`; the body is the instruction. Only the name + description enter
+the context — the body is loaded on demand by the model through the `skill`
+tool. TUI: `/skills` and `/skill <name>`. Web UI: the **skills** button.
+
+```markdown
+---
+name: deploy
+description: How to cut a release
+---
+1. run the tests
+2. run the release script
+```
+
+### Repository map — files and their symbols
+
+A compact offline summary (`path: symbols`) built with language-specific
+patterns (Rust, Python, JS/TS, Go, generic). A bounded version is injected into
+the context when `[context] repomap = true` (default); the model can also ask
+for a filtered map with the `repo_map` tool. TUI: `/repomap`.
+
 ### `rag` — local encrypted file index
 
 ```bash
@@ -893,6 +934,7 @@ encrypted database (`vault.db`) and salt (`salt.bin`) live alongside it. Run
 |-----|---------|---------|
 | `budget_tokens` | `None` | Soft token budget shown in the Context Inspector |
 | `warn_pct` | `80` | Warn once the estimate crosses this % of the budget |
+| `repomap` | `true` | Inject a compact repository map into the context |
 
 ### `[checkpoints]`
 
@@ -909,6 +951,25 @@ encrypted database (`vault.db`) and salt (`salt.bin`) live alongside it. Run
 | `command` | `None` | Override the auto-detected command (`cargo test`, `npm test`…) |
 | `max_attempts` | `2` | How many failing runs are handed back to the model |
 | `timeout_secs` | `300` | Timeout for one verification run |
+
+### `[hooks]`
+
+Run a local shell command around every tool call. `pre_tool` blocks the call
+when it exits non-zero.
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `pre_tool` | none | Command run before a tool call (non-zero exit blocks it) |
+| `post_tool` | none | Command run after a tool call |
+| `timeout_secs` | `30` | Timeout for one hook run |
+
+Environment for both hooks: `ENCLAVE_HOOK_EVENT` (`pre`/`post`),
+`ENCLAVE_TOOL`, `ENCLAVE_TOOL_ARGS` (raw JSON), `ENCLAVE_WORKSPACE`.
+
+```toml
+[hooks]
+pre_tool = "echo $ENCLAVE_TOOL >> ~/.enclave-hooks.log"
+```
 
 ### `[tui]`
 

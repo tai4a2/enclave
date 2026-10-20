@@ -163,6 +163,11 @@ pub enum Command {
         #[command(subcommand)]
         action: CheckpointAction,
     },
+    /// Git worktrees: one working directory per branch/task (local git).
+    Worktree {
+        #[command(subcommand)]
+        action: WorktreeAction,
+    },
     /// Run the project's verification command locally (tests/lint).
     Verify {
         /// Override the detected command (default: auto-detect).
@@ -324,6 +329,29 @@ pub enum MemoryAction {
     },
 }
 
+/// `enclave worktree` sub-commands (git worktrees, local).
+#[derive(Subcommand, Debug)]
+pub enum WorktreeAction {
+    /// List the repository's worktrees.
+    List,
+    /// Create a worktree on a new branch (default dir: <data>/worktrees/<name>).
+    Add {
+        name: String,
+        /// Base revision (default: current HEAD).
+        #[arg(long)]
+        base: Option<String>,
+        /// Where to create it (default: the app data dir).
+        #[arg(long)]
+        path: Option<String>,
+    },
+    /// Remove a worktree.
+    Remove {
+        name: String,
+        #[arg(long)]
+        force: bool,
+    },
+}
+
 /// `enclave checkpoint` sub-commands (local workspace snapshots).
 #[derive(Subcommand, Debug)]
 pub enum CheckpointAction {
@@ -478,6 +506,7 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::Memory { action } => memory_cmd(&paths, &settings, action),
         Command::Decisions { action } => decisions_cmd(&paths, &settings, action),
         Command::Checkpoint { action } => checkpoint_cmd(&paths, &settings, action),
+        Command::Worktree { action } => worktree_cmd(&paths, action),
         Command::Verify { command, sandbox } => {
             let runtime = tokio::runtime::Runtime::new()
                 .map_err(|e| EnclaveError::other(format!("runtime: {e}")))?;
@@ -789,6 +818,22 @@ fn build_engine(
     engine.verify_command = settings.verify.command.clone();
     engine.verify_max_attempts = settings.verify.max_attempts;
     engine.verify_timeout_secs = settings.verify.timeout_secs;
+
+    // Wave 3: Agent Skills, tool hooks and the repository map.
+    let skills = crate::core::skills::load_all(&cwd, &paths.config_dir)?;
+    if !skills.is_empty() {
+        engine.skills = Some(std::sync::Arc::new(
+            crate::core::skills::SkillsRegistry::new(skills),
+        ));
+    }
+    engine.hooks = crate::core::hooks::Hooks::from_settings(&settings.hooks);
+    if settings.context.repomap {
+        let map = crate::core::repomap::build(&cwd, 300, 3000);
+        if !map.is_empty() {
+            engine.repo_map = Some(map.text);
+        }
+    }
+
     persist_working_session(paths, &engine.session.id);
     Ok(engine)
 }
@@ -1515,6 +1560,43 @@ fn memory_cmd(paths: &Paths, settings: &Settings, action: MemoryAction) -> Resul
 
 /// Record and recall the ADR-style project decision log.
 /// `enclave checkpoint` — local workspace snapshots (shadow git repo).
+fn worktree_cmd(paths: &Paths, action: WorktreeAction) -> Result<()> {
+    let repo = std::env::current_dir()?;
+    if !crate::core::worktree::is_repo(&repo) {
+        return Err(EnclaveError::other(
+            "not inside a git repository (worktrees need git)",
+        ));
+    }
+    match action {
+        WorktreeAction::List => {
+            let items = crate::core::worktree::list(&repo)?;
+            println!("worktrees ({}):", items.len());
+            for w in items {
+                println!(
+                    "  {:<28} {:<24} {}",
+                    w.branch,
+                    &w.head[..8.min(w.head.len())],
+                    w.path.display()
+                );
+            }
+        }
+        WorktreeAction::Add { name, base, path } => {
+            let dir = match path {
+                Some(p) => std::path::PathBuf::from(p),
+                None => crate::core::worktree::default_dir(&paths.data_dir, &name),
+            };
+            crate::core::worktree::add(&repo, &dir, &name, base.as_deref())?;
+            println!("worktree '{name}' created at {}", dir.display());
+        }
+        WorktreeAction::Remove { name, force } => {
+            let dir = crate::core::worktree::default_dir(&paths.data_dir, &name);
+            crate::core::worktree::remove(&repo, &dir, force)?;
+            println!("worktree '{name}' removed");
+        }
+    }
+    Ok(())
+}
+
 fn checkpoint_cmd(paths: &Paths, settings: &Settings, action: CheckpointAction) -> Result<()> {
     let workspace = std::env::current_dir().unwrap_or_default();
     let store = crate::core::checkpoint::CheckpointStore::new(&workspace, &paths.data_dir);

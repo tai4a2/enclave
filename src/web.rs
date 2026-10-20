@@ -93,6 +93,7 @@ pub async fn serve(
         .route("/api/context", get(api_context))
         .route("/api/ledger", get(api_ledger))
         .route("/api/checkpoints", get(api_checkpoints))
+        .route("/api/worktree", post(api_worktree))
         .route("/api/checkpoints/save", post(api_checkpoint_save))
         .route("/api/checkpoints/restore", post(api_checkpoint_restore))
         .route("/api/rag", post(api_rag))
@@ -179,6 +180,18 @@ fn state_json(engine: &ChatEngine, tools_enabled: bool, guard_label: &str, agent
         "stats": { "sessions": n_sessions, "messages": n_messages },
         "todos": todos.iter().map(|t| json!({ "text": t.text, "status": t.status })).collect::<Vec<_>>(),
         "mcp_tools": engine.mcp.as_ref().map(|m| m.tool_names()).unwrap_or_default(),
+        "skills": engine
+            .skills
+            .as_ref()
+            .map(|r| {
+                r.entries()
+                    .into_iter()
+                    .map(|(n, d)| json!({ "name": n, "description": d }))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default(),
+        "hooks": engine.hooks.as_ref().map(|h| !h.is_empty()).unwrap_or(false),
+        "repomap": engine.repo_map.is_some(),
     })
 }
 
@@ -799,6 +812,8 @@ fn tool_context(
         )),
         todos: Some(engine.todos.clone()),
         mcp: engine.mcp.clone(),
+        skills: engine.skills.clone(),
+        hooks: engine.hooks.clone(),
         ..Default::default()
     }
 }
@@ -1632,6 +1647,49 @@ async fn api_ledger(
     .into_response()
 }
 
+async fn api_worktree(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+    Json(body): Json<Value>,
+) -> Response {
+    if !authorized(&state, &headers, &q) {
+        return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+    }
+    let engine = state.engine.lock().await;
+    let repo = engine.workspace.clone();
+    let data_dir = crate::config::Paths::resolve()
+        .map(|p| p.data_dir)
+        .unwrap_or_default();
+    drop(engine);
+    if !crate::core::worktree::is_repo(&repo) {
+        return Json(json!({ "error": "not inside a git repository" })).into_response();
+    }
+    let op = body["op"].as_str().unwrap_or("list");
+    let name = body["name"].as_str().unwrap_or("").trim().to_string();
+    let dir = crate::core::worktree::default_dir(&data_dir, &name);
+    let result = match op {
+        "list" => match crate::core::worktree::list(&repo) {
+            Ok(items) => json!({
+                "worktrees": items.iter().map(|w| json!({
+                    "branch": w.branch, "path": w.path, "head": w.head,
+                })).collect::<Vec<_>>()
+            }),
+            Err(e) => json!({ "error": e.to_string() }),
+        },
+        "add" if !name.is_empty() => match crate::core::worktree::add(&repo, &dir, &name, None) {
+            Ok(()) => json!({ "created": name, "path": dir }),
+            Err(e) => json!({ "error": e.to_string() }),
+        },
+        "remove" if !name.is_empty() => match crate::core::worktree::remove(&repo, &dir, true) {
+            Ok(()) => json!({ "removed": name }),
+            Err(e) => json!({ "error": e.to_string() }),
+        },
+        _ => json!({ "error": "usage: op = list|add|remove (with name)" }),
+    };
+    Json(result).into_response()
+}
+
 async fn api_checkpoints(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -2233,7 +2291,7 @@ const INDEX_HTML: &str = r#"
   <span class="tb" data-cmd="/decisions">decisions</span>
   <span class="tb" data-cmd="/exposure">exposure</span>
   <span class="tb" data-cmd="/traffic">traffic</span>
-  <span class="tb" data-cmd="/verify">verify</span>
+  <span class="tb" data-cmd="/verify">verify</span><span class="tb" data-cmd="/skills">skills</span><span class="tb" data-cmd="/worktree">worktree</span>
   <span class="tb" data-cmd="/context">context</span>
   <span class="tb" data-cmd="/rag">rag</span>
   <span class="tb" data-cmd="/find">find</span>
@@ -2283,7 +2341,7 @@ const PALETTE_COMMANDS = [
   ["/panic","lock now"],["/quit","close the web UI"]
 ];
 const THEMES=["default","nord","gruvbox","solarized","mono"];
-const SLASH_REAL = new Set(['/help','/new','/switch','/theme','/themes','/model','/models','/effort','/connect','/provider','/providers','/plan','/build','/agent','/airgap','/route','/clear','/branch','/checkout','/graph','/tree','/log','/diff','/palette','/sessions','/resume','/continue','/quit','/find','/search','/search-all','/shortcuts','/keys','/ledger','/egress','/provenance','/traffic','/sent','/verify','/rag','/merge','/snapshots','/ckpt','/snapshot','/rewind','/init','/mcp','/blame','/details','/thinking','/memory','/memories','/remember','/forget','/checkpoint','/decide','/decisions','/exposure','/context','/export','/undo','/redo','/retry','/compact','/summarize']);
+const SLASH_REAL = new Set(['/help','/new','/switch','/theme','/themes','/model','/models','/effort','/connect','/provider','/providers','/plan','/build','/agent','/airgap','/route','/clear','/branch','/checkout','/graph','/tree','/log','/diff','/palette','/sessions','/resume','/continue','/quit','/find','/search','/search-all','/shortcuts','/keys','/ledger','/egress','/provenance','/traffic','/sent','/verify','/rag','/skills','/skill','/worktree','/worktrees','/repomap','/merge','/snapshots','/ckpt','/snapshot','/rewind','/init','/mcp','/blame','/details','/thinking','/memory','/memories','/remember','/forget','/checkpoint','/decide','/decisions','/exposure','/context','/export','/undo','/redo','/retry','/compact','/summarize']);
 
 // ---------- small utils ----------
 function fmtBytes(n){ n=+n||0; if(n>=1048576) return (n/1048576).toFixed(1)+' MB'; if(n>=1024) return (n/1024).toFixed(1)+' KB'; return n+' B'; }
@@ -2778,6 +2836,28 @@ async function restoreCkpt(id){
   if(r.state) applyState(r.state);
   const res=r.result||{};
   if(res.error) toast(res.error,'error'); else toast('workspace rewound to '+res.id,'ok');
+}
+async function openSkills(){
+  if(!STATE){ toast('not ready','error'); return; }
+  const rows=(STATE.skills||[]).map(s=>({k:s.name,d:s.description||''}));
+  openOverlay({
+    title:'skills · '+rows.length,
+    rows: rows.length?rows:[{k:'no skills installed',d:'add .enclave/skills/<name>/SKILL.md'}],
+    filter:true,
+    hint:'the model loads a skill on demand with the `skill` tool · Esc close'
+  });
+}
+async function openWorktree(){
+  const d=await api('/api/worktree',{op:'list'});
+  if(d.error){ toast(d.error,'error'); return; }
+  const list=(d.worktrees||[]);
+  const rows=list.map(w=>({k:w.branch, d:w.path}));
+  openOverlay({
+    title:'git worktrees · '+list.length,
+    rows: rows.length?rows:[{k:'no worktrees yet',d:'/worktree new <name>'}],
+    filter:false,
+    hint:'/worktree new <name> · remove <name> · Esc close'
+  });
 }
 async function openDiff(a,b){
   if(!a||!b){ toast('usage: /diff <session a> <session b>','error'); return; }
@@ -3283,6 +3363,20 @@ async function runSlash(text){
     case 'snapshot': saveCkpt(arg); break;
     case 'rewind': if(arg) restoreCkpt(arg.split(/\s+/)[0]); else openCkpt(); break;
     case 'rag': openRag(arg); break;
+  case 'skills': openSkills(); break;
+  case 'worktree': case 'worktrees':
+    if(arg && arg.trim()){
+      const parts=arg.trim().split(/\s+/);
+      const first=parts[0];
+      const op=(first==='new'||first==='add')?'add':(first==='remove'||first==='rm')?'remove':'list';
+      const name=parts[1]||'';
+      if(op==='list'){ openWorktree(); break; }
+      const r=await api('/api/worktree',{op,name});
+      if(r.error){ toast(r.error,'error'); break; }
+      toast(op==='add'?('worktree '+name+' created'):('worktree '+name+' removed'),'ok');
+      openWorktree();
+    } else { openWorktree(); }
+    break;
     case 'merge': await doMerge(arg); break;
     case 'init': await doInit(); break;
     case 'mcp': openMcp(); break;

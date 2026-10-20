@@ -5,7 +5,7 @@ Run the built binary from `./dist/enclave`; the user mostly uses `./dist/enclave
 
 ## Build & verify loop (ALWAYS)
 After every change:
-1. `cargo test` — must stay green (currently 232 tests).
+1. `cargo test` — must stay green (currently 243 tests).
 2. `cargo clippy --all-targets` — must be 0 warnings.
 3. `cargo build --release`
 4. `cp target/release/enclave dist/enclave && codesign --force --sign - dist/enclave`
@@ -31,7 +31,7 @@ macOS re-prompts the keychain on launch.
 - The user has an OpenRouter key (previously 403 "PII detected" — server-side, avoid PII).
 - Toolchain pinned in `rust-toolchain.toml` (1.99.0).
 
-## State (committed at 9c77225; 232 tests green, clippy 0)
+## State (HEAD d971408; 243 tests green, clippy 0)
 Everything through security Waves A–C is implemented and tested (218 tests green,
 clippy 0): crypto/vault/SQLCipher memory; 4 providers (openrouter/openai/anthropic/ollama)
 with streaming + real function calling; privacy guard (regex PII + local NER + placeholders)
@@ -60,7 +60,7 @@ added to `.gitignore`.
 Docs: `README.md` (banner, badges, screenshots, quickstart), `docs/{INSTALL,USAGE,architecture,
 privacy,tools,providers,audit,jev-idea,security-roadmap,roadmap-memory-context}.md`, root
 `SECURITY.md` / `CONTRIBUTING.md` / `CODE_OF_CONDUCT.md` / `CHANGELOG.md`, `assets/` (logo,
-banner, tui.png, web.png), `scripts/install.sh`. Tests: 232. Linux CI simulated green
+banner, tui.png, web.png), `scripts/install.sh`. Tests: 243. Linux CI simulated green
 (fmt/clippy/test/deny/audit) via a Docker container `enclave-linux`.
 
 ## Publishing status (NOT yet pushed anywhere)
@@ -165,7 +165,37 @@ Wave 3: Agent Skills + repo map/code index + hooks + git worktree per branch.
 - Tests 224 → 232 (risk 3, verify 5). Docs: README (Verify loop + risk classifier
   sections, `enclave verify` row), docs/USAGE.md (`verify` section + `[verify]`
   table), CHANGELOG `[Unreleased]`.
-Wave 3: Agent Skills + repo map/code index + hooks + git worktree per branch.
+### Wave 3 — Agent Skills, repo map, hooks, worktrees (NEW, UNCOMMITTED)
+- **`src/core/skills.rs`**: `SKILL.md` discovery from
+  `<workspace>/.enclave/skills/<name>/` (or `<name>.md`) + `<config>/skills/`
+  (project overrides global); `parse()` (front-matter name/description),
+  `load_all()`, `SkillsRegistry{get,names,entries,index_text}`. Only the
+  name+description list enters the prompt; the body loads on demand.
+- **`src/core/repomap.rs`**: `symbols_for()` (Rust/Python/JS/TS/Go/generic
+  regexes), `build(workspace,max_files,max_chars)`, `filter()`, `RepoMap`.
+- **`src/core/hooks.rs`**: `HooksSettings` (`[hooks] pre_tool`/`post_tool`/
+  `timeout_secs`), `Hooks`, `run_hook()` (env `ENCLAVE_HOOK_EVENT`,
+  `ENCLAVE_TOOL`, `ENCLAVE_TOOL_ARGS`, `ENCLAVE_WORKSPACE`; non-zero exit
+  blocks). Wired in `builtin_tools::execute_detailed` (pre→inner→post) so every
+  execution path gets hooks; `ToolContext.hooks`.
+- **`src/core/worktree.rs`**: `is_repo`, `list` (porcelain), `add`, `remove`,
+  `default_dir(data_dir,name)`; CLI `Command::Worktree` +
+  `WorktreeAction{List,Add{name,base,path},Remove{name,force}}` + `worktree_cmd`.
+- Engine: `ChatEngine` gained `skills: Option<Arc<SkillsRegistry>>`, `hooks:
+  Option<Hooks>`, `repo_map: Option<String>`; `system_parts()` adds "skills" and
+  "repo map" parts. `builtin_tools::defs()` grew to 15 base tools (added `skill`
+  and `repo_map`; delegate now index 15 / 16 total).
+- CLI `build_engine` loads skills, hooks and the repo map (when
+  `[context] repomap = true`).
+- TUI slash: `/skills`, `/skill <name>`, `/repomap`,
+  `/worktree [list|new|use|remove]`; web: **skills** + **worktree** toolbar
+  chips, `openSkills()`/`openWorktree()`, `/api/worktree` (op list|add|remove),
+  `state_json` gained `skills`, `hooks`, `repomap`.
+- Tests: 232 → 243 (skills 3, repomap 3, hooks 2, worktree 1, memory +1).
+  Docs: README (Agent Skills / Repository map / Tool hooks / Git worktrees
+  sections + `enclave worktree` row), docs/USAGE.md (`worktree` + skills/repo
+  map sections, `[hooks]` table, `[context] repomap` row), CHANGELOG
+  `[Unreleased]`.
 
 ### Ideas still open (not built yet)
 - **Local Model Committee**: several local Ollama models debate; a verifier

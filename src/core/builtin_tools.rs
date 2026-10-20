@@ -65,6 +65,10 @@ pub struct ToolContext {
     pub mcp: Option<std::sync::Arc<crate::core::mcp::McpRegistry>>,
     /// OS sandbox applied to `run_shell` commands (macOS only).
     pub sandbox: Option<crate::core::tools::Sandbox>,
+    /// Discovered Agent Skills (`skill` tool).
+    pub skills: Option<std::sync::Arc<crate::core::skills::SkillsRegistry>>,
+    /// Local pre/post tool hooks.
+    pub hooks: Option<crate::core::hooks::Hooks>,
 }
 
 impl Default for ToolContext {
@@ -78,6 +82,8 @@ impl Default for ToolContext {
             todos: None,
             mcp: None,
             sandbox: None,
+            skills: None,
+            hooks: None,
         }
     }
 }
@@ -263,6 +269,28 @@ pub fn defs(with_delegate: bool) -> Vec<ToolDef> {
                     "tags": {"type": "string", "description": "optional comma-separated tags"}
                 },
                 "required": ["title"]
+            }),
+        ),
+        ToolDef::new(
+            "skill",
+            "Load a local Agent Skill (a SKILL.md instruction pack) by name. The available skills are listed in the system prompt. Read-only.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "skill name"}
+                },
+                "required": ["name"]
+            }),
+        ),
+        ToolDef::new(
+            "repo_map",
+            "Return a compact map of the repository (files and their top-level symbols). Use it to find where things live before reading files. Read-only.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "filter": {"type": "string", "description": "optional path or symbol substring to filter by"}
+                },
+                "required": []
             }),
         ),
         ToolDef::new(
@@ -494,9 +522,62 @@ pub fn apply_unified(original: &str, patch: &str) -> Result<String> {
     Ok(out.join("\n"))
 }
 
-/// Execute one tool call, returning rendered text and any file change.
+/// Execute one tool call, running the configured pre/post hooks around it.
 /// Unknown tools are reported, not guessed.
 pub async fn execute_detailed(
+    call: &ToolCall,
+    ctx: &ToolContext,
+    gate: &mut dyn ToolGate,
+) -> Result<ToolOutcome> {
+    if let Some(hooks) = ctx.hooks.as_ref() {
+        if let Some(pre) = hooks.pre_tool.as_ref() {
+            let out = crate::core::hooks::run_hook(
+                pre,
+                "pre",
+                &call.name,
+                &call.arguments,
+                &ctx.workspace,
+                hooks.timeout_secs,
+                ctx.sandbox.as_ref(),
+            )
+            .await?;
+            if out.blocked {
+                return Ok(ToolOutcome {
+                    text: format!("[blocked by pre_tool hook]\n{}", out.output.trim_end()),
+                    change: None,
+                });
+            }
+        }
+    }
+
+    let mut outcome = execute_inner(call, ctx, gate).await?;
+
+    if let Some(hooks) = ctx.hooks.as_ref() {
+        if let Some(post) = hooks.post_tool.as_ref() {
+            if let Ok(out) = crate::core::hooks::run_hook(
+                post,
+                "post",
+                &call.name,
+                &call.arguments,
+                &ctx.workspace,
+                hooks.timeout_secs,
+                ctx.sandbox.as_ref(),
+            )
+            .await
+            {
+                if out.blocked {
+                    outcome.text.push_str(&format!(
+                        "\n[post_tool hook failed]\n{}",
+                        out.output.trim_end()
+                    ));
+                }
+            }
+        }
+    }
+    Ok(outcome)
+}
+
+async fn execute_inner(
     call: &ToolCall,
     ctx: &ToolContext,
     gate: &mut dyn ToolGate,
@@ -855,6 +936,52 @@ pub async fn execute_detailed(
                 }),
             }
         }
+        "skill" => {
+            let name = arg_str("name");
+            let registry = ctx.skills.as_ref().ok_or_else(|| {
+                EnclaveError::other(
+                    "no skills installed (add .enclave/skills/<name>/SKILL.md or <config>/skills/<name>/SKILL.md)",
+                )
+            })?;
+            match registry.get(&name) {
+                Some(skill) => Ok(ToolOutcome {
+                    text: skill.expand(),
+                    change: None,
+                }),
+                None => {
+                    let names = registry.names();
+                    let available = if names.is_empty() {
+                        "(none)".to_string()
+                    } else {
+                        names.join(", ")
+                    };
+                    Err(EnclaveError::other(format!(
+                        "unknown skill '{name}' — available: {available}"
+                    )))
+                }
+            }
+        }
+        "repo_map" => {
+            let map = crate::core::repomap::build(&ctx.workspace, 400, 40_000);
+            let filter = arg_str("filter");
+            let map = if filter.trim().is_empty() {
+                map
+            } else {
+                crate::core::repomap::filter(&map, &filter)
+            };
+            let text = if map.is_empty() {
+                "no symbols found in the workspace".to_string()
+            } else {
+                format!("repository map ({} file(s)):\n{}", map.files, map.text)
+            };
+            let (text, truncated) = cap(text.as_bytes(), ctx.max_output_bytes);
+            let text = if truncated {
+                format!("{text}\n[truncated]")
+            } else {
+                text
+            };
+            Ok(ToolOutcome { text, change: None })
+        }
         other => {
             if other.starts_with("mcp__") {
                 let registry = ctx.mcp.as_ref().ok_or_else(|| {
@@ -909,7 +1036,7 @@ mod tests {
     #[test]
     fn defs_shape_and_delegate_flag() {
         let base = defs(false);
-        assert_eq!(base.len(), 13);
+        assert_eq!(base.len(), 15);
         assert!(base.iter().all(|d| !d.name.is_empty()));
         assert!(base.iter().any(|d| d.name == "edit_file"));
         assert!(base.iter().any(|d| d.name == "apply_patch"));
@@ -920,9 +1047,11 @@ mod tests {
         assert!(base.iter().any(|d| d.name == "remember"));
         assert!(base.iter().any(|d| d.name == "rag_search"));
         assert!(base.iter().any(|d| d.name == "decide"));
+        assert!(base.iter().any(|d| d.name == "skill"));
+        assert!(base.iter().any(|d| d.name == "repo_map"));
         let with = defs(true);
-        assert_eq!(with.len(), 14);
-        assert_eq!(with[13].name, "delegate");
+        assert_eq!(with.len(), 16);
+        assert_eq!(with[15].name, "delegate");
     }
 
     fn ctx_at(ws: &Path) -> ToolContext {

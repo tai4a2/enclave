@@ -19,6 +19,9 @@ use crate::error::Result;
 /// Languages accepted inside fenced blocks.
 const SHELL_LANGS: &[&str] = &["bash", "sh", "shell", "zsh"];
 
+/// Default output cap for command execution (mirrors `[tools] max_output_bytes`).
+pub const DEFAULT_MAX_OUTPUT_BYTES: usize = 8192;
+
 /// A shell command proposed by the assistant.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Proposal {

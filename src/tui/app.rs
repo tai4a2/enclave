@@ -131,7 +131,7 @@ fn surface() -> Style {
 
 /// Text shown by `/help`.
 const SLASH_HELP: &str =
-    "commands: /help · /new · /switch · /branch [name] [--from N] · /log · /graph · /checkout <name> · /diff <a> <b> · /merge <branch> · /blame <text> · /provenance · /clear · /undo · /redo · /retry · /compact · /find <text> · /search <text> · /model [id] · /effort · /connect [provider] · /thinking · /details · /plan · /build · /attach <path> · /detach · /export [md|html|pdf] [path] · /editor · /init · /mcp · /ledger · /rag [index <paths>|search <q>|status|clear] · /airgap [on|off] · /route [on|off] · /remember <text> · /memory [search <q>|pin <id>] · /forget <id|text> · /checkpoint · /snapshots · /snapshot [label] · /rewind <id|n> · /decide <title> [:: why] · /decisions [query] · /exposure · /traffic · /context · /verify · /theme [name] · /commands · /credits · /panic · /quit   (Ctrl-P palette · Ctrl-S picker · Ctrl-R search sessions · Ctrl-Y copy · Ctrl-O editor · Shift+Tab plan/build · @file refs · !shell)";
+    "commands: /help · /new · /switch · /branch [name] [--from N] · /log · /graph · /checkout <name> · /diff <a> <b> · /merge <branch> · /blame <text> · /provenance · /clear · /undo · /redo · /retry · /compact · /find <text> · /search <text> · /model [id] · /effort · /connect [provider] · /thinking · /details · /plan · /build · /attach <path> · /detach · /export [md|html|pdf] [path] · /editor · /init · /mcp · /ledger · /rag [index <paths>|search <q>|status|clear] · /airgap [on|off] · /route [on|off] · /remember <text> · /memory [search <q>|pin <id>] · /forget <id|text> · /checkpoint · /snapshots · /snapshot [label] · /rewind <id|n> · /decide <title> [:: why] · /decisions [query] · /exposure · /traffic · /context · /verify · /skills · /skill <name> · /repomap · /worktree [list|new|use|remove] · /theme [name] · /commands · /credits · /panic · /quit   (Ctrl-P palette · Ctrl-S picker · Ctrl-R search sessions · Ctrl-Y copy · Ctrl-O editor · Shift+Tab plan/build · @file refs · !shell)";
 
 /// Command palette entries (Ctrl-P): (command, one-line description).
 const PALETTE_COMMANDS: &[(&str, &str)] = &[
@@ -191,6 +191,15 @@ const PALETTE_COMMANDS: &[(&str, &str)] = &[
         "what left the machine + what was intercepted as sensitive",
     ),
     ("/verify", "run the project's checks locally (tests/lint)"),
+    ("/skills", "list local Agent Skills (SKILL.md)"),
+    (
+        "/repomap",
+        "show a map of the repository (files -> symbols)",
+    ),
+    (
+        "/worktree",
+        "git worktrees: list / new <name> / use <name> / remove <name>",
+    ),
     ("/commands", "list custom .md commands"),
     ("/credits", "show OpenRouter credits / usage"),
     ("/mcp", "list tools exposed by MCP servers"),
@@ -485,6 +494,8 @@ async fn run_app(
         max_output_bytes: tools_cfg.max_output_bytes,
         todos: Some(engine.todos.clone()),
         mcp: engine.mcp.clone(),
+        skills: engine.skills.clone(),
+        hooks: engine.hooks.clone(),
         ..Default::default()
     };
     // Local custom commands (`.enclave/commands` + `<config>/commands`).
@@ -3039,6 +3050,146 @@ async fn run_app(
                                                     Ok(None) => status = "nothing to verify".into(),
                                                     Err(e) => status = format!("error: {e}"),
                                                 }
+                                            }
+                                        }
+                                    }
+                                    "skills" => {
+                                        match &engine.skills {
+                                            Some(reg) if !reg.is_empty() => {
+                                                let mut t = format!(
+                                                    "skills ({}):\n",
+                                                    reg.len()
+                                                );
+                                                for line in reg.index_text().lines().skip(1) {
+                                                    t.push_str(line);
+                                                    t.push('\n');
+                                                }
+                                                t.push_str(
+                                                    "\nuse /skill <name> to load one, or let the model call the `skill` tool",
+                                                );
+                                                transcript.push(ChatLine {
+                                                    speaker: Speaker::System,
+                                                    text: t,
+                                                });
+                                                status = format!("{} skill(s)", reg.len());
+                                            }
+                                            _ => {
+                                                status = "no skills installed — add .enclave/skills/<name>/SKILL.md".into()
+                                            }
+                                        }
+                                    }
+                                    "skill" => {
+                                        let name = arg.trim();
+                                        match engine.skills.as_ref().and_then(|r| r.get(name)) {
+                                            Some(skill) => {
+                                                transcript.push(ChatLine {
+                                                    speaker: Speaker::System,
+                                                    text: skill.expand(),
+                                                });
+                                                status = format!("loaded skill '{}'", skill.name);
+                                            }
+                                            None => {
+                                                status = if name.is_empty() {
+                                                    "usage: /skill <name>".into()
+                                                } else {
+                                                    format!("unknown skill '{name}'")
+                                                }
+                                            }
+                                        }
+                                    }
+                                    "repomap" => {
+                                        let map = crate::core::repomap::build(
+                                            &engine.workspace,
+                                            300,
+                                            20_000,
+                                        );
+                                        if map.is_empty() {
+                                            status = "no symbols found in the workspace".into();
+                                        } else {
+                                            for line in map.text.lines() {
+                                                transcript.push(ChatLine {
+                                                    speaker: Speaker::Tool,
+                                                    text: line.to_string(),
+                                                });
+                                            }
+                                            status =
+                                                format!("repo map — {} file(s)", map.files);
+                                        }
+                                    }
+                                    "worktree" | "worktrees" => {
+                                        let repo = engine.workspace.clone();
+                                        if !crate::core::worktree::is_repo(&repo) {
+                                            status = "not in a git repository".into();
+                                        } else {
+                                            let mut parts = arg.split_whitespace();
+                                            match parts.next() {
+                                                None | Some("list") => {
+                                                    match crate::core::worktree::list(&repo) {
+                                                        Ok(items) => {
+                                                            let mut t = format!(
+                                                                "worktrees ({}):\n",
+                                                                items.len()
+                                                            );
+                                                            for w in items {
+                                                                t.push_str(&format!(
+                                                                    "  {:<26} {}\n",
+                                                                    w.branch,
+                                                                    w.path.display()
+                                                                ));
+                                                            }
+                                                            t.push_str("\n/worktree new <name> · /worktree use <name> · /worktree remove <name>");
+                                                            transcript.push(ChatLine {
+                                                                speaker: Speaker::System,
+                                                                text: t,
+                                                            });
+                                                            status = format!("{} worktree(s)", 0);
+                                                        }
+                                                        Err(e) => status = format!("error: {e}"),
+                                                    }
+                                                }
+                                                Some("new") | Some("add") => {
+                                                    match parts.next() {
+                                                        None => status = "usage: /worktree new <name>".into(),
+                                                        Some(name) => {
+                                                            let data_dir = crate::config::Paths::resolve().map(|p| p.data_dir).unwrap_or_default();
+                                                            let dir = crate::core::worktree::default_dir(&data_dir, name);
+                                                            match crate::core::worktree::add(&repo, &dir, name, None) {
+                                                                Ok(()) => status = format!("worktree '{name}' created at {}", dir.display()),
+                                                                Err(e) => status = format!("error: {e}"),
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                Some("use") => {
+                                                    match parts.next() {
+                                                        None => status = "usage: /worktree use <name>".into(),
+                                                        Some(name) => {
+                                                            let data_dir = crate::config::Paths::resolve().map(|p| p.data_dir).unwrap_or_default();
+                                                            let dir = crate::core::worktree::default_dir(&data_dir, name);
+                                                            if dir.is_dir() {
+                                                                engine.workspace = dir.clone();
+                                                                engine.repo_map = None;
+                                                                status = format!("workspace switched to {}", dir.display());
+                                                            } else {
+                                                                status = format!("no worktree '{name}' — create it with /worktree new {name}");
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                Some("remove") | Some("rm") => {
+                                                    match parts.next() {
+                                                        None => status = "usage: /worktree remove <name>".into(),
+                                                        Some(name) => {
+                                                            let data_dir = crate::config::Paths::resolve().map(|p| p.data_dir).unwrap_or_default();
+                                                            let dir = crate::core::worktree::default_dir(&data_dir, name);
+                                                            match crate::core::worktree::remove(&repo, &dir, true) {
+                                                                Ok(()) => status = format!("worktree '{name}' removed"),
+                                                                Err(e) => status = format!("error: {e}"),
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                Some(other) => status = format!("unknown /worktree sub-command '{other}'"),
                                             }
                                         }
                                     }
@@ -6003,7 +6154,10 @@ fn welcome_lines(tools_enabled: bool) -> Vec<Line<'static>> {
         key("/exposure", "privacy blast-radius and posture score"),
         key("/context", "explain what is sent this turn (why is this in context?)"),
         key("/traffic", "what left the machine and what was intercepted as sensitive"),
-        key("/verify", "run the project's tests/lint locally in the sandbox"),
+        key("/verify", "run the project's tests/lint locally (like CI)"),
+        key("/skills", "list local Agent Skills and load one with /skill <name>"),
+        key("/repomap", "map the repository: files and their top-level symbols"),
+        key("/worktree", "git worktrees — one working dir per branch"),
         key("/copy", "copy the last reply (or the last N replies: /copy 3)"),
         key("/save", "save this conversation as a Markdown file (plaintext)"),
         key("/undo /redo", "undo the last turn / restore it"),

@@ -385,6 +385,76 @@ block_destructive = true    # refuse dangerous commands (default);
                             # set false to always ask instead
 ```
 
+## Agent Skills (local instruction packs)
+
+A *skill* is a `SKILL.md` file that teaches the model how to do something
+specific for your project (a deploy procedure, a release checklist, an API
+convention). Enclave discovers them locally and offers only the **name and
+description** to the model; the full body is loaded on demand — progressive
+disclosure, so the context stays small until a skill is actually needed.
+
+```
+.enclave/skills/deploy/SKILL.md     # project skills (highest priority)
+<config>/skills/deploy/SKILL.md     # global skills
+```
+
+```markdown
+---
+name: deploy
+description: How to cut a release
+---
+# Deploy
+1. `cargo test`
+2. `scripts/release.sh`
+```
+
+* TUI: `/skills` lists them, `/skill <name>` shows one; the model can load one
+  itself through the `skill` tool (read-only).
+* Web UI: **skills** toolbar button.
+* Fully local — nothing is fetched remotely.
+
+## Repository map (files → symbols)
+
+A compact, offline map of the repository (which file defines which function /
+struct / class), extracted with language-specific patterns for Rust, Python,
+JS/TS, Go and a generic fallback. A bounded version is injected into the
+context (`[context] repomap = true`, default) and the model can pull a filtered
+one with the `repo_map` tool. TUI: `/repomap`.
+
+```toml
+[context]
+repomap = true              # inject a compact repo map (default)
+```
+
+## Tool hooks
+
+Run a local shell command *around* every tool call: `pre_tool` can **block** a
+call by exiting non-zero, `post_tool` runs after it. Both receive
+`ENCLAVE_TOOL`, `ENCLAVE_TOOL_ARGS`, `ENCLAVE_HOOK_EVENT` and
+`ENCLAVE_WORKSPACE` in the environment. There is no recursion (hooks run
+through the shell directly, in the same sandbox).
+
+```toml
+[hooks]
+pre_tool  = "echo $ENCLAVE_TOOL >> ~/.enclave-hooks.log"
+post_tool = "notify-send 'enclave' "$ENCLAVE_TOOL done""   # optional
+timeout_secs = 30
+```
+
+## Git worktrees
+
+Work on several branches at once, each with its own working directory, without
+stashing. Enclave manages them locally under the app data dir.
+
+```bash
+enclave worktree list
+enclave worktree add feature-x          # -> <data>/worktrees/feature-x on a new branch
+enclave worktree remove feature-x --force
+```
+
+TUI: `/worktree` lists, `/worktree new <name>` creates, `/worktree use <name>`
+switches the agent workspace to that worktree. Web UI: **worktree** button.
+
 ## Conversation branches (Conversation Git)
 
 Enclave can treat a conversation like **git treats code**: instead of a single
@@ -928,8 +998,9 @@ launch.
 | `enclave or endpoints <model>` | Provider endpoints, context and prices for a model |
 | `enclave or keys list\|create\|get\|update\|delete` | Manage OpenRouter provisioning keys (needs `ENCLAVE_OPENROUTER_PROVISIONING_KEY`) |
 | `enclave serve [-p 7878]` | Start the local-only web UI of your encrypted memory (loopback + per-run token) |
+| `enclave worktree list\|add\|remove` | Git worktrees — one working directory per branch |
 | `enclave checkpoint list\|create\|restore\|diff` | Local workspace snapshots (shadow git) — rewind agent edits |
-| `enclave verify [--command <cmd>]` | Run the project's tests/lint locally in the sandbox |
+| `enclave verify [--command <cmd>]` | Run the project's tests/lint locally (like CI) |
 
 Security/privacy audit: see [docs/audit.md](docs/audit.md).
 

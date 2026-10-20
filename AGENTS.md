@@ -32,8 +32,8 @@ macOS re-prompts the keychain on launch.
 - The user has an OpenRouter key (previously 403 "PII detected" — server-side, avoid PII).
 - Toolchain pinned in `rust-toolchain.toml` (1.99.0).
 
-## State (HEAD d971408; 243 tests green, clippy 0)
-Everything through security Waves A–C is implemented and tested (218 tests green,
+## State (HEAD 947e51a; 243 tests green, clippy 0; CI green on GitHub)
+Everything through security Waves A–C is implemented and tested (243 tests green,
 clippy 0): crypto/vault/SQLCipher memory; 4 providers (openrouter/openai/anthropic/ollama)
 with streaming + real function calling; privacy guard (regex PII + local NER + placeholders)
 with taint tracking, egress policy-as-code, air-gap, prompt-injection canary, sensitivity
@@ -65,18 +65,60 @@ banner, tui.png, web.png), `scripts/install.sh`. Tests: 243. Linux CI simulated 
 (fmt/clippy/test/deny/audit) via a Docker container `enclave-linux`.
 
 ## Publishing status (PUBLIC at github.com/tai4a2/enclave)
-- Repo: <https://github.com/tai4a2/enclave> (public, MIT). `Cargo.toml` `repository` points there,
-  and the OpenRouter `HTTP-Referer` header uses the same URL.
-- Release `v0.1.0`: tag + GitHub Release carrying the ad-hoc-signed macOS binary,
-  `enclave.sha256` and the CycloneDX SBOM (`scripts/release.sh` produces them).
-- CI: `.github/workflows/ci.yml` (fmt, `clippy --all-targets -- -D warnings`, tests,
-  `cargo-audit`, `cargo-deny`, CycloneDX SBOM), triggered on push to `main` and tags `v*`.
-- Private vulnerability reporting enabled on the repo (see `SECURITY.md`).
-- Privacy: no real secrets in the tree (token-like strings are test fixtures) and the personal
-  e-mail was stripped from the whole history (see the Git section above).
+- Repo: <https://github.com/tai4a2/enclave> (public, MIT, 109 file versionati). `Cargo.toml`
+  `repository` points there, and the OpenRouter `HTTP-Referer` header uses the same URL.
+- Push access = SSH deploy key, repo-scoped only: alias `github-enclave`
+  (`~/.ssh/id_enclave_deploy`, config `Host github-enclave` → `HostName github.com`,
+  `IdentitiesOnly yes`); remote `origin = git@github-enclave:tai4a2/enclave.git`.
+  Verify with `ssh -T git@github-enclave`. `gh` CLI is NOT authenticated (invalid keyring
+  token) — do not rely on it.
+- History: rewritten three times with `git filter-branch` (2026-10-20) to strip the personal
+  e-mail, the absolute home paths, and the author's real name; 24 commits, all
+  authored/committed by `tai4a2 <tai4a2@users.noreply.github.com>`.
+- Tag `v0.1.0` now points to `947e51a` (`docs/release-notes-v0.1.0.md` is the notes file) — hash
+  INVALIDATED by the anonymisation rewrite (see "Privacy audit" below).
+- **RELEASE v0.1.0 NOT PUBLISHED YET** (GitHub reports 0 releases). NEXT: create it attaching
+  `dist/enclave` (macOS arm64, 15,248,848 B, sha256
+  `f19d9a72a4e2b662bf275e5255e285e67b863b05a2026c82cee4ab2291ecafb7`),
+  `dist/enclave.sha256` and `dist/enclave.cdx.json`, notes from `dist/RELEASE_v0.1.0.md`.
+  Either the user clicks (Releases → New → tag `v0.1.0`), or `gh release create …` with a
+  fine-grained PAT (Contents: RW, repo-only), or I do it with such a PAT.
+- CI: `.github/workflows/ci.yml` — jobs `test + clippy` (pinned `dtolnay/rust-toolchain@1.99.0`,
+  a `system deps` step installing `libdbus-1-dev` + `pkg-config`, fmt, clippy with
+  `continue-on-error` + a `clippy report` step re-emitting diagnostics as annotations, tests),
+  `cargo-audit` (taiki-e/install-action), `cargo-deny`, `SBOM (CycloneDX)`. Triggered on push to
+  `main` and tags `v*`. **All 4 jobs green on `947e51a`.** The old failure was
+  `libdbus-sys` missing D-Bus headers on the Ubuntu 26 runner (reproduced in the Docker
+  container `enclave-u26`, i.e. `ubuntu:latest` = Ubuntu 26.04.1).
+- Docker containers `enclave-linux` (Debian bookworm) and `enclave-u26` (Ubuntu 26.04) are
+  available for Linux verification (`docker exec`, `CARGO_TARGET_DIR=/target`, `-j 2`).
+- Private vulnerability reporting: to be enabled by the user in repo Settings → Security
+  (SECURITY.md references it).
 - Windows support was explicitly NOT pursued (macOS + Linux only). The shell invocation is
   hard-wired to `sh -c` (`src/core/tools.rs`), so Windows would need a `cmd /C` branch; the
   sandbox and `secure.rs` (mlock) are macOS/unix-only.
+
+## Privacy audit of the repo (2026-10-20, verified + anonymised)
+Checked the working tree AND the full git history (`git log --all -p`, `git rev-list --objects --all`).
+- **CLEAN**: no `vault.db` / `salt.bin` / `keys.toml` / `web.token` / `.env` / private keys
+  tracked or present in history; no `~` absolute home paths; no personal e-mail
+  (`mtaikaku@gmail.com`); no hostname (`MacBook-Pro-di-…`); no real OpenRouter key or the real
+  loopback web token (`13b2cf5cbc447cb7` was replaced with a fake `a1b2c3d4e5f60718` before
+  publishing); no LAN IPs (`192.168.2.*`); commit identity is only
+  `tai4a2 <tai4a2@users.noreply.github.com>`.
+- **PLACEHOLDERS (not real)**: `/Users/me/projects` in README, `/Users/me/project` in a
+  `src/core/tools.rs` test, `mario.rossi@gmail.com` / `anna.bianchi@libero.it` / `+39 333 1234567`
+  / `IT60X0542811101000000123456` / `IP 192.168.1.42` / `sk-abcdef…` in guard tests and README.
+- **ANONYMISED (2026-10-20, user request)**: the author's first name was replaced with the
+  pseudonym `tai4a2` — `LICENSE` (`Copyright (c) 2026 tai4a2`), `Cargo.toml`
+  (`authors = ["tai4a2"]`), `AGENTS.md`, `docs/security-roadmap.md` (`**Autore:** tai4a2`);
+  test fixtures now use `Alex` / `alex@example.com` (`tests/export.rs`, `tests/memory.rs`,
+  `tests/privacy_memory.rs`); the `/Author` and `CreationDate`/`ModDate` metadata of
+  `docs/Enclave-vs-Coding-Agents.pdf` and `docs/Security-Roadmap.pdf` were blanked in place
+  (same byte length, so the xref stays valid); and the whole 24-commit history was rewritten
+  with `git filter-branch` + force-push so the old name no longer appears anywhere.
+  **Consequence: every commit hash created before this rewrite is INVALID** (including the
+  earlier `947e51a`); the tag `v0.1.0` was re-pointed to the rewritten commit.
 
 ## NEXT WORK
 Security roadmap Waves A–C complete (C2 E2EE sync and C5 split inference are documented

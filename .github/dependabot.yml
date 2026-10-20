@@ -1,18 +1,25 @@
 version: 2
 updates:
+  # Security updates are always on (they are alerts, not version PRs).
+  # These rules only control the "keep me up to date" PRs.
   - package-ecosystem: cargo
     directory: "/"
     schedule:
-      interval: weekly
-    open-pull-requests-limit: 5
+      interval: monthly
+    open-pull-requests-limit: 1
     groups:
       cargo-minor-patch:
         patterns: ["*"]
         update-types: ["minor", "patch"]
+    # Major bumps frequently need code changes — do them by hand, when we want.
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
     labels: ["dependencies"]
+
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
-      interval: weekly
-    open-pull-requests-limit: 5
+      interval: monthly
+    open-pull-requests-limit: 1
     labels: ["dependencies", "ci"]

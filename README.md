@@ -6,8 +6,8 @@
   <a href="LICENSE"><img alt="license: MIT" src="https://img.shields.io/badge/license-MIT-a78bfa"></a>
   <img alt="rust 1.99" src="https://img.shields.io/badge/rust-1.99-a78bfa">
   <img alt="platforms macOS | Linux" src="https://img.shields.io/badge/platforms-macOS%20%7C%20Linux-a78bfa">
+  <img alt="tests: 243 passing" src="https://img.shields.io/badge/tests-243%20passing-7fd88f">
   <img alt="telemetry: none" src="https://img.shields.io/badge/telemetry-none-7fd88f">
-  <img alt="tests: 221 passing" src="https://img.shields.io/badge/tests-221%20passing-7fd88f">
 </p>
 
 **Enclave** is a privacy-first AI coding assistant that runs in your terminal — and in a local web UI. Encryption is the main feature, not an afterthought: your conversations live in an encrypted SQLCipher database, your keys never sit in plaintext, and you can *see* — and prove — exactly what leaves your machine.
@@ -1015,7 +1015,9 @@ A faithful, interactive web view of the same encrypted memory — styled like th
 ```
 
 It prints a short URL and **opens it in your browser** automatically
-(`--no-open` disables that). The token is stable across launches — it is stored
+(`--no-open` disables that; on Linux it tries `$BROWSER`, `xdg-open`, `gio open`,
+`sensible-browser`, and on a headless machine nothing opens — just use the URL).
+The token is stable across launches — it is stored
 in `web.token` (mode `0600`) in the config directory — so the URL no longer
 changes every time, e.g. `http://127.0.0.1:7878/?token=a1b2c3d4e5f60718`.
 

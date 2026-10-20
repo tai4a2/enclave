@@ -15,11 +15,12 @@ macOS re-prompts the keychain on launch.
 
 ## Git
 - Commit ONLY on explicit user request. Do not commit proactively.
-- Branch `main`. Last commit: `9c77225`
-  ("Add documentation, brand assets and publishing preparation").
-  History tail: `eef67aa` (context budgeter) → `8cf67c6` (context inspector) →
-  `9205be5` (decisions + blast-radius/score) → `651f65b` (web UI + TUI polish) → `9c77225`.
-  Working tree CLEAN as of 9c77225.
+- Branch `main`. Remote `origin` = <https://github.com/tai4a2/enclave> (public, MIT).
+- Identity for this repo: `tai4a2 <tai4a2@users.noreply.github.com>`.
+  NOTE: on 2026-10-20 the whole history was rewritten with `git filter-branch` to strip the
+  personal e-mail from every commit — commit hashes recorded before that date are INVALID.
+- Last commit: see `git log --oneline -1` (do not hard-code a hash here — history is rewritten
+  periodically to keep the tree clean).
 
 ## Environment
 - Config dir: `~/Library/Application Support/dev.enclave.enclave`
@@ -63,14 +64,16 @@ privacy,tools,providers,audit,jev-idea,security-roadmap,roadmap-memory-context}.
 banner, tui.png, web.png), `scripts/install.sh`. Tests: 243. Linux CI simulated green
 (fmt/clippy/test/deny/audit) via a Docker container `enclave-linux`.
 
-## Publishing status (NOT yet pushed anywhere)
-- **Blocker**: `Cargo.toml` still has the placeholder `repository = "https://github.com/enclave/enclave"`.
-  Needs the real GitHub URL. Planned: dedicated identity (e.g. `taikaku@users.noreply.github.com`)
-  and a repo/org (one login; `gh` on this Mac is logged into `tai4a2` with an invalid token).
-- Privacy: no real secrets in the tree (the token-like strings are test fixtures). The only
-  personal path was sanitised. NOTE: earlier commits still contain an absolute home
-  path (`/Users/<name>/...`) in `AGENTS.md`; a clean history would need `git filter-repo`
-  (offered, not done).
+## Publishing status (PUBLIC at github.com/tai4a2/enclave)
+- Repo: <https://github.com/tai4a2/enclave> (public, MIT). `Cargo.toml` `repository` points there,
+  and the OpenRouter `HTTP-Referer` header uses the same URL.
+- Release `v0.1.0`: tag + GitHub Release carrying the ad-hoc-signed macOS binary,
+  `enclave.sha256` and the CycloneDX SBOM (`scripts/release.sh` produces them).
+- CI: `.github/workflows/ci.yml` (fmt, `clippy --all-targets -- -D warnings`, tests,
+  `cargo-audit`, `cargo-deny`, CycloneDX SBOM), triggered on push to `main` and tags `v*`.
+- Private vulnerability reporting enabled on the repo (see `SECURITY.md`).
+- Privacy: no real secrets in the tree (token-like strings are test fixtures) and the personal
+  e-mail was stripped from the whole history (see the Git section above).
 - Windows support was explicitly NOT pursued (macOS + Linux only). The shell invocation is
   hard-wired to `sh -c` (`src/core/tools.rs`), so Windows would need a `cmd /C` branch; the
   sandbox and `secure.rs` (mlock) are macOS/unix-only.

@@ -6,7 +6,7 @@ description = "Privacy-first AI CLI with encrypted memory"
 license = "MIT"
 authors = ["tai4a2"]
 readme = "README.md"
-repository = "https://github.com/enclave/enclave"
+repository = "https://github.com/tai4a2/enclave"
 
 [[bin]]
 name = "enclave"

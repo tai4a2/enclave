@@ -52,7 +52,7 @@ enclave keys set openrouter
 # 3. Talk
 enclave tui                   # full-screen TUI
 enclave chat                  # line-based chat
-enclave serve                 # local web UI on 127.0.0.1 with a per-run token
+enclave serve                 # local web UI (opens the browser automatically)
 
 # 4. Fully offline (no API key, nothing leaves the machine)
 ollama pull llama3.1
@@ -997,10 +997,11 @@ launch.
 | `enclave or providers` | List upstream provider names |
 | `enclave or endpoints <model>` | Provider endpoints, context and prices for a model |
 | `enclave or keys list\|create\|get\|update\|delete` | Manage OpenRouter provisioning keys (needs `ENCLAVE_OPENROUTER_PROVISIONING_KEY`) |
-| `enclave serve [-p 7878]` | Start the local-only web UI of your encrypted memory (loopback + per-run token) |
+| `enclave serve [-p 7878]` | Start the local-only web UI (loopback + token; opens the browser) |
 | `enclave worktree list\|add\|remove` | Git worktrees — one working directory per branch |
 | `enclave checkpoint list\|create\|restore\|diff` | Local workspace snapshots (shadow git) — rewind agent edits |
 | `enclave verify [--command <cmd>]` | Run the project's tests/lint locally (like CI) |
+| `enclave guard <text>` / `--file <path>` | Check text for sensitive data and preview the placeholders (offline) |
 
 Security/privacy audit: see [docs/audit.md](docs/audit.md).
 
@@ -1013,11 +1014,15 @@ A faithful, interactive web view of the same encrypted memory — styled like th
 ./dist/enclave serve -p 9000    # custom port
 ```
 
-It prints a one-off URL with a random per-run token, e.g.
-`http://127.0.0.1:7878/?token=…`.
+It prints a short URL and **opens it in your browser** automatically
+(`--no-open` disables that). The token is stable across launches — it is stored
+in `web.token` (mode `0600`) in the config directory — so the URL no longer
+changes every time, e.g. `http://127.0.0.1:7878/?token=a1b2c3d4e5f60718`.
 
 - **Loopback only**, token-gated on every request (`?token=` or the `x-enclave-token`
-  header); assets are embedded in the binary — no CDN, zero telemetry.
+  header); assets are embedded in the binary — no CDN, zero telemetry. The brand
+  mark is inlined as SVG (header + welcome screen) and used as the favicon, so
+  the page works fully offline.
 - Same layout as the TUI: header, sessions sidebar, card transcript with markdown
   rendering, right-hand info panel (model, guard, air-gap, DB size, egress, tasks),
   privacy bar and footer.
@@ -1029,6 +1034,13 @@ It prints a one-off URL with a random per-run token, e.g.
 - **Code windows & before/after diffs** — fenced code is shown in a framed window with
   line numbers and a copy button; when a snippet is a diff (or a tool edits a file) it is
   rendered as **two panes side by side with added lines in green and removed in red**.
+- **Full command parity with the TUI** — every slash command works in the browser
+  (`/branch /graph /diff /merge /blame /provenance /snapshots /rewind /skills /repomap
+  /credits /commands /rag /ledger /exposure /context /traffic /verify /worktree …`),
+  with clickable header pills, a persistent quick-action toolbar and pickers for
+  model, effort, provider, theme, sessions, memories and decisions. Only two commands
+  stay terminal-only because a browser cannot do them: `/editor` (`$EDITOR`) and
+  `/panic` (full-screen lock).
   The TUI mirrors this with framed `╭─`/`╰─` code windows and coloured diff lines.
 - **Agentic mode** (`agent` chip in the footer, or `/agent`): the assistant can run the
   built-in tools (read/write/edit files, glob, grep, run_shell, …); every call is shown in

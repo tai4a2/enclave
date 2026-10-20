@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`enclave guard`** — check text (or a file) for sensitive data offline and
+  preview the placeholder form (`enclave guard "…"`, `enclave guard --file log`).
+  No provider, no vault, no password.
+- **Web UI: guard choice** — the pre-send guard dialog now offers *Cancel* /
+  *Use placeholders* / *Send anyway*, shows the placeholder preview, applies
+  placeholders automatically in `redact` mode and refuses in `block` mode
+  (matching the TUI). `/api/send` and `/api/agent/start` accept `redact: true`.
+- **Web UI: full command parity with the TUI** — added the missing slash
+  commands and endpoints: `/credits` · `/commands` · `/repomap` · `/skill` ·
+  `/attach` `/detach` `/file` · `/copy` · `/save`, plus the TUI aliases
+  (`/air-gap`, `/routing`, `/save-point`, `/undo-edit`, `/usage`, `/exit`, `/q`),
+  new routes `/api/credits`, `/api/commands`, `/api/repomap`, `/api/skill`, and
+  the missing entries in the palette and toolbar. Only `/editor` (`$EDITOR`) and
+  `/panic` remain terminal-only.
+- **Web UI: brand mark and stable URL** — the logo is inlined as SVG in the
+  header and welcome screen and used as the favicon (fully offline). `enclave
+  serve` now stores its access token in `web.token` (mode `0600`) so the URL is
+  short and stable across launches, and opens the browser automatically
+  (`--no-open` to disable).
 - **Agent Skills** — local `SKILL.md` instruction packs discovered from
   `.enclave/skills/` and `<config>/skills/`. Only name + description enter the
   context; the body is loaded on demand via the `skill` tool (`/skills`,

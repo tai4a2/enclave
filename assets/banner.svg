@@ -20,12 +20,15 @@
   <rect width="1280" height="360" rx="28" fill="url(#glow)"/>
   <rect x="1.5" y="1.5" width="1277" height="357" rx="26.5" fill="none" stroke="#2c2e36" stroke-width="3"/>
 
-  <!-- mark -->
+  <!-- mark (sealed vault) -->
   <g transform="translate(60,60) scale(0.47)">
-    <path d="M256 84 L400 146 V268 C400 348 334 408 256 436 C178 408 112 348 112 268 V146 Z" fill="url(#accent)"/>
-    <path d="M256 120 L368 168 V268 C368 330 318 378 256 402 C194 378 144 330 144 268 V168 Z" fill="#101117"/>
-    <circle cx="256" cy="236" r="34" fill="url(#accent)"/>
-    <rect x="242" y="258" width="28" height="72" rx="14" fill="url(#accent)"/>
+    <path d="M256 74 L410 142 V274 C410 358 338 418 256 446 C174 418 102 358 102 274 V142 Z" fill="url(#accent)"/>
+    <path d="M256 74 L410 142 V274 C410 358 338 418 256 446 C174 418 102 358 102 274 V142 Z" fill="none" stroke="#ece7ff" stroke-opacity="0.35" stroke-width="3"/>
+    <path d="M256 114 L374 163 V274 C374 335 320 382 256 406 C192 382 138 335 138 274 V163 Z" fill="#101117"/>
+    <path d="M256 114 L374 163 V274 C374 335 320 382 256 406 C192 382 138 335 138 274 V163 Z" fill="none" stroke="#2f3140" stroke-width="3"/>
+    <circle cx="256" cy="234" r="74" fill="none" stroke="url(#accent)" stroke-width="8" opacity="0.9"/>
+    <circle cx="256" cy="220" r="27" fill="url(#accent)"/>
+    <path d="M247 236 h18 l6 55 a15 15 0 0 1 -30 0 z" fill="url(#accent)"/>
   </g>
 
   <!-- wordmark -->

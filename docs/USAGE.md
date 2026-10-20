@@ -196,6 +196,26 @@ enclave exposure --session  # most recent session only
 
 Shows counts and kinds only — never payloads or secrets.
 
+### `guard` — preview what the privacy guard would redact
+
+Runs the detector **offline** (no provider, no vault, no password) and shows the
+finding list plus the placeholder form of the text. Handy to check whether a
+given message would be flagged, and to see exactly what `[EMAIL_1]`-style
+placeholders would replace.
+
+```bash
+enclave guard "write to mario.rossi@example.com, IBAN IT60X0542811101000000123456"
+enclave guard --file ./server.log      # scan a file instead
+```
+
+If nothing is found it prints `no sensitive data detected — this text would be
+sent as-is`. In normal chat the same detector runs before sending: the TUI opens
+the guard panel (`p` placeholders · `s` send as-is · `r` refuse), the CLI chat
+prompts with the same three choices, and the web UI shows a *privacy guard*
+dialog with **Cancel / Use placeholders / Send anyway** (including a preview of
+the placeholder text). To redact **automatically without asking**, set
+`[guard] mode = "redact"` in `config.toml` (use `"block"` to refuse outright).
+
 ### `context` — "why is this in context?"
 
 ```bash
@@ -491,13 +511,19 @@ enclave serve            # binds 127.0.0.1:7878
 enclave serve -p 9000    # custom port
 ```
 
-Enclave prints a one-off URL with a random **per-run token**:
+Enclave prints a short URL and **opens it in your browser automatically**
+(pass `--no-open` to skip that):
 
 ```text
-Enclave web UI (local only) → http://127.0.0.1:7878/?token=<token>
-Loopback bind, per-run token, embedded assets. Nothing leaves this machine.
-Press Ctrl-C to stop.
+  enclave web ui · local only
+  ▸ http://127.0.0.1:7878/?token=a1b2c3d4e5f60718
+
+  short token, stable across launches (stored in web.token, mode 0600)
+  loopback bind · nothing leaves this machine · Ctrl-C to stop
 ```
+
+The token is generated once and kept in `web.token` (mode `0600`) inside the
+config directory, so the URL stays the same across launches.
 
 ### What it offers
 
@@ -555,8 +581,9 @@ Press Ctrl-C to stop.
 ### Security model
 
 - The server binds **only** to `127.0.0.1`; there is no remote listener.
-- Every request is authenticated with the **per-run random token** (16 random
-  bytes, hex-encoded) generated at startup — the token changes each run.
+- Every request is authenticated with a random token, generated once and stored
+  in `web.token` (mode `0600`) in the config directory, so the URL is stable
+  across launches. Delete the file to rotate it.
 - All assets are embedded in the binary; no external requests are made.
 
 ---

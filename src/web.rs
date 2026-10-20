@@ -40,14 +40,57 @@ fn agent_on(state: &AppState) -> bool {
     state.agent.load(Ordering::Relaxed)
 }
 
+/// The access token for the local web UI.
+///
+/// It is generated once and stored in `<config>/web.token` (mode 0600) so the URL
+/// stays the same across launches instead of changing every time. Falls back to a
+/// fresh random token when the config directory is not writable.
+fn persistent_token() -> String {
+    let dir = crate::config::Paths::resolve().ok().map(|p| p.config_dir);
+    if let Some(dir) = dir {
+        let path = dir.join("web.token");
+        if let Ok(existing) = std::fs::read_to_string(&path) {
+            let t = existing.trim().to_string();
+            if t.len() >= 8 && t.chars().all(|c| c.is_ascii_alphanumeric()) {
+                return t;
+            }
+        }
+        let token = hex::encode(crate::privacy::crypto::random_bytes(8));
+        let _ = std::fs::create_dir_all(&dir);
+        if std::fs::write(&path, &token).is_ok() {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+            }
+            return token;
+        }
+    }
+    hex::encode(crate::privacy::crypto::random_bytes(16))
+}
+
+/// Open the URL in the user's browser, best effort (no-op if the opener is missing).
+fn open_browser(url: &str) {
+    #[cfg(target_os = "macos")]
+    let opener = "open";
+    #[cfg(not(target_os = "macos"))]
+    let opener = "xdg-open";
+    let _ = std::process::Command::new(opener)
+        .arg(url)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+}
+
 /// Serve the local web UI until interrupted. Binds loopback only.
 pub async fn serve(
     engine: ChatEngine,
     tools: ToolsSettings,
     guard: GuardSettings,
     port: u16,
+    open: bool,
 ) -> Result<()> {
-    let token = hex::encode(crate::privacy::crypto::random_bytes(16));
+    let token = persistent_token();
     let guard_label = guard_label(&guard);
     let state = AppState {
         engine: Arc::new(tokio::sync::Mutex::new(engine)),
@@ -91,6 +134,10 @@ pub async fn serve(
         .route("/api/decisions/delete", post(api_decision_delete))
         .route("/api/exposure", get(api_exposure))
         .route("/api/context", get(api_context))
+        .route("/api/credits", get(api_credits))
+        .route("/api/commands", get(api_commands))
+        .route("/api/repomap", get(api_repomap))
+        .route("/api/skill", get(api_skill))
         .route("/api/ledger", get(api_ledger))
         .route("/api/checkpoints", get(api_checkpoints))
         .route("/api/worktree", post(api_worktree))
@@ -107,9 +154,17 @@ pub async fn serve(
         .await
         .map_err(|e| EnclaveError::other(format!("cannot bind {addr}: {e}")))?;
 
-    println!("Enclave web UI (local only) → http://127.0.0.1:{port}/?token={token}");
-    println!("Loopback bind, per-run token, embedded assets. Nothing leaves this machine.");
-    println!("Press Ctrl-C to stop.");
+    let url = format!("http://127.0.0.1:{port}/?token={token}");
+    println!();
+    println!("  enclave web ui · local only");
+    println!("  ▸ {url}");
+    println!();
+    println!("  short token, stable across launches (stored in web.token, mode 0600)");
+    println!("  loopback bind · nothing leaves this machine · Ctrl-C to stop");
+    println!();
+    if open {
+        open_browser(&url);
+    }
 
     axum::serve(listener, app)
         .await
@@ -745,6 +800,9 @@ async fn api_send(
 
     let stream = {
         let mut engine = state.engine.lock().await;
+        if body["redact"].as_bool().unwrap_or(false) {
+            engine.redactor = Some(crate::privacy::guard::Redactor::new());
+        }
         match engine.stream_reply_with(&text, attachments).await {
             Ok(s) => s,
             Err(e) => {
@@ -939,6 +997,9 @@ async fn api_agent_start(
             .into_response();
     }
     let mut engine = state.engine.lock().await;
+    if body["redact"].as_bool().unwrap_or(false) {
+        engine.redactor = Some(crate::privacy::guard::Redactor::new());
+    }
     if let Err(e) = engine.begin_agentic_with(&text, attachments_from(&body)) {
         return (
             StatusCode::BAD_REQUEST,
@@ -1344,11 +1405,15 @@ async fn api_scan(
     }
     let text = body["text"].as_str().unwrap_or("");
     let findings = crate::privacy::guard::scan(text);
+    let mut redactor = crate::privacy::guard::Redactor::new();
+    let redacted = redactor.apply(text);
     Json(json!({
         "findings": findings.iter().map(|f| json!({
             "kind": f.kind.label(),
             "text": f.text,
         })).collect::<Vec<_>>(),
+        "summary": redactor.summary(),
+        "redacted": redacted,
     }))
     .into_response()
 }
@@ -1814,6 +1879,112 @@ async fn api_verify(
     }
 }
 
+async fn api_credits(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    if !authorized(&state, &headers, &q) {
+        return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+    }
+    let provider = {
+        let engine = state.engine.lock().await;
+        engine.provider_name().to_string()
+    };
+    if provider != "openrouter" {
+        return Json(json!({ "error": format!("credits are only available for OpenRouter (current provider: {provider})") }))
+            .into_response();
+    }
+    let key = match crate::privacy::SecureCredentials::local_api_key("openrouter") {
+        Some(k) => k,
+        None => {
+            return Json(json!({ "error": "no OpenRouter key in env or keys.toml — run: enclave keys set openrouter" }))
+                .into_response()
+        }
+    };
+    match crate::providers::openrouter::OpenRouterAccount::fetch(&key).await {
+        Ok(acc) => {
+            Json(json!({ "summary": acc.summary(), "report": acc.report() })).into_response()
+        }
+        Err(e) => Json(json!({ "error": e.to_string() })).into_response(),
+    }
+}
+
+async fn api_commands(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    if !authorized(&state, &headers, &q) {
+        return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+    }
+    let workspace = {
+        let engine = state.engine.lock().await;
+        engine.workspace.clone()
+    };
+    let config_dir = crate::config::Paths::resolve()
+        .map(|p| p.config_dir)
+        .unwrap_or_default();
+    let cmds = crate::core::commands::load_all(&workspace, &config_dir);
+    Json(json!({
+        "commands": cmds.iter().map(|c| json!({
+            "name": c.name,
+            "description": c.description,
+        })).collect::<Vec<_>>(),
+        "dir": crate::core::commands::project_dir(&workspace).display().to_string(),
+    }))
+    .into_response()
+}
+
+async fn api_repomap(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    if !authorized(&state, &headers, &q) {
+        return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+    }
+    let engine = state.engine.lock().await;
+    let map = match &engine.repo_map {
+        Some(text) => crate::core::repomap::RepoMap {
+            text: text.clone(),
+            files: 0,
+            truncated: false,
+        },
+        None => crate::core::repomap::build(&engine.workspace, 300, 40_000),
+    };
+    Json(json!({ "text": map.text, "files": map.files })).into_response()
+}
+
+async fn api_skill(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    if !authorized(&state, &headers, &q) {
+        return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+    }
+    let name = q.get("name").cloned().unwrap_or_default();
+    let engine = state.engine.lock().await;
+    let Some(reg) = &engine.skills else {
+        return Json(
+            json!({ "error": "no skills installed — add .enclave/skills/<name>/SKILL.md" }),
+        )
+        .into_response();
+    };
+    if name.trim().is_empty() {
+        return Json(json!({
+            "skills": reg.entries().iter().map(|(n, d)| json!({ "name": n, "description": d })).collect::<Vec<_>>()
+        }))
+        .into_response();
+    }
+    match reg.get(name.trim()) {
+        Some(sk) => Json(json!({ "name": sk.name, "body": sk.expand() })).into_response(),
+        None => Json(json!({ "error": format!("unknown skill '{name}' — available: {}", reg.names().join(", ")) }))
+            .into_response(),
+    }
+}
+
 async fn api_rag(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1980,7 +2151,7 @@ async fn api_shell(
     }
 }
 
-const INDEX_HTML: &str = r#"
+const INDEX_HTML: &str = r##"
 <!doctype html>
 <html lang="en">
 <head>
@@ -2012,7 +2183,9 @@ const INDEX_HTML: &str = r#"
 
   header.bar{flex:0 0 auto;display:flex;align-items:center;justify-content:space-between;
              padding:7px 14px;background:var(--surface);border-bottom:1px solid var(--line);}
-  header .brand{display:flex;align-items:baseline;gap:8px;}
+  header .brand{display:flex;align-items:center;gap:8px;white-space:nowrap;flex:0 0 auto;}
+  header .brand svg.mark{height:21px;width:auto;display:block;margin-right:1px;}
+  .welcome .mark{height:38px;width:auto;display:block;margin:2px 0 10px;}
   header .brand .d{color:var(--accent);}
   header .brand b{color:var(--text);font-weight:700;}
   header .meta{color:var(--dim);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:62%;}
@@ -2248,7 +2421,7 @@ const INDEX_HTML: &str = r#"
 </head>
 <body data-theme="default">
 <header class="bar">
-  <div class="brand"><span class="d">◆</span><b>enclave</b><span class="dimtxt"> · web</span>
+  <div class="brand"><svg id="brandMark" class="mark" viewBox="96 62 320 396" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Enclave"><defs><linearGradient id="mkAccent" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#c4b5fd"/><stop offset="0.55" stop-color="#a78bfa"/><stop offset="1" stop-color="#6d28d9"/></linearGradient></defs><path d="M256 74 L410 142 V274 C410 358 338 418 256 446 C174 418 102 358 102 274 V142 Z" fill="url(#mkAccent)"/><path d="M256 114 L374 163 V274 C374 335 320 382 256 406 C192 382 138 335 138 274 V163 Z" fill="#14151b"/><circle cx="256" cy="234" r="74" fill="none" stroke="url(#mkAccent)" stroke-width="8" opacity="0.9"/><circle cx="256" cy="220" r="27" fill="url(#mkAccent)"/><path d="M247 236 h18 l6 55 a15 15 0 0 1 -30 0 z" fill="url(#mkAccent)"/></svg><b>enclave</b><span class="dimtxt"> · web</span>
     <button class="hbtn" id="tgSide" title="toggle sessions panel (Alt-S)">☰</button>
     <button class="hbtn" id="tgInfo" title="toggle info panel (Alt-I)">▤</button>
   </div>
@@ -2338,10 +2511,15 @@ const PALETTE_COMMANDS = [
   ["/route","toggle routing of sensitive turns"],["/remember","save a fact to memory"],
   ["/memory","list / search memories"],["/forget","delete a memory"],["/checkpoint","summarise into memory"],
   ["/decide","record a decision with rationale"],["/decisions","list / search decisions"],["/exposure","privacy blast-radius + score"],["/traffic","what left the machine + what was intercepted"],["/verify","run the project's tests/lint locally"],["/context","explain what is sent this turn"],
-  ["/panic","lock now"],["/quit","close the web UI"]
+  ["/skills","list local Agent Skills (SKILL.md)"],["/skill","load a skill by name"],["/repomap","files → symbols map of the workspace"],
+  ["/worktree","git worktrees (list / new / remove)"],["/credits","OpenRouter credits / usage / limits"],["/commands","list custom .md commands"],
+  ["/attach","attach a file by path (or the 📎 button)"],["/detach","drop all pending attachments"],
+  ["/copy","copy the last reply (or the last N) to the clipboard"],["/save","download this conversation as Markdown"],
+  ["/palette","open the command palette"],["/shortcuts","show the shortcuts overlay"],
+  ["/quit","close the web UI"]
 ];
 const THEMES=["default","nord","gruvbox","solarized","mono"];
-const SLASH_REAL = new Set(['/help','/new','/switch','/theme','/themes','/model','/models','/effort','/connect','/provider','/providers','/plan','/build','/agent','/airgap','/route','/clear','/branch','/checkout','/graph','/tree','/log','/diff','/palette','/sessions','/resume','/continue','/quit','/find','/search','/search-all','/shortcuts','/keys','/ledger','/egress','/provenance','/traffic','/sent','/verify','/rag','/skills','/skill','/worktree','/worktrees','/repomap','/merge','/snapshots','/ckpt','/snapshot','/rewind','/init','/mcp','/blame','/details','/thinking','/memory','/memories','/remember','/forget','/checkpoint','/decide','/decisions','/exposure','/context','/export','/undo','/redo','/retry','/compact','/summarize']);
+const SLASH_REAL = new Set(['/help','/new','/switch','/theme','/themes','/model','/models','/effort','/connect','/provider','/providers','/plan','/build','/agent','/airgap','/air-gap','/route','/routing','/clear','/branch','/checkout','/graph','/tree','/log','/diff','/palette','/sessions','/resume','/continue','/quit','/exit','/q','/find','/search','/search-all','/shortcuts','/keys','/ledger','/egress','/provenance','/traffic','/sent','/verify','/rag','/skills','/skill','/repomap','/credits','/usage','/commands','/attach','/file','/detach','/copy','/save','/worktree','/worktrees','/merge','/snapshots','/ckpt','/snapshot','/save-point','/rewind','/undo-edit','/init','/mcp','/blame','/details','/thinking','/memory','/memories','/remember','/forget','/checkpoint','/decide','/decisions','/exposure','/blast-radius','/context','/export','/undo','/redo','/retry','/compact','/summarize']);
 
 // ---------- small utils ----------
 function fmtBytes(n){ n=+n||0; if(n>=1048576) return (n/1048576).toFixed(1)+' MB'; if(n>=1024) return (n/1024).toFixed(1)+' KB'; return n+' B'; }
@@ -2570,11 +2748,15 @@ function cardEl(m){
   }
   return c;
 }
+function brandMark(){
+  const el=$('brandMark'); if(!el) return '';
+  return el.outerHTML.replace('id="brandMark"','').replace(/mkAccent/g,'mkAccentW');
+}
 function welcomeEl(){
   const tools=STATE&&STATE.tools;
   const rows=PALETTE_COMMANDS.slice(0,14).map(([k,d])=>'<div class="row"><span class="k">'+k+'</span><span class="d">'+esc(d)+'</span></div>').join('');
   const el=document.createElement('div'); el.className='card welcome';
-  el.innerHTML='<h1>◆ ENCLAVE</h1><div class="sub">privacy-first AI · encrypted memory · zero telemetry</div>'+
+  el.innerHTML=brandMark()+'<h1>ENCLAVE</h1><div class="sub">privacy-first AI · encrypted memory · zero telemetry</div>'+
     '<div class="sub">privacy guard: sensitive data is detected before sending — /airgap keeps everything local.</div>'+
     '<h3>commands</h3>'+rows+
     '<h3>keys</h3>'+
@@ -2622,12 +2804,12 @@ function toolCard(out){
 function notify(msg){ try{ if(('Notification' in window)&&Notification.permission==='granted'){ new Notification('Enclave',{body:msg}); } }catch(e){} }
 function askNotifyPermission(){ try{ if(('Notification' in window)&&Notification.permission==='default'){ Notification.requestPermission(); } }catch(e){} }
 
-async function sendAgent(text,atts){
+async function sendAgent(text,atts,redact){
   const chat=$('chat'); if(chat.querySelector('.welcome')) clearChat();
   chat.appendChild(cardEl({role:'user',content:userText(text,atts)})); scrollChat();
   STREAMING=true; $('inp').disabled=true; statusSet('agent working…');
   window.__agentSteps=0;
-  try{ const r=await api('/api/agent/start',{text,attachments:atts||[]}); applyAgent(r); }
+  try{ const r=await api('/api/agent/start',{text,attachments:atts||[],redact:!!redact}); applyAgent(r); }
   catch(e){ statusSet('error: '+e.message,'error'); toast(e.message,'error'); }
   STREAMING=false; $('inp').disabled=false; $('inp').focus();
 }
@@ -2698,17 +2880,37 @@ async function resolveAt(text){
 function userText(text,atts){ return text; }
 async function guardCheck(text){
   try{
-    if(!STATE||STATE.guard==='off') return true;
+    if(!STATE||STATE.guard==='off') return 'send';
     const r=await api('/api/scan',{text});
     const f=r.findings||[];
-    if(!f.length) return true;
+    if(!f.length) return 'send';
+    if(STATE.guard==='on(auto)'){ toast('sensitive data — placeholders applied','ok'); return 'redact'; }
+    if(STATE.guard==='on(block)'){ toast('blocked by the privacy guard','error'); return null; }
     const list=f.slice(0,8).map(x=>'  · '+x.kind+'  '+x.text).join('\n');
-    const mode=STATE.guard;
     const msg=f.length+' sensitive item(s) detected before sending:\n'+list+
       (f.length>8?('\n  … and '+(f.length-8)+' more'):'')+
-      '\n\nguard mode: '+mode+(mode==='on(auto)'?' — placeholders are applied automatically':'');
-    return await askModal('privacy guard',msg,mode==='on(block)'?'Send anyway?':'Send anyway');
-  }catch(e){ return true; }
+      '\n\nwith placeholders it would be sent as:\n  '+
+      String(r.redacted||text).slice(0,400).replace(/\n/g,'\n  ');
+    return await guardModal(msg);
+  }catch(e){ return 'send'; }
+}
+function guardModal(msg){
+  return new Promise(res=>{
+    closeModal(); const host=$('overlays');
+    const wrap=document.createElement('div'); wrap.className='overlay'; wrap.style.paddingTop='6vh';
+    const box=document.createElement('div'); box.className='modal';
+    box.innerHTML='<div class="title">privacy guard</div><div style="color:var(--text);font-size:13px;white-space:pre-wrap;max-height:52vh;overflow:auto">'+esc(msg)+'</div>';
+    const btns=document.createElement('div'); btns.className='mbtns';
+    const cancel=document.createElement('button'); cancel.className='btn'; cancel.textContent='Cancel';
+    const ph=document.createElement('button'); ph.className='btn'; ph.textContent='Use placeholders';
+    const send=document.createElement('button'); send.className='btn primary'; send.textContent='Send anyway';
+    btns.append(cancel,ph,send); box.appendChild(btns); wrap.appendChild(box); host.appendChild(wrap);
+    const done=v=>{ closeModal(); res(v); };
+    MODAL={close:()=>done(null)};
+    cancel.onclick=()=>done(null); ph.onclick=()=>done('redact'); send.onclick=()=>done('send');
+    wrap.onclick=e=>{ if(e.target===wrap) done(null); };
+    ph.focus();
+  });
 }
 
 // ---------- pickers / views ----------
@@ -2846,6 +3048,49 @@ async function openSkills(){
     filter:true,
     hint:'the model loads a skill on demand with the `skill` tool · Esc close'
   });
+}
+async function openSkill(name){
+  const q='?name='+encodeURIComponent(name||'');
+  const d=await (await fetch('/api/skill'+q,{headers:H})).json();
+  if(d.error){ toast(d.error,'error'); return; }
+  if(d.body){
+    const c=cardEl({role:'system',content:d.body});
+    $('chat').appendChild(c); scrollChat(); toast('skill '+d.name+' loaded','ok'); return;
+  }
+  const rows=(d.skills||[]).map(s=>({k:s.name,d:s.description||''}));
+  openOverlay({ title:'skills · '+rows.length,
+    rows: rows.length?rows:[{k:'no skills installed',d:'add .enclave/skills/<name>/SKILL.md'}],
+    filter:true, hint:'Enter loads the skill here · Esc close' });
+}
+async function openRepomap(){
+  const d=await (await fetch('/api/repomap',{headers:H})).json();
+  if(d.error){ toast(d.error,'error'); return; }
+  const c=cardEl({role:'system',content:'repository map'+(d.files?(' · '+d.files+' file(s)'):'')+'\n\n'+(d.text||'no symbols found in the workspace')});
+  $('chat').appendChild(c); scrollChat(); toast('repo map','ok');
+}
+async function openCredits(){
+  const d=await (await fetch('/api/credits',{headers:H})).json();
+  if(d.error){ toast(d.error,'error'); return; }
+  const c=cardEl({role:'system',content:d.report||d.summary||'no account data'});
+  $('chat').appendChild(c); scrollChat(); toast(d.summary||'credits','ok');
+}
+async function openCommands(){
+  const d=await (await fetch('/api/commands',{headers:H})).json();
+  const cmds=d.commands||[];
+  const rows=cmds.map(c=>({k:'/'+c.name,d:c.description||''}));
+  openOverlay({ title:'custom commands · '+cmds.length,
+    rows: rows.length?rows:[{k:'no custom commands',d:'add '+((d.dir||'.enclave/commands')+'/<name>.md')}],
+    filter:true,
+    hint:'type /<name> <args> in the composer to expand one · Esc close' });
+}
+async function attachPath(path){
+  try{
+    const d=await (await fetch('/api/file?path='+encodeURIComponent(path),{headers:H})).json();
+    if(d.error){ toast(d.error,'error'); return; }
+    const name=path.split('/').pop()||path;
+    ATT.push({kind:'text',name,mime:'text/plain',data:d.content||''});
+    renderAtt(); toast('attached '+name,'ok');
+  }catch(e){ toast('could not attach '+path,'error'); }
 }
 async function openWorktree(){
   const d=await api('/api/worktree',{op:'list'});
@@ -3285,7 +3530,7 @@ async function updatePop(){
 
 // ---------- streaming send ----------
 let ABORT=null;
-async function sendText(text,atts){
+async function sendText(text,atts,redact){
   if(!text||STREAMING) return;
   const inp=$('inp');
   const chat=$('chat');
@@ -3300,7 +3545,7 @@ async function sendText(text,atts){
   let acc='';
   try{
     ABORT=new AbortController();
-    const r=await fetch('/api/send',{method:'POST',headers:HJSON,body:JSON.stringify({text,attachments:atts||[]}),signal:ABORT.signal});
+    const r=await fetch('/api/send',{method:'POST',headers:HJSON,body:JSON.stringify({text,attachments:atts||[],redact:!!redact}),signal:ABORT.signal});
     if(!r.ok||!r.body){ const e=await r.json().catch(()=>({error:'send failed'})); throw new Error(e.error||r.statusText); }
     const reader=r.body.getReader(); const dec=new TextDecoder(); let buf='';
     for(;;){
@@ -3338,8 +3583,8 @@ async function runSlash(text){
     case 'plan': await api('/api/toggle',{plan:true}); await loadState(); toast('plan mode — read-only'); break;
     case 'build': await api('/api/toggle',{plan:false}); await loadState(); toast('build mode'); break;
     case 'agent': { const on=!STATE.agent; await api('/api/toggle',{agent:on}); await loadState(); toast('agent mode '+(on?'ON':'OFF')); break; }
-    case 'airgap': { const on=!STATE.air_gap; await api('/api/toggle',{air_gap:on}); await loadState(); toast('air-gap '+(on?'ON':'OFF')); break; }
-    case 'route': { const on=!STATE.route_sensitive; await api('/api/toggle',{route_sensitive:on}); await loadState(); toast('sensitive routing '+(on?'ON':'OFF')); break; }
+    case 'airgap': case 'air-gap': { const on=!STATE.air_gap; await api('/api/toggle',{air_gap:on}); await loadState(); toast('air-gap '+(on?'ON':'OFF')); break; }
+    case 'route': case 'routing': { const on=!STATE.route_sensitive; await api('/api/toggle',{route_sensitive:on}); await loadState(); toast('sensitive routing '+(on?'ON':'OFF')); break; }
     case 'clear': { const chat=$('chat'); clearChat(); chat.appendChild(welcomeEl()); ensureComposer(); ACTIVE_MESSAGES=[]; renderInfo(); toast('view cleared'); break; }
     case 'branch': {
       const toks=String(arg||'').trim().split(/\s+/).filter(Boolean);
@@ -3360,10 +3605,25 @@ async function runSlash(text){
     case 'traffic': case 'sent': openTraffic(); break;
     case 'verify': runVerify(); break;
     case 'snapshots': case 'ckpt': openCkpt(); break;
-    case 'snapshot': saveCkpt(arg); break;
-    case 'rewind': if(arg) restoreCkpt(arg.split(/\s+/)[0]); else openCkpt(); break;
+    case 'snapshot': case 'save-point': saveCkpt(arg); break;
+    case 'rewind': case 'undo-edit': if(arg) restoreCkpt(arg.split(/\s+/)[0]); else openCkpt(); break;
     case 'rag': openRag(arg); break;
   case 'skills': openSkills(); break;
+  case 'skill': openSkill(arg); break;
+  case 'repomap': openRepomap(); break;
+  case 'credits': case 'usage': openCredits(); break;
+  case 'commands': openCommands(); break;
+  case 'attach': case 'file': if(arg && arg.trim()) attachPath(arg.trim()); else $('clip').click(); break;
+  case 'detach': ATT.splice(0,ATT.length); renderAtt(); toast('attachments cleared'); break;
+  case 'copy': {
+    const n=Math.max(1,parseInt(arg,10)||1);
+    const msgs=(ACTIVE_MESSAGES||[]).filter(m=>m.role==='assistant'&&m.content);
+    const picked=msgs.slice(-n).map(m=>m.content).join('\n\n');
+    if(!picked){ toast('nothing to copy','error'); break; }
+    navigator.clipboard.writeText(picked).then(()=>toast('copied '+Math.min(n,msgs.length)+' reply(ies)','ok'),()=>toast('copy failed','error'));
+    break;
+  }
+  case 'save': doExport('md'); break;
   case 'worktree': case 'worktrees':
     if(arg && arg.trim()){
       const parts=arg.trim().split(/\s+/);
@@ -3399,7 +3659,7 @@ async function runSlash(text){
     case 'find': openFind(); break;
     case 'search': case 'search-all': openSearch(); break;
     case 'shortcuts': case 'keys': openShortcuts(); break;
-    case 'quit': toast('close the tab to quit'); break;
+    case 'quit': case 'exit': case 'q': toast('close the tab to quit'); break;
   }
 }
 
@@ -3465,8 +3725,11 @@ async function submitInput(){
   if(v.startsWith('!')){ await runShell(v.slice(1).trim()); return; }
   const text=await resolveAt(v);
   const atts=ATT.splice(0,ATT.length); renderAtt();
-  if(!(await guardCheck(text))) return;
-  if(STATE&&STATE.agent) await sendAgent(text,atts); else await sendText(text,atts);
+  const g=await guardCheck(text);
+  if(!g) return;
+  const redact=(g==='redact');
+  if(redact) toast('sending with placeholders','ok');
+  if(STATE&&STATE.agent) await sendAgent(text,atts,redact); else await sendText(text,atts,redact);
 }
 { const sb=$('sendBtn'); if(sb) sb.onclick=()=>submitInput(); }
 document.addEventListener('keydown',e=>{
@@ -3497,8 +3760,20 @@ function setTheme(t){ document.body.dataset.theme=t; localStorage.setItem('encla
 setTheme(localStorage.getItem('enclave-theme')||'default');
 function syncPanelBtns(){ $('tgSide').classList.toggle('off', !panelVisible('aside.side')); $('tgInfo').classList.toggle('off', !panelVisible('aside.info')); }
 window.addEventListener('resize', syncPanelBtns);
-(async()=>{ await loadState(); if(STATE){ await openCurrent(); } ensureComposer(); syncPanelBtns(); statusSet('ready'); })();
+function setFavicon(){
+  try{
+    const el=$('brandMark'); if(!el) return;
+    const svg=el.outerHTML.replace('class="mark"','width="64" height="80"');
+    const href='data:image/svg+xml;base64,'+btoa(unescape(encodeURIComponent(svg)));
+    let l=document.querySelector('link[rel="icon"]');
+    if(!l){ l=document.createElement('link'); l.rel='icon'; document.head.appendChild(l); }
+    l.type='image/svg+xml'; l.href=href;
+  }catch(e){}
+}
+setFavicon();
+(async()=>{ await loadState(); if(STATE){ await openCurrent(); } ensureComposer(); syncPanelBtns(); statusSet('ready');
+})();
 </script>
 </body>
 </html>
-"#;
+"##;

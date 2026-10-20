@@ -34,7 +34,7 @@ pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
 libc = "0.2"
 sha2 = "0.10"
 hmac = "0.12"
-rand = "0.8"
+rand = "0.10"
 aes-gcm = "0.10"
 zeroize = { version = "1", features = ["derive"] }
 hex = "0.4"

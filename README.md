@@ -72,6 +72,7 @@ enclave tui --provider ollama
 | [SECURITY.md](SECURITY.md) | How to report a vulnerability |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Development setup and PR workflow |
 | [CHANGELOG.md](CHANGELOG.md) | Release history |
+| [docs/release-notes-v0.1.0.md](docs/release-notes-v0.1.0.md) | v0.1.0 release notes (also used for the GitHub Release) |
 
 ## Why
 

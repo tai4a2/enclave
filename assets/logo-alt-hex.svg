@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-label="Enclave">
+  <defs>
+    <linearGradient id="b-bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#181a22"/><stop offset="1" stop-color="#0c0d11"/>
+    </linearGradient>
+    <linearGradient id="b-ac" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#c4b5fd"/><stop offset=".55" stop-color="#a78bfa"/><stop offset="1" stop-color="#6d28d9"/>
+    </linearGradient>
+    <radialGradient id="b-glow" cx="50%" cy="38%" r="62%">
+      <stop offset="0" stop-color="#a78bfa" stop-opacity=".30"/><stop offset="1" stop-color="#a78bfa" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect x="16" y="16" width="480" height="480" rx="112" fill="url(#b-bg)"/>
+  <rect x="16" y="16" width="480" height="480" rx="112" fill="none" stroke="#2b2d36" stroke-width="3"/>
+  <circle cx="256" cy="240" r="196" fill="url(#b-glow)"/>
+
+  <path d="M256 70 L404 156 V328 L256 414 L108 328 V156 Z" fill="#14151b" stroke="url(#b-ac)" stroke-width="11" stroke-linejoin="round"/>
+
+  <path d="M198 198 L292 262 L198 326" fill="none" stroke="url(#b-ac)" stroke-width="28" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="312" y="300" width="62" height="26" rx="7" fill="url(#b-ac)"/>
+</svg>

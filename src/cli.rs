@@ -158,6 +158,15 @@ pub enum Command {
         #[arg(long)]
         session: Option<String>,
     },
+    /// Check text (or a file) for sensitive data — offline, no provider, no vault.
+    Guard {
+        /// Text to scan (all words are joined with spaces).
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        text: Vec<String>,
+        /// Scan a file instead of literal text.
+        #[arg(long, value_name = "PATH")]
+        file: Option<String>,
+    },
     /// Workspace checkpoints: snapshot the working directory and rewind edits.
     Checkpoint {
         #[command(subcommand)]
@@ -195,6 +204,9 @@ pub enum Command {
         /// Port to bind on 127.0.0.1.
         #[arg(short, long, default_value = "7878")]
         port: u16,
+        /// Do not open the browser automatically.
+        #[arg(long)]
+        no_open: bool,
     },
     /// Securely delete the encrypted database, salt and stored keys.
     Wipe {
@@ -514,6 +526,7 @@ pub fn run(cli: Cli) -> Result<()> {
         }
         Command::Exposure { session } => exposure_cmd(&paths, &settings, session),
         Command::Context { session } => context_cmd(&paths, &settings, session),
+        Command::Guard { text, file } => guard_cmd(text, file),
         Command::Ledger {
             verify,
             limit,
@@ -540,7 +553,7 @@ pub fn run(cli: Cli) -> Result<()> {
             print_config(&paths, &settings);
             Ok(())
         }
-        Command::Serve { port } => {
+        Command::Serve { port, no_open } => {
             let mut engine = build_engine(
                 &paths, &settings, None, None, None, false, None, false, false,
             )?;
@@ -554,7 +567,7 @@ pub fn run(cli: Cli) -> Result<()> {
                 guard.enabled && settings.routing.sensitive == crate::config::RoutingMode::Local;
             let runtime = tokio::runtime::Runtime::new()
                 .map_err(|e| EnclaveError::other(format!("runtime: {e}")))?;
-            runtime.block_on(crate::web::serve(engine, tools, guard, port))
+            runtime.block_on(crate::web::serve(engine, tools, guard, port, !no_open))
         }
         Command::Wipe { force } => wipe_cmd(&paths, force),
         Command::Chat {
@@ -1803,6 +1816,39 @@ fn human_bytes(n: u64) -> String {
     } else {
         format!("{n} B")
     }
+}
+
+/// Scan text (or a file) for sensitive data, offline, and show the placeholder form.
+fn guard_cmd(text: Vec<String>, file: Option<String>) -> Result<()> {
+    let input = match file {
+        Some(path) => std::fs::read_to_string(&path)
+            .map_err(|e| EnclaveError::other(format!("cannot read {path}: {e}")))?,
+        None if !text.is_empty() => text.join(" "),
+        None => {
+            return Err(EnclaveError::other(
+                "nothing to scan — pass some text or --file <path>",
+            ))
+        }
+    };
+    let findings = crate::privacy::guard::scan(&input);
+    if findings.is_empty() {
+        println!("no sensitive data detected — this text would be sent as-is");
+        return Ok(());
+    }
+    println!("privacy guard: {} finding(s)\n", findings.len());
+    for f in &findings {
+        println!("  {:<12} {}", f.kind.label(), f.text);
+    }
+    let mut redactor = crate::privacy::guard::Redactor::new();
+    let redacted = redactor.apply(&input);
+    println!("\nsummary: {}", redactor.summary());
+    println!("\nwith placeholders:\n  {}", redacted.replace('\n', "\n  "));
+    println!(
+        "\nIn the TUI the guard panel opens before sending: press [p] for placeholders, \
+         [s] to send as-is, [r] to refuse.\nTo redact automatically every time, set \
+         [guard] mode = \"redact\" in config.toml."
+    );
+    Ok(())
 }
 
 /// Show the privacy blast-radius and a posture score.

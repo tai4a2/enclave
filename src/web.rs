@@ -71,15 +71,42 @@ fn persistent_token() -> String {
 
 /// Open the URL in the user's browser, best effort (no-op if the opener is missing).
 fn open_browser(url: &str) {
-    #[cfg(target_os = "macos")]
-    let opener = "open";
-    #[cfg(not(target_os = "macos"))]
-    let opener = "xdg-open";
-    let _ = std::process::Command::new(opener)
-        .arg(url)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn();
+    // Best effort: on a headless server (no graphical session) none of these
+    // exists and we simply print the URL instead. Order: $BROWSER, then the
+    // platform default opener.
+    if let Ok(browser) = std::env::var("BROWSER") {
+        let mut parts = browser.split_whitespace();
+        if let Some(prog) = parts.next() {
+            let mut cmd = std::process::Command::new(prog);
+            cmd.args(parts)
+                .arg(url)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            if cmd.spawn().is_ok() {
+                return;
+            }
+        }
+    }
+    let candidates: &[(&str, &[&str])] = if cfg!(target_os = "macos") {
+        &[("open", &[] as &[&str])]
+    } else {
+        &[
+            ("xdg-open", &[] as &[&str]),
+            ("gio", &["open"]),
+            ("sensible-browser", &[]),
+            ("x-www-browser", &[]),
+        ]
+    };
+    for (program, args) in candidates {
+        let mut cmd = std::process::Command::new(program);
+        cmd.args(*args)
+            .arg(url)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        if cmd.spawn().is_ok() {
+            return;
+        }
+    }
 }
 
 /// Serve the local web UI until interrupted. Binds loopback only.

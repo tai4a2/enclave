@@ -192,5 +192,5 @@ the main feature, not an afterthought. Zero plaintext at rest, zero telemetry.
 - Added `cargo-audit` (RUSTSEC) and `cargo-deny` to CI, plus a CycloneDX SBOM
   step, for supply-chain visibility.
 
-[Unreleased]: https://github.com/enclave/enclave/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/enclave/enclave/releases/tag/v0.1.0
+[Unreleased]: https://github.com/tai4a2/enclave/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/tai4a2/enclave/releases/tag/v0.1.0

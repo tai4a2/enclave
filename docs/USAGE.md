@@ -525,6 +525,12 @@ Enclave prints a short URL and **opens it in your browser automatically**
 The token is generated once and kept in `web.token` (mode `0600`) inside the
 config directory, so the URL stays the same across launches.
 
+Opening the browser is best effort: it uses `open` on macOS and, on Linux,
+`$BROWSER` if set, then `xdg-open` / `gio open` / `sensible-browser` /
+`x-www-browser`. On a headless machine (server, container, SSH) none of these
+exists, so nothing opens — just copy the printed URL, or use
+`--no-open` and open it yourself.
+
 ### What it offers
 
 - **Loopback only, token-gated** — every request must carry `?token=<token>` or

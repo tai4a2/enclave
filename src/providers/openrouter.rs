@@ -180,7 +180,7 @@ pub async fn fetch_account(api_key: &str) -> Result<OpenRouterAccount> {
     let client = crate::providers::http::client();
     let html_headers = |req: reqwest::RequestBuilder| {
         req.header("Authorization", format!("Bearer {api_key}"))
-            .header("HTTP-Referer", "https://github.com/enclave")
+            .header("HTTP-Referer", "https://github.com/tai4a2/enclave")
             .header("X-Title", "Enclave CLI")
     };
 
@@ -309,7 +309,7 @@ pub fn parse_providers(value: &serde_json::Value) -> Vec<String> {
 
 fn auth(req: reqwest::RequestBuilder, api_key: &str) -> reqwest::RequestBuilder {
     req.header("Authorization", format!("Bearer {api_key}"))
-        .header("HTTP-Referer", "https://github.com/enclave")
+        .header("HTTP-Referer", "https://github.com/tai4a2/enclave")
         .header("X-Title", "Enclave CLI")
 }
 
@@ -471,7 +471,7 @@ impl Provider for OpenRouterProvider {
             .post("https://openrouter.ai/api/v1/chat/completions")
             .header("Authorization", format!("Bearer {}", self.api_key))
             .header("Content-Type", "application/json")
-            .header("HTTP-Referer", "https://github.com/enclave")
+            .header("HTTP-Referer", "https://github.com/tai4a2/enclave")
             .header("X-Title", "Enclave CLI")
             .json(&body)
             .send()
@@ -545,7 +545,7 @@ impl Provider for OpenRouterProvider {
             .post("https://openrouter.ai/api/v1/chat/completions")
             .header("Authorization", format!("Bearer {}", self.api_key))
             .header("Content-Type", "application/json")
-            .header("HTTP-Referer", "https://github.com/enclave")
+            .header("HTTP-Referer", "https://github.com/tai4a2/enclave")
             .header("X-Title", "Enclave CLI")
             .json(&body)
             .send()

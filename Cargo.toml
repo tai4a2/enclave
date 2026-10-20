@@ -50,7 +50,7 @@ regex = "1"
 base64 = "0.22"
 arboard = "3"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
-webpki-roots = "0.26"
+webpki-roots = "1"
 axum = "0.7"
 
 [dev-dependencies]

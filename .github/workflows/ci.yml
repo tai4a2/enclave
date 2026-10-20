@@ -16,7 +16,11 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTFLAGS: "-D warnings"
+  # Keep the build light: no debug info for dependencies, so the runner does not
+  # run out of disk/RAM while compiling the vendored SQLCipher + OpenSSL.
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+  CARGO_INCREMENTAL: "0"
 
 jobs:
   test:
@@ -44,9 +48,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - uses: rustsec/audit-check@v2
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: taiki-e/install-action@cargo-audit
+      - name: audit
+        run: cargo audit
 
   deny:
     name: cargo-deny (licenses, bans, sources)

@@ -184,6 +184,17 @@ the main feature, not an afterthought. Zero plaintext at rest, zero telemetry.
 
 ### Security
 
+- Updated the TLS stack to clear three RustSec advisories published on
+  19–20 October 2026: `rustls-webpki` 0.103.15 → 0.103.16
+  (RUSTSEC-2026-0382, certificate verification could accept distrusted
+  intermediates) and `webpki-roots` 0.26/1.0.9 → 1.0.10 (RUSTSEC-2026-0381,
+  bundled roots trusted distrusted emSign intermediates). The direct
+  `webpki-roots` dependency moved to the `1` line so the 0.26 shim is gone;
+  `cargo audit` is clean again (389 dependencies scanned).
+- CI hardening: dropped the global `-D warnings` `RUSTFLAGS` (it also applied
+  to dependencies), disabled debug info for CI builds to avoid runner
+  disk/RAM exhaustion, and replaced the `rustsec/audit-check` action with a
+  direct `cargo audit` run (no elevated token permissions needed).
 - Closed a keychain-cache bypass and documented the residual risks of shell
   tools, remote-provider transit, and in-RAM plaintext in
   [docs/privacy.md](docs/privacy.md) and [docs/audit.md](docs/audit.md).

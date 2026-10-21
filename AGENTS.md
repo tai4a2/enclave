@@ -77,12 +77,11 @@ banner, tui.png, web.png), `scripts/install.sh`. Tests: 243. Linux CI simulated 
   authored/committed by `tai4a2 <tai4a2@users.noreply.github.com>`.
 - Tag `v0.1.0` now points to `947e51a` (`docs/release-notes-v0.1.0.md` is the notes file) — hash
   INVALIDATED by the anonymisation rewrite (see "Privacy audit" below).
-- **RELEASE v0.1.0 NOT PUBLISHED YET** (GitHub reports 0 releases). NEXT: create it attaching
-  `dist/enclave` (macOS arm64, 15,248,848 B, sha256
-  `f19d9a72a4e2b662bf275e5255e285e67b863b05a2026c82cee4ab2291ecafb7`),
-  `dist/enclave.sha256` and `dist/enclave.cdx.json`, notes from `dist/RELEASE_v0.1.0.md`.
-  Either the user clicks (Releases → New → tag `v0.1.0`), or `gh release create …` with a
-  fine-grained PAT (Contents: RW, repo-only), or I do it with such a PAT.
+- **RELEASE v0.1.0 PUBLISHED** (2026-10-21): <https://github.com/tai4a2/enclave/releases/tag/v0.1.0>
+  — created by the user via the web UI on tag `v0.1.0` (→ `e6981e2`), notes from
+  `docs/release-notes-v0.1.0.md`, with `enclave` (macOS arm64), `enclave.sha256` and
+  `enclave.cdx.json` attached. Repo has 20 topics + clean description (added by the user,
+  2026-10-21); LinkedIn post draft in `docs/linkedin-post.md` (to be posted by the user).
 - CI: `.github/workflows/ci.yml` — jobs `test + clippy` (pinned `dtolnay/rust-toolchain@1.99.0`,
   a `system deps` step installing `libdbus-1-dev` + `pkg-config`, fmt, clippy with
   `continue-on-error` + a `clippy report` step re-emitting diagnostics as annotations, tests),
@@ -99,20 +98,19 @@ banner, tui.png, web.png), `scripts/install.sh`. Tests: 243. Linux CI simulated 
   sandbox and `secure.rs` (mlock) are macOS/unix-only.
 
 ### Pending for the next session (user deferred on 2026-10-20: "lo sistemiamo domani")
-1. **Publish the GitHub Release `v0.1.0`** — tag `v0.1.0` already pushed (resolves to `421be8c`),
-   HEAD `bdd0481`. Attach `dist/enclave` (macOS arm64), `dist/enclave.sha256` and
-   `dist/enclave.cdx.json`, and paste the notes from `dist/RELEASE_v0.1.0.md`
-   (also committed as `docs/release-notes-v0.1.0.md`). There are currently **0 releases**.
-   Browser: <https://github.com/tai4a2/enclave/releases/new>.
+1. **Publish the GitHub Release `v0.1.0`** — DONE (2026-10-21): the user created the release
+   via the web UI on tag `v0.1.0` (→ `e6981e2`) with `enclave`, `enclave.sha256` and
+   `enclave.cdx.json` attached and the notes from `dist/RELEASE_v0.1.0.md`. Verified via the
+   public API (assets present, body intact).
 2. **SECURITY.md contact** — DONE (2026-10-21): the fake `security@example.com` was removed;
    the file now points at GitHub **Private vulnerability reporting** and, as a fallback, at a
    minimal public issue asking the maintainer to get in touch (no details), with PGP-on-request.
 3. `Maintainer: @tai4a2` line — DONE (2026-10-21): added to the README `## License` section.
    `CODE_OF_CONDUCT.md` enforcement contact was also switched from the fake
    `<maintainer@example.com>` to the same private-reporting route.
-   These four doc edits (`AGENTS.md`, `SECURITY.md`, `CODE_OF_CONDUCT.md`, `README.md`) are
-   UNCOMMITTED and, if committed before creating the Release, the `v0.1.0` tag should be moved
-   onto that commit and re-pushed so the release ships the cleaned files.
+   These four doc edits (`AGENTS.md`, `SECURITY.md`, `CODE_OF_CONDUCT.md`, `README.md`) were
+   committed on 2026-10-21 and the `v0.1.0` tag was moved onto that commit (`e6981e2`) and
+   re-pushed, so the release ships the cleaned files.
 
 ## Privacy audit of the repo (2026-10-20, verified + anonymised)
 Checked the working tree AND the full git history (`git log --all -p`, `git rev-list --objects --all`).

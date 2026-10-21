@@ -23,15 +23,14 @@ Preferred channel: use GitHub's **Private vulnerability reporting** /
 vulnerability*). This keeps the report confidential and lets us coordinate a fix
 and a disclosure.
 
-If GitHub private reporting is unavailable, email the maintainer at:
+If GitHub private reporting is unavailable (for example if you are reading a
+mirror of this repository), open a **minimal** public issue asking the
+maintainer to get in touch — without any vulnerability details — and a private
+channel will be arranged.
 
-```text
-<security@example.com>
-```
-
-If you want to send an encrypted report, ask for the maintainer's PGP key in
-your first message (do **not** include exploit details in that first,
-unencrypted email).
+If you want to send an encrypted report, request the maintainer's PGP key in the
+private advisory thread first (do **not** include exploit details in any
+unencrypted message).
 
 > **Never paste secrets, API keys, tokens, private keys, personal data (PII),
 > real conversations, or the contents of your `vault.db` into a public issue.**

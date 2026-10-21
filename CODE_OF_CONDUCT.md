@@ -59,8 +59,9 @@ representative at an online or offline event.
 ## Enforcement
 
 Instances of abusive, harassing, or otherwise unacceptable behavior may be
-reported to the community leaders responsible for enforcement at
-**<maintainer@example.com>**.
+reported privately to the maintainer (**@tai4a2**) through the repository's
+*Security* tab (*Report a vulnerability*), or by opening a minimal issue asking
+the maintainer to get in touch. Reports are handled confidentially.
 
 All complaints will be reviewed and investigated promptly and fairly.
 

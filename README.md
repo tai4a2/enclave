@@ -1163,3 +1163,5 @@ prefers it over the keychain.
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+Maintained by [@tai4a2](https://github.com/tai4a2).

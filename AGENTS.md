@@ -98,6 +98,22 @@ banner, tui.png, web.png), `scripts/install.sh`. Tests: 243. Linux CI simulated 
   hard-wired to `sh -c` (`src/core/tools.rs`), so Windows would need a `cmd /C` branch; the
   sandbox and `secure.rs` (mlock) are macOS/unix-only.
 
+### Pending for the next session (user deferred on 2026-10-20: "lo sistemiamo domani")
+1. **Publish the GitHub Release `v0.1.0`** — tag `v0.1.0` already pushed (resolves to `421be8c`),
+   HEAD `bdd0481`. Attach `dist/enclave` (macOS arm64), `dist/enclave.sha256` and
+   `dist/enclave.cdx.json`, and paste the notes from `dist/RELEASE_v0.1.0.md`
+   (also committed as `docs/release-notes-v0.1.0.md`). There are currently **0 releases**.
+   Browser: <https://github.com/tai4a2/enclave/releases/new>.
+2. **SECURITY.md contact** — DONE (2026-10-21): the fake `security@example.com` was removed;
+   the file now points at GitHub **Private vulnerability reporting** and, as a fallback, at a
+   minimal public issue asking the maintainer to get in touch (no details), with PGP-on-request.
+3. `Maintainer: @tai4a2` line — DONE (2026-10-21): added to the README `## License` section.
+   `CODE_OF_CONDUCT.md` enforcement contact was also switched from the fake
+   `<maintainer@example.com>` to the same private-reporting route.
+   These four doc edits (`AGENTS.md`, `SECURITY.md`, `CODE_OF_CONDUCT.md`, `README.md`) are
+   UNCOMMITTED and, if committed before creating the Release, the `v0.1.0` tag should be moved
+   onto that commit and re-pushed so the release ships the cleaned files.
+
 ## Privacy audit of the repo (2026-10-20, verified + anonymised)
 Checked the working tree AND the full git history (`git log --all -p`, `git rev-list --objects --all`).
 - **CLEAN**: no `vault.db` / `salt.bin` / `keys.toml` / `web.token` / `.env` / private keys
